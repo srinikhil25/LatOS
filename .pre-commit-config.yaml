@@ -1,0 +1,52 @@
+# Pre-commit hooks — run before every commit
+# Install: pre-commit install
+# Run manually on all files: pre-commit run --all-files
+
+repos:
+  # ─── Built-in housekeeping ─────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=5000"]  # 5 MB limit (data files belong elsewhere)
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  # ─── Ruff (linter + formatter) ─────────────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.3.4
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  # ─── MyPy (type checker) ───────────────────────────────────────────
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.9.0
+    hooks:
+      - id: mypy
+        additional_dependencies:
+          - numpy
+          - pydantic
+          - types-tqdm
+        args: [--config-file=pyproject.toml]
+        files: ^src/
+
+  # ─── pytest on staged files (fast subset) ──────────────────────────
+  # Note: full test suite runs in CI, this is a quick smoke check
+  - repo: local
+    hooks:
+      - id: pytest-fast
+        name: pytest (fast tests only)
+        entry: pytest -m "not slow and not integration and not ui"
+        language: system
+        pass_filenames: false
+        always_run: false
+        stages: [pre-push]

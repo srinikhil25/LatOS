@@ -1,0 +1,18 @@
+{
+  "$schema": "./scripts/benchmarks_schema.json",
+  "_comment": "Append-only performance history. New entries go at the END of the entries array.",
+  "entries": [
+    {
+      "date": "2026-04-26",
+      "stage": 0,
+      "stage_name": "Project Setup",
+      "metrics": {
+        "tests_passing": 0,
+        "tests_failing": 0,
+        "test_coverage_pct": null,
+        "lines_of_code": 0
+      },
+      "notes": "Repo initialized. No code yet."
+    }
+  ]
+}
