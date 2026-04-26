@@ -5,7 +5,7 @@ Thanks for your interest in contributing! This document covers what you need to 
 ## Getting Set Up
 
 ```bash
-git clone https://github.com/srinikhil25/latos.git
+git clone https://github.com/srinikhil25/LatOS.git
 cd latos
 python -m venv venv
 # Activate venv (Windows: venv\Scripts\activate, Unix: source venv/bin/activate)
@@ -106,7 +106,7 @@ Types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `perf`, `ci`
 
 ## Reporting Bugs
 
-Use [GitHub Issues](https://github.com/srinikhil25/latos/issues). Include:
+Use [GitHub Issues](https://github.com/srinikhil25/LatOS/issues). Include:
 
 1. Latos version (`latos --version`)
 2. OS + Python version

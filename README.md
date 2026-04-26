@@ -51,7 +51,7 @@ Latos is built to **replace Origin** for daily fitting work and to **enable clos
 ### From source (developers)
 
 ```bash
-git clone https://github.com/srinikhil25/latos.git
+git clone https://github.com/srinikhil25/LatOS.git
 cd latos
 python -m venv venv
 
@@ -101,7 +101,7 @@ See [`CLAUDE.md`](./CLAUDE.md) and [`AGENTS.md`](./AGENTS.md) for detailed devel
 
 ## Roadmap
 
-This project is being built in **8 stages**, each delivering a working improvement. The current platform stays usable throughout. See [Releases](https://github.com/srinikhil25/latos/releases) for milestone tags.
+This project is being built in **8 stages**, each delivering a working improvement. The current platform stays usable throughout. See [Releases](https://github.com/srinikhil25/LatOS/releases) for milestone tags.
 
 ## Citation
 
@@ -112,7 +112,7 @@ If Latos contributes to your research, please cite:
   author = {Srinikhil},
   title = {Latos: An Operating System for Multi-Modal Materials Characterization},
   year = {2026},
-  url = {https://github.com/srinikhil25/latos}
+  url = {https://github.com/srinikhil25/LatOS}
 }
 ```
 

@@ -121,9 +121,9 @@ build = [
 all = ["latos[ml,dev,docs,build]"]
 
 [project.urls]
-Homepage = "https://github.com/srinikhil25/latos"
-Repository = "https://github.com/srinikhil25/latos"
-Issues = "https://github.com/srinikhil25/latos/issues"
+Homepage = "https://github.com/srinikhil25/LatOS"
+Repository = "https://github.com/srinikhil25/LatOS"
+Issues = "https://github.com/srinikhil25/LatOS/issues"
 
 [project.scripts]
 latos = "latos.ui.streamlit_app:main"
