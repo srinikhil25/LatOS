@@ -13,6 +13,25 @@
         "lines_of_code": 0
       },
       "notes": "Repo initialized. No code yet."
+    },
+    {
+      "date": "2026-04-26",
+      "stage": 0,
+      "stage_name": "Project Setup — CI Green",
+      "metrics": {
+        "tests_passing": 3,
+        "tests_failing": 0,
+        "test_coverage_pct": 100,
+        "lines_of_code": 14,
+        "ci_total_duration_sec": 382,
+        "ci_lint_duration_sec": 63,
+        "ci_test_duration_sec_avg": 130,
+        "ci_jobs_passing": 9,
+        "ci_jobs_failing": 0,
+        "platforms_tested": ["ubuntu-latest", "windows-latest", "macos-latest"],
+        "python_versions_tested": ["3.11", "3.12"]
+      },
+      "notes": "CI fully green. 3 smoke tests passing on all 6 matrix combinations. Foundation in place for Stage 1."
     }
   ]
 }
