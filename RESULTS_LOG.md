@@ -130,4 +130,52 @@ First full CI run successful on GitHub Actions: https://github.com/srinikhil25/L
 
 ---
 
+## 2026-04-27 — Stage 1B Complete: Persistence Layer
+
+### Files added
+- `src/latos/persistence/schema.py` — SQLAlchemy 2.0 declarative tables (5 tables: projects, samples, measurements, files, validation_issues) + `UtcDateTime` TypeDecorator that round-trips timezone info correctly on SQLite
+- `src/latos/persistence/db.py` — engine factory, session factory, project DB path resolver, SQLite PRAGMAs (WAL, foreign_keys, busy_timeout, synchronous=NORMAL)
+- `src/latos/persistence/mappers.py` — bidirectional Domain ↔ ORM conversion (the only module bridging the two layers)
+- `src/latos/persistence/repository.py` — `ProjectRepository` (save/load/list/delete) + `ProjectSummary`
+- `src/latos/persistence/__init__.py` — public API surface
+- `migrations/` — Alembic configured with custom `env.py` that uses Latos's metadata
+- `migrations/versions/0001_initial_schema.py` — initial schema migration (stable revision ID)
+- Tests: `tests/unit/persistence/{conftest,test_db,test_mappers,test_repository,test_migrations}.py`
+
+### Storage convention finalized
+```
+<project_root>/.latos/
+├── data.db          # SQLite metadata (one file per project)
+├── arrays/          # Parquet arrays (one file per measurement)
+└── exports/         # Generated reports/figures
+```
+
+### Tests
+- **131 tests, all passing**
+- 83 from previous stages + 48 new persistence tests
+- Coverage on `persistence/`: **97%** (db 100%, mappers 100%, repository 100%, schema 89%)
+- Overall coverage: **95%**
+
+### Quality gates
+- ✅ Ruff lint clean (32 source files)
+- ✅ Ruff format clean
+- ✅ Mypy strict clean
+- ✅ Migration apply + downgrade cycle verified
+
+### Bugs found & fixed (during Stage 1B)
+1. **SQLite drops tzinfo on read** — `DateTime(timezone=True)` returns naive datetimes from SQLite. Fixed with `UtcDateTime` TypeDecorator that re-attaches UTC on load and rejects naive datetimes on save.
+2. **Migration didn't update alembic_version** — `connection.execute(PRAGMA)` in env.py started a transaction before alembic's own, breaking the version write. Fixed by moving PRAGMA to a connection-event listener.
+3. **Windows path test failure** — assertion compared `row.path == "/data/sample.xy"` but `Path("/data/sample.xy")` stringifies as `\data\sample.xy` on Windows. Fixed to compare against `str(ref.path)`.
+
+### Slide-Worthy Achievement (Stage 1B)
+> *"Built the persistence layer — projects now save to a self-contained SQLite database, with versioned schema migrations powered by Alembic. Researchers can close and reopen Latos and pick up exactly where they left off."*
+
+**Wow numbers for slide:**
+- 131 tests passing in 4.4 seconds
+- 95% test coverage across the project
+- 5-table schema with full cascade-delete safety
+- Schema migrations support forward + backward compatibility from day 1
+
+---
+
 <!-- Future entries go below this line -->

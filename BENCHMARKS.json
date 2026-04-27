@@ -52,6 +52,27 @@
         "test_runtime_sec": 1.32
       },
       "notes": "Domain layer complete. Project, Sample, Measurement, FileRef, ValidationIssue all frozen dataclasses with cross-reference validation. 83 tests pass in 1.3s, 95% coverage on core/, mypy strict clean."
+    },
+    {
+      "date": "2026-04-27",
+      "stage": 1,
+      "stage_name": "Stage 1B — Persistence Layer",
+      "metrics": {
+        "tests_passing": 131,
+        "tests_failing": 0,
+        "test_coverage_pct_overall": 95,
+        "test_coverage_persistence_db_pct": 100,
+        "test_coverage_persistence_mappers_pct": 100,
+        "test_coverage_persistence_repository_pct": 100,
+        "test_coverage_persistence_schema_pct": 89,
+        "source_files": 9,
+        "tables": 5,
+        "alembic_migrations": 1,
+        "mypy_strict_errors": 0,
+        "ruff_errors": 0,
+        "test_runtime_sec": 4.41
+      },
+      "notes": "SQLite + Parquet persistence with repository pattern. Alembic migrations forward + backward verified. UtcDateTime TypeDecorator solves SQLite tz-naivety. 48 new tests, 131 total."
     }
   ]
 }
