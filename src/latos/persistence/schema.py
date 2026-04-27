@@ -48,7 +48,8 @@ class UtcDateTime(TypeDecorator[datetime]):
     impl = DateTime(timezone=True)
     cache_ok = True
 
-    def process_bind_param(        self,
+    def process_bind_param(
+        self,
         value: datetime | None,
         dialect: Dialect,
     ) -> datetime | None:
@@ -59,7 +60,8 @@ class UtcDateTime(TypeDecorator[datetime]):
             raise ValueError("UtcDateTime requires a timezone-aware datetime; got naive.")
         return value.astimezone(UTC)
 
-    def process_result_value(        self,
+    def process_result_value(
+        self,
         value: Any,
         dialect: Dialect,
     ) -> datetime | None:
