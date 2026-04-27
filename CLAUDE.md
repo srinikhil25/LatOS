@@ -83,10 +83,22 @@ python -m latos.ui.app              # alternative
 
 ### Code quality (run before commits)
 ```bash
-ruff check . --fix                  # lint + autofix
-ruff format .                       # format
-mypy src/                           # type check
-pre-commit run --all-files          # everything
+python scripts/check.py             # one-shot: lint + format + mypy + pytest (matches CI)
+python scripts/check.py --fix       # auto-fix lint + format, then verify
+python scripts/check.py --fast      # skip pytest (quick iteration)
+```
+
+The check script is the single source of truth for "is this push CI-safe?".
+If it passes, CI passes. Forgetting any one step (especially `ruff format`)
+is the #1 cause of red builds — always use the script, never the individual
+commands manually.
+
+Manual equivalents (if needed):
+```bash
+ruff check . --fix
+ruff format .
+mypy src/
+pre-commit run --all-files
 ```
 
 ## Architecture Principles

@@ -13,12 +13,24 @@ pip install -e ".[all]"
 pre-commit install
 ```
 
-Verify your setup:
+Verify your setup with the one-shot quality gate:
 ```bash
-pytest          # tests should pass
-ruff check .    # linting should pass
-mypy src/       # type-checking should pass
+python scripts/check.py     # runs lint + format check + mypy + tests in CI order
 ```
+
+This single command mirrors what GitHub Actions runs. If it passes locally, CI
+will pass. Wrappers exist for every shell — pick whichever matches yours:
+
+```bash
+./scripts/check.sh          # POSIX (Linux, macOS, Git Bash)
+scripts\check.bat           # cmd.exe
+./scripts/check.ps1         # PowerShell
+```
+
+Useful flags:
+- `--fix`     — auto-fix lint and format issues, then re-verify
+- `--fast`    — skip pytest (lint/format/mypy only) for quick iteration
+- `--no-cov`  — run pytest without coverage
 
 ## Development Workflow
 
@@ -27,7 +39,8 @@ mypy src/       # type-checking should pass
 3. **Write tests alongside code** — not after
 4. **Keep PRs focused.** One feature/fix per PR.
 5. **Update `RESULTS_LOG.md`** for milestones and benchmarks
-6. **Run pre-commit hooks before pushing** (they run automatically on commit)
+6. **Run `python scripts/check.py` before every push** — same checks as CI, fail-fast
+7. **Pre-commit hooks run automatically on commit** (`pre-commit install` once)
 
 ## Code Style
 
@@ -38,9 +51,15 @@ mypy src/       # type-checking should pass
 
 Run before committing:
 ```bash
+python scripts/check.py --fix    # auto-fix lint + format, then verify everything
+```
+
+Or do the steps manually:
+```bash
 ruff check . --fix
 ruff format .
 mypy src/
+pytest
 ```
 
 ## Testing
@@ -95,10 +114,8 @@ Types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `perf`, `ci`
 ## Pull Request Checklist
 
 - [ ] PR title follows `stage: type: description` format
-- [ ] All tests pass (`pytest`)
-- [ ] Coverage hasn't dropped (`pytest --cov`)
-- [ ] Linting passes (`ruff check .`)
-- [ ] Type-checking passes (`mypy src/`)
+- [ ] `python scripts/check.py` passes locally (covers lint + format + mypy + tests)
+- [ ] Coverage hasn't dropped
 - [ ] New features have docstrings
 - [ ] New features have tests
 - [ ] `RESULTS_LOG.md` updated if a milestone was hit
