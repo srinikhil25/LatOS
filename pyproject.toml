@@ -256,6 +256,11 @@ exclude_also = [
     "if __name__ == .__main__.:",
     "@abstractmethod",
 ]
-fail_under = 70  # gate increases over time
+# Coverage gate ratchets up per stage:
+#   Stage 0: 0   (no app code yet — only smoke test)
+#   Stage 1: 70  (foundation must be tested)
+#   Stage 4: 80  (fit engine is critical)
+#   Stage 8: 85  (production target)
+fail_under = 0
 show_missing = true
 skip_covered = false

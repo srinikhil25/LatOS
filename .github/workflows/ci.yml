@@ -88,11 +88,14 @@ jobs:
           files: ./coverage.xml
           fail_ci_if_error: false
 
-  # ─── Coverage gate ─────────────────────────────────────────────────
+  # ─── Coverage gate (ratchets up per stage) ─────────────────────────
+  # Stage 0: 0 | Stage 1: 70 | Stage 4: 80 | Stage 8: 85
   coverage-gate:
-    name: Coverage Gate (70%)
+    name: Coverage Gate
     runs-on: ubuntu-latest
     needs: test
+    env:
+      COVERAGE_MIN: "0"  # bump per stage
     steps:
       - uses: actions/checkout@v4
 
@@ -110,7 +113,7 @@ jobs:
         run: |
           pytest -m "not ui and not gpu and not ollama" \
             --cov \
-            --cov-fail-under=70
+            --cov-fail-under=${COVERAGE_MIN}
 
   # ─── Build artifacts (smoke test packaging) ────────────────────────
   build:
