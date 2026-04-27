@@ -84,4 +84,50 @@ First full CI run successful on GitHub Actions: https://github.com/srinikhil25/L
 
 ---
 
+## 2026-04-27 — Stage 1A Complete: Domain Models
+
+### Files added
+- `src/latos/core/enums.py` — `Technique`, `FileRole`, `Severity` (with display names + ordering)
+- `src/latos/core/exceptions.py` — `LatosError` hierarchy (14 exception types)
+- `src/latos/core/models.py` — `Project`, `Sample`, `Measurement`, `FileRef`, `ValidationIssue` (all frozen dataclasses)
+- `src/latos/core/__init__.py` — flat re-exports for ergonomics
+- `src/latos/py.typed` — PEP 561 marker
+- Tests: `tests/unit/core/{test_enums,test_exceptions,test_models}.py`
+
+### Tests
+- **83 tests, all passing locally**
+- 3 from Stage 0 smoke + 80 new Stage 1A
+- Coverage on `core/`: **95%** (above target of 70%)
+  - enums.py: 100%
+  - exceptions.py: 100%
+  - models.py: 93%
+
+### Quality gates
+- ✅ Ruff lint clean
+- ✅ Ruff format clean
+- ✅ Mypy strict clean (28 source files)
+
+### Bugs found & fixed (during Stage 1A)
+- `_file_ref` test helper used `or` instead of `is None` check — empty string sha256 fell through to default. Fixed.
+- `test_lookup_by_id` constructed two unrelated projects then expected a relation. Refactored to single project.
+
+### Architecture decisions enforced by tests
+- All IDs are 32-char lowercase hex UUIDs (validated on construction)
+- All timestamps are timezone-aware (naive datetimes rejected)
+- All collections are tuples, never lists (immutability)
+- Sample.measurements must reference their owning Sample (cross-link validation)
+- Project.samples must reference their owning Project (cross-link validation)
+- Aliases are unique non-empty strings (deduplication enforced)
+- SHA-256 hashes are exactly 64 lowercase hex chars (length + alphabet checked)
+
+### Slide-Worthy Achievement (Stage 1A)
+> *"Built the domain model foundation — strict, immutable data shapes that flow through the entire platform. Every constraint (ID format, timezone awareness, cross-references) is enforced at construction time, catching bugs before they reach the database or UI."*
+
+**Wow numbers for slide:**
+- 83 tests, 95% coverage
+- 14 exception types in clean hierarchy
+- 0 mypy strict-mode errors
+
+---
+
 <!-- Future entries go below this line -->

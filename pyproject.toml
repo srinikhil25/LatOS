@@ -137,6 +137,9 @@ latos-app = "latos.ui.app:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/latos"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/latos/py.typed" = "latos/py.typed"
+
 # ----------------------------------------------------------------------------
 # Ruff (linter + formatter)
 # ----------------------------------------------------------------------------
@@ -164,9 +167,12 @@ select = [
 ignore = [
     "D100",   # Missing docstring in public module
     "D104",   # Missing docstring in public package
+    "D105",   # Missing docstring in magic method (dunder name communicates intent)
+    "D107",   # Missing docstring in __init__ (covered by class docstring)
     "D203",   # 1 blank line required before class docstring
     "D213",   # Multi-line docstring summary should start at the second line
     "PLR0913",# Too many arguments in function definition
+    "RUF022", # __all__ unsorted (we group by category for readability)
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -194,6 +200,12 @@ no_implicit_optional = true
 check_untyped_defs = true
 warn_redundant_casts = true
 warn_return_any = true
+# src-layout: tell mypy where the package root is.
+mypy_path = "src"
+explicit_package_bases = true
+# When a module name resolves to two paths (editable install + source),
+# prefer the source tree.
+namespace_packages = true
 
 [[tool.mypy.overrides]]
 module = [

@@ -32,6 +32,26 @@
         "python_versions_tested": ["3.11", "3.12"]
       },
       "notes": "CI fully green. 3 smoke tests passing on all 6 matrix combinations. Foundation in place for Stage 1."
+    },
+    {
+      "date": "2026-04-27",
+      "stage": 1,
+      "stage_name": "Stage 1A — Domain Models",
+      "metrics": {
+        "tests_passing": 83,
+        "tests_failing": 0,
+        "test_coverage_pct_overall": 95,
+        "test_coverage_enums_pct": 100,
+        "test_coverage_exceptions_pct": 100,
+        "test_coverage_models_pct": 93,
+        "source_files": 4,
+        "exception_types": 14,
+        "domain_classes": 5,
+        "mypy_strict_errors": 0,
+        "ruff_errors": 0,
+        "test_runtime_sec": 1.32
+      },
+      "notes": "Domain layer complete. Project, Sample, Measurement, FileRef, ValidationIssue all frozen dataclasses with cross-reference validation. 83 tests pass in 1.3s, 95% coverage on core/, mypy strict clean."
     }
   ]
 }
