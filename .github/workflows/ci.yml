@@ -77,9 +77,21 @@ jobs:
           pytest -m "not ui and not gpu and not ollama" --cov --cov-report=xml --cov-report=term
 
       - name: Run UI tests (Linux only, requires Xvfb)
+        # pytest exits with code 5 when no tests match the marker.
+        # That's expected before Stage 1E (PySide6 shell) lands UI tests.
+        # Treat 5 as success; surface any other non-zero exit code.
         if: runner.os == 'Linux'
+        shell: bash
         run: |
+          set +e
           xvfb-run -a pytest -m "ui" --cov-append --cov-report=xml
+          code=$?
+          set -e
+          if [ "$code" -eq 5 ]; then
+            echo "::notice::No UI tests collected yet — OK before Stage 1E"
+            exit 0
+          fi
+          exit $code
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.11'
