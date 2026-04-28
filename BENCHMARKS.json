@@ -73,6 +73,61 @@
         "test_runtime_sec": 4.41
       },
       "notes": "SQLite + Parquet persistence with repository pattern. Alembic migrations forward + backward verified. UtcDateTime TypeDecorator solves SQLite tz-naivety. 48 new tests, 131 total."
+    },
+    {
+      "date": "2026-04-29",
+      "stage": 1,
+      "stage_name": "Stage 1C — Parser Migration + File Hashing",
+      "metrics": {
+        "tests_passing": 494,
+        "tests_failing": 0,
+        "test_coverage_pct_overall": 92,
+        "test_coverage_ingestion_hashing_pct": 100,
+        "test_coverage_ingestion_parsed_data_pct": 100,
+        "test_coverage_ingestion_base_parser_pct": 100,
+        "test_coverage_ingestion_array_store_pct": 100,
+        "test_coverage_ingestion_registry_pct": 100,
+        "test_coverage_ingestion_parsers_avg_pct": 87,
+        "source_files": 45,
+        "parsers": 9,
+        "techniques_covered": 7,
+        "techniques_list": [
+          "XRD",
+          "XPS",
+          "UV-DRS",
+          "Hall",
+          "Thermoelectric",
+          "EDS",
+          "Microscopy (SEM/TEM/STEM)"
+        ],
+        "parser_formats": [
+          "Rigaku XRD .txt",
+          "PANalytical .xrdml",
+          "Rigaku .ASC",
+          "CasaXPS .csv",
+          "UV-DRS .xlsx",
+          "Hall .xls",
+          "Thermoelectric .xlsx",
+          "Bruker EDS .spx",
+          "Microscopy .tif/.tiff"
+        ],
+        "golden_file_fixtures": 9,
+        "real_instrument_fixtures": true,
+        "atomic_parquet_writes": true,
+        "mypy_strict_errors": 0,
+        "ruff_errors": 0,
+        "test_runtime_sec": 26.6,
+        "commits": [
+          "92aa115",
+          "0f2a4da",
+          "029c1bf",
+          "b0170c1",
+          "bb7ca36",
+          "7b45eb3",
+          "a6e655d"
+        ]
+      },
+      "notes": "Nine parsers covering all seven Stage 1 techniques, dispatched by confidence-pick (BaseParser.can_parse returns 0..1, threshold 0.5). Every parser ships with a golden-file snapshot test against a real fixture from D:/Materials-Informatics/data_raw/. ArrayStore writes Parquet atomically (.tmp + os.replace) so cancelled ingestions don't poison the parse cache. ParsedData enforces 1-D arrays + same-length-within-a-measurement; 2-D image content deferred to Stage 5. Default registry registers parsers in collision-aware order; the .xlsx pair (UV-DRS vs Thermoelectric) is disambiguated by content sniff and verified by integration test."
     }
   ]
 }

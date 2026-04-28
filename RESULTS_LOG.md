@@ -178,4 +178,72 @@ First full CI run successful on GitHub Actions: https://github.com/srinikhil25/L
 
 ---
 
+## 2026-04-29 — Stage 1C Complete: Parser Migration + File Hashing
+
+### Files added
+
+**Foundation (1C.1, 1C.2):**
+- `src/latos/ingestion/hashing.py` — SHA-256 file hashing with `HashCache` keyed on (path, mtime, size). Streamed 1 MB chunks so multi-GB TIF files don't blow memory.
+- `src/latos/ingestion/parsed_data.py` — `ParsedData` frozen dataclass: 1-D arrays only, same-length within a measurement, JSON-safe metadata, tz-aware timestamps, semver `parser_version`, kebab-case `parser_name`. Validates 7 invariants in `__post_init__`.
+- `src/latos/ingestion/base_parser.py` — `BaseParser` ABC. Concrete parsers set `name`/`version`/`technique`/`supported_extensions` as class attributes; `__init_subclass__` validates them at import time so typos fail fast, not at parse time.
+- `src/latos/ingestion/array_store.py` — `ArrayStore` for atomic Parquet I/O. Writes go to `<id>.parquet.tmp` then `os.replace()`; orphan tmp files swept on next construction. Protects researchers who Ctrl+C a long ingestion from corrupting their parse cache.
+
+**Parsers (1C.3, 1C.4a-c):**
+- `xrd_rigaku_txt.py` — Rigaku Ultima `.txt` (`;Key = Value` header + `2theta intensity` rows). 96% coverage.
+- `xrd_panalytical_xrdml.py` — PANalytical Empyrean `.xrdml` (XML, namespace-agnostic). 90% coverage.
+- `xrd_rigaku_asc.py` — Rigaku two-column `.ASC`. Warns at >10% negative intensities (background-subtracted curves are clearly not raw counts). 97% coverage.
+- `xps_casaxps_csv.py` — CasaXPS `.csv` exports (variable header). Extracts region label from leading non-numeric line. 95% coverage.
+- `uvdrs_xlsx.py` — UV-DRS `.xlsx` (multi-sheet, openpyxl). Parses first sheet, warns about skipped sheets. 84% coverage.
+- `hall_xls.py` — Hall-effect `.xls` (xlrd, single-temperature). All values → metadata, no arrays. 78% coverage.
+- `thermoelectric_xlsx.py` — zT-style multi-sheet `.xlsx`. Header substring lookup absorbs column-order drift between exports. 86% coverage.
+- `eds_bruker_spx.py` — Bruker `.spx` (XML despite the name). Energy axis synthesized via `CalibAbs + CalibLin*i`. 83% coverage.
+- `microscopy_tif.py` — TIFF metadata-only (tifffile). Pixels deferred to Stage 5. 80% coverage.
+
+**Dispatcher (1C.5):**
+- `src/latos/ingestion/registry.py` — `ParserRegistry` with confidence-pick dispatch (threshold 0.5). 100% coverage. `default_registry()` builds one with all 9 parsers in collision-aware order.
+
+**Test fixtures (real instrument data):**
+- 9 fixtures from `D:/Materials-Informatics/data_raw/` covering every parser, with golden-file JSON snapshots for regression detection.
+
+### Architecture decisions
+
+1. **`ParsedData` is the universal contract.** Every parser, regardless of technique or format, returns this shape. Differences live in `arrays` and `metadata` only.
+2. **`BaseParser.can_parse(path) -> float` for dispatch.** Cheap (read-header-only), confidence in [0,1]. Threshold 0.5 separates "I'm pretty sure" from "wild guess." Tie-broken by registration order.
+3. **Parsers never raise.** Failures are emitted as `ValidationIssue`s on the result; the orchestrator (Stage 1D) decides what to do with errored measurements.
+4. **One Parquet file per measurement.** Flat schema (one column per array) means pandas/DuckDB/Power Query can open these files without nested-type machinery.
+5. **Atomic writes via `os.replace`.** Prevents half-written Parquet from poisoning the parse cache when the user cancels a long ingestion.
+6. **1-D arrays + same-length-within-a-measurement.** Tightened in 1C.2 to match every Stage 1C parser's natural output and avoid loose-validator-vs-strict-writer gaps. Stage 5 will relax for 2-D image content.
+7. **Golden-file snapshots.** Each parser is regression-tested against a real instrument file using `pytest-snapshot`. Arrays are summarized as (length, dtype, sha256, head, tail) in the snapshot — exact byte-equality plus human-readable diffs.
+
+### Tests
+- **494 tests, all passing** (131 from prior stages + 363 new in Stage 1C)
+- **Coverage on `ingestion/`: 89%** average across modules (100% on infra: hashing, ParsedData, BaseParser, ArrayStore, registry; 78–97% on individual parsers, with uncovered lines being OSError/fault-injection branches)
+- **Overall coverage: 92%**
+
+### Quality gates
+- ✅ Ruff lint clean (45 source files)
+- ✅ Ruff format clean
+- ✅ Mypy strict clean (with `tifffile` follow_imports="skip" — its source uses 3.12-only syntax)
+- ✅ All 9 parsers dispatch correctly via `default_registry()` end-to-end on real fixtures
+
+### Bugs found & fixed (during Stage 1C)
+1. **Orphan two_theta on bad intensity row** — XRD parser appended `two_theta` before parsing `intensity`; one bad intensity created a length mismatch, breaking `ParsedData`'s same-length invariant. Fixed by parsing both floats before appending either. Comment in source explains the trap.
+2. **`__abstractmethods__` not yet set in `__init_subclass__`** — ABCMeta sets that attribute *after* `__init_subclass__` runs, so `BaseParser.__init_subclass__` couldn't tell intermediate abstract subclasses apart from concrete ones. Fixed by checking `__isabstractmethod__` per method instead.
+3. **Class-body name shadowing** — test helper `_make_concrete_parser_class` had `name: ClassVar[str] = name` where the LHS shadowed the function parameter. Renamed to `_name`/`_version`/etc. Comment explains the Python class-scope quirk.
+4. **`@dataclass(frozen=True, slots=True)` super() weirdness** — direct attribute-write tests on frozen+slots dataclasses raise `TypeError` instead of `AttributeError` because the generated `__setattr__` uses `super()` against a class object that's been replaced by slots. Switched to `__slots__`/`__dict__` introspection.
+5. **`can_parse` 0.7 tier fired on single-line garbage** — `ok >= len(lines) - 1` was satisfied by `0 >= 0`. Added `ok > 0` guard.
+6. **Negative-intensity threshold too high** — set at 50%, but the real `.ASC` fixture (background-subtracted curve, ~31% negative) didn't trip the warning. Lowered to 10% — that's the line above which a curve clearly isn't raw counts.
+7. **`tifffile` py.typed + Python 3.12 syntax** — tifffile ships type stubs but its source uses 3.12 `type X = Y` statements that fail to parse under our 3.11 mypy target. Added `follow_imports = "skip"` override scoped to that module.
+
+### Slide-Worthy Achievement (Stage 1C)
+> *"Built nine instrument-specific parsers — XRD (3 formats), XPS, UV-DRS, Hall, Thermoelectric, EDS, and TEM/SEM — that turn raw lab files into typed, validated measurements ready for analysis. The same `ParsedData` shape flows through every parser; the dispatcher picks the right one by confidence-scoring each file's content (not its extension), so a `.csv` from CasaXPS is correctly distinguished from a `.csv` ledger spreadsheet without false positives."*
+
+**Wow numbers for slide:**
+- 9 parsers, 7 techniques covered, all open-source
+- 494 tests passing in 26.6 seconds
+- 92% test coverage
+- Atomic writes + golden-file snapshots — researchers can Ctrl+C a long ingestion without corrupting their cache, and any future parser change against a saved fixture is caught automatically
+
+---
+
 <!-- Future entries go below this line -->
