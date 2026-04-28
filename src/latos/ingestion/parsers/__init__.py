@@ -8,6 +8,12 @@ each parser is independent of every other parser.
 
 from __future__ import annotations
 
+from latos.ingestion.parsers.xrd_panalytical_xrdml import PanalyticalXrdmlParser
+from latos.ingestion.parsers.xrd_rigaku_asc import RigakuXrdAscParser
 from latos.ingestion.parsers.xrd_rigaku_txt import RigakuXrdTxtParser
 
-__all__ = ["RigakuXrdTxtParser"]
+__all__ = [
+    "PanalyticalXrdmlParser",
+    "RigakuXrdAscParser",
+    "RigakuXrdTxtParser",
+]

@@ -1,0 +1,60 @@
+{
+  "arrays": {
+    "intensity": {
+      "dtype": "float64",
+      "head": [
+        0.0,
+        -39.9035911560059,
+        -74.7570419311523,
+        -107.827423095703,
+        -165.62060546875
+      ],
+      "length": 4318,
+      "sha256": "4ef2c8bbf02128523313e8eec34a024b55045599cfd465335f78b949294c3977",
+      "tail": [
+        -55.1792907714844,
+        -1.7458530664444,
+        -27.3396053314209,
+        -63.1663131713867,
+        -0.137006759643555
+      ]
+    },
+    "two_theta": {
+      "dtype": "float64",
+      "head": [
+        5.01086644,
+        5.03286644,
+        5.05486644,
+        5.07686644,
+        5.09886644
+      ],
+      "length": 4318,
+      "sha256": "13ba7bc610c007781f90130dbefc4db5898a1847fcec08981a11c04d5ac3e94d",
+      "tail": [
+        99.89686644,
+        99.91886644,
+        99.94086644,
+        99.96286644,
+        99.98486644
+      ]
+    }
+  },
+  "instrument": null,
+  "issues": [
+    {
+      "acknowledged": false,
+      "field": "intensity",
+      "message": "31% of intensity values are negative - file likely contains a background-subtracted or smoothed curve, not raw counts.",
+      "severity": "warning"
+    }
+  ],
+  "measured_at": null,
+  "metadata": {
+    "n_points": 4318,
+    "scan_finish_deg": 99.98486644,
+    "scan_start_deg": 5.01086644
+  },
+  "parser_name": "rigaku-xrd-asc",
+  "parser_version": "1.0.0",
+  "technique": "xrd"
+}

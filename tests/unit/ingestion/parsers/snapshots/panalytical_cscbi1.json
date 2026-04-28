@@ -1,0 +1,65 @@
+{
+  "arrays": {
+    "intensity": {
+      "dtype": "float64",
+      "head": [
+        2493.0,
+        2336.0,
+        2284.0,
+        2211.0,
+        2330.0
+      ],
+      "length": 4372,
+      "sha256": "29f4187cce0b95a53955d65031ec3800bdbd8f23dac3ce1de49d3254c42ee0b7",
+      "tail": [
+        1471.0,
+        1466.0,
+        1486.0,
+        1497.0,
+        1454.0
+      ]
+    },
+    "two_theta": {
+      "dtype": "float64",
+      "head": [
+        5.01086644,
+        5.03259932,
+        5.0543322,
+        5.07606508,
+        5.09779796
+      ],
+      "length": 4372,
+      "sha256": "c0a242d7cf021d061bc8faa5218dd2ad4a3d5885625c8f2ded8ef0503c47ef8a",
+      "tail": [
+        99.9183534,
+        99.94008628,
+        99.96181916,
+        99.98355203999999,
+        100.00528492
+      ]
+    }
+  },
+  "instrument": "Empyrean Cu LFF HR (9430 033 7310x) DK417632",
+  "issues": [],
+  "measured_at": "2024-06-21T11:00:13+05:30",
+  "metadata": {
+    "anode_material": "Cu",
+    "common_counting_time_s": 58.395,
+    "n_points": 4372,
+    "ratio_ka2_ka1": 0.5,
+    "sample_id": "Dr.MN-dhivya-cscbi1",
+    "scan_axis": "Gonio",
+    "scan_finish_deg": 100.00528492,
+    "scan_mode": "Continuous",
+    "scan_start_deg": 5.01086644,
+    "tube_current_ma": 15.0,
+    "tube_name": "Empyrean Cu LFF HR (9430 033 7310x) DK417632",
+    "tube_tension_kv": 40.0,
+    "wavelength_ka1": 1.540598,
+    "wavelength_ka2": 1.544426,
+    "wavelength_kbeta": 1.39225
+  },
+  "parser_name": "panalytical-xrdml",
+  "parser_version": "1.0.0",
+  "technique": "xrd"
+}
