@@ -23,6 +23,12 @@ from latos.ingestion.hashing import (
     hash_file,
 )
 from latos.ingestion.parsed_data import ParsedData
+from latos.ingestion.registry import (
+    MIN_CONFIDENCE,
+    ParserMatch,
+    ParserRegistry,
+    default_registry,
+)
 
 __all__ = [
     # Parser API
@@ -36,4 +42,9 @@ __all__ = [
     "fingerprint",
     "hash_bytes",
     "hash_file",
+    # Dispatcher
+    "MIN_CONFIDENCE",
+    "ParserMatch",
+    "ParserRegistry",
+    "default_registry",
 ]
