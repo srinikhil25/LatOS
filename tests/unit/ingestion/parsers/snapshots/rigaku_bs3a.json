@@ -1,0 +1,81 @@
+{
+  "arrays": {
+    "intensity": {
+      "dtype": "float64",
+      "head": [
+        208.0,
+        214.0,
+        188.0,
+        210.0,
+        214.0
+      ],
+      "length": 1151,
+      "sha256": "d5a4788f562241b4e598b3c20dc9d2ede9d38a9a8205692a122967cff82a3795",
+      "tail": [
+        0.0,
+        5.0,
+        1.0,
+        2.0,
+        1.0
+      ]
+    },
+    "two_theta": {
+      "dtype": "float64",
+      "head": [
+        5.0,
+        5.1,
+        5.2,
+        5.3,
+        5.4
+      ],
+      "length": 1151,
+      "sha256": "3d6c6e85c2e541ffb356df71585962980676301cf87c37077e55f355cb29b3f3",
+      "tail": [
+        119.6,
+        119.7,
+        119.8,
+        119.9,
+        120.0
+      ]
+    }
+  },
+  "instrument": "Ultima3 Inplane",
+  "issues": [],
+  "measured_at": null,
+  "metadata": {
+    "attachment": "Attachment for thin film",
+    "axis": "2Theta",
+    "comment": null,
+    "counter": "Scintillation counter",
+    "current_ma": 40.0,
+    "memo": null,
+    "monochromator": "Use",
+    "n_points": 1151,
+    "operator": "Administrator",
+    "sample_name": "bs3a.raw",
+    "scan_finish_deg": 120.0,
+    "scan_speed": "5",
+    "scan_start_deg": 5.0,
+    "scan_step_deg": 0.1,
+    "slits": [
+      "Attenuator Open",
+      "DivSlit Open",
+      "SctSlit 1mm",
+      "RecSlit Open",
+      "DivH.L.Slit 2.00mm",
+      "1st slit No Use",
+      "2nd slit No Use",
+      "Incident slit No Use"
+    ],
+    "target": "Cu",
+    "voltage_kv": 40.0,
+    "wavelength_ka1": 1.54056,
+    "wavelength_ka2": 1.5444,
+    "wavelength_kbeta": 1.39222,
+    "x_unit": "deg.",
+    "y_unit": "Count"
+  },
+  "parser_name": "rigaku-xrd-txt",
+  "parser_version": "1.0.0",
+  "technique": "xrd"
+}
