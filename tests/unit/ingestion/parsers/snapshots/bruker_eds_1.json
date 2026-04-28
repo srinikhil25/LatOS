@@ -1,0 +1,62 @@
+{
+  "arrays": {
+    "energy_kev": {
+      "dtype": "float64",
+      "head": [
+        -0.48013995,
+        -0.47513744999999996,
+        -0.47013495,
+        -0.46513245,
+        -0.46012995
+      ],
+      "length": 4096,
+      "sha256": "dcf710667490cb9850fedc1c01dd9578e4084e62ff2835b179c9121944ee81ba",
+      "tail": [
+        19.98508755,
+        19.99009005,
+        19.99509255,
+        20.00009505,
+        20.00509755
+      ]
+    },
+    "intensity": {
+      "dtype": "float64",
+      "head": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "length": 4096,
+      "sha256": "cc80832ebc7a82349723781cf91436f45decb80bace35ca4c30b3896432cfa1f",
+      "tail": [
+        1.0,
+        1.0,
+        2.0,
+        1.0,
+        3.0
+      ]
+    }
+  },
+  "instrument": null,
+  "issues": [
+    {
+      "acknowledged": false,
+      "field": "measured_at",
+      "message": "Bruker SPX timestamps lack timezone info; attached UTC for consistency. Treat measured_at as approximate \u2014 it is local time at the instrument.",
+      "severity": "warning"
+    }
+  ],
+  "measured_at": "2022-12-02T18:00:24+00:00",
+  "metadata": {
+    "calib_abs": -0.48013995,
+    "calib_lin": 0.0050025,
+    "channel_count": 4096,
+    "n_points": 4096,
+    "primary_energy_kv": 25.0
+  },
+  "parser_name": "bruker-eds-spx",
+  "parser_version": "1.0.0",
+  "technique": "eds"
+}

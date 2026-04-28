@@ -217,11 +217,18 @@ module = [
     "mp_api.*",
     "scipy.*",
     "matplotlib.*",
-    "tifffile.*",
     "xlrd.*",
     "openpyxl.*",
     "pyarrow.*",
 ]
+ignore_missing_imports = true
+
+# tifffile ships with `py.typed`, so mypy follows its source — but its
+# source uses Python 3.12 `type X = Y` statements that fail to parse
+# under our 3.11 target. Skip imports of it entirely.
+[[tool.mypy.overrides]]
+module = ["tifffile", "tifffile.*"]
+follow_imports = "skip"
 ignore_missing_imports = true
 
 # ----------------------------------------------------------------------------

@@ -1,0 +1,150 @@
+{
+  "arrays": {
+    "power_factor": {
+      "dtype": "float64",
+      "head": [
+        495.64803287781353,
+        485.71115913631473,
+        568.8220233112943,
+        689.8076897755612,
+        757.2850467682606
+      ],
+      "length": 13,
+      "sha256": "8e8d9ac0e90b9f079d70565ec9491dbcf2b5474f696eeca6df7b343f885398f1",
+      "tail": [
+        2117.4473471647766,
+        2528.936710813786,
+        2976.1264264953834,
+        3433.9924088561743,
+        3993.163113885708
+      ]
+    },
+    "resistivity_ohm_m": {
+      "dtype": "float64",
+      "head": [
+        0.12439999999999998,
+        0.13014,
+        0.14671,
+        0.1604,
+        0.17127
+      ],
+      "length": 13,
+      "sha256": "ee8071582462d43a55403fb40daacb2d7baf5d9a22689a9472d8500cc791a710",
+      "tail": [
+        0.22485,
+        0.23618,
+        0.2491,
+        0.25948,
+        0.27071
+      ]
+    },
+    "seebeck_uvk": {
+      "dtype": "float64",
+      "head": [
+        7.8523,
+        7.9505,
+        9.1352,
+        10.5188,
+        11.3886
+      ],
+      "length": 13,
+      "sha256": "ec4c93264933346dc0ffa1df8e1e5b1e2d95fd7c30cd7730e21537640526070e",
+      "tail": [
+        21.8199,
+        24.4394,
+        27.2278,
+        29.8505,
+        32.8784
+      ]
+    },
+    "temperature_k": {
+      "dtype": "float64",
+      "head": [
+        300.0,
+        325.0,
+        350.0,
+        375.0,
+        400.0
+      ],
+      "length": 13,
+      "sha256": "1051851fc6855368f1c2ada3b17b74972fd69e4efdb7f4c77edb9f21bfdbe279",
+      "tail": [
+        500.0,
+        525.0,
+        550.0,
+        575.0,
+        600.0
+      ]
+    },
+    "thermal_conductivity": {
+      "dtype": "float64",
+      "head": [
+        5.145513288836675,
+        5.120560357629647,
+        4.946363202166397,
+        4.82758155757572,
+        4.737406367098386
+      ],
+      "length": 13,
+      "sha256": "9b5f485bd9159c69d4e85d7f63ce16963b8f921d41d9a6b6a99ff3a76258c76a",
+      "tail": [
+        4.355308726036013,
+        4.3024086722394586,
+        4.163438408405675,
+        4.283475785483277,
+        4.08096099570025
+      ]
+    },
+    "zt": {
+      "dtype": "float64",
+      "head": [
+        28897.876949601992,
+        30827.900794899586,
+        40249.31045737948,
+        53583.32750689694,
+        63940.89829638914
+      ],
+      "length": 13,
+      "sha256": "97e0f0535663bcda9d603c763a392e7804d606a2d326064e7f97cdf3e8e19456",
+      "tail": [
+        243088.08862465795,
+        308592.66850774473,
+        393153.2963878467,
+        460968.0861939377,
+        587091.5872157983
+      ]
+    }
+  },
+  "instrument": null,
+  "issues": [
+    {
+      "acknowledged": false,
+      "field": "sheets",
+      "message": "Workbook has 4 sheets; only the first ('CS') was parsed. Skipped: ['CSCBI-1', 'CSCBI-3', 'CSCBI 5 ']",
+      "severity": "warning"
+    }
+  ],
+  "measured_at": null,
+  "metadata": {
+    "all_sheet_names": [
+      "CS",
+      "CSCBI-1",
+      "CSCBI-3",
+      "CSCBI 5 "
+    ],
+    "headers_found": [
+      "Temperature (K)",
+      "Resistivity (Ohm.m)",
+      "Thermal conductivity (Wm-1K-1)",
+      "Seebeck Coefficient (microvolt/K)",
+      "Powerfactor",
+      "PF*T",
+      "zT "
+    ],
+    "n_points": 13,
+    "sheet_name": "CS"
+  },
+  "parser_name": "thermoelectric-xlsx",
+  "parser_version": "1.0.0",
+  "technique": "thermoelectric"
+}

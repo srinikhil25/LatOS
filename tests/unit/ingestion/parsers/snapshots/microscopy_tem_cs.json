@@ -1,0 +1,55 @@
+{
+  "arrays": {},
+  "instrument": "Olympus Soft Imaging Solutions Tengra",
+  "issues": [
+    {
+      "acknowledged": false,
+      "field": "measured_at",
+      "message": "TIFF DateTime tag has no timezone; attached UTC for consistency. Treat measured_at as approximate \u2014 it is local time at the instrument.",
+      "severity": "warning"
+    },
+    {
+      "acknowledged": false,
+      "field": "technique",
+      "message": "Technique defaulted to SEM; refine with folder context (TEM/, STEM/, SEM/, ...) in Stage 2 sample resolution.",
+      "severity": "info"
+    }
+  ],
+  "measured_at": "2025-04-28T11:21:11+00:00",
+  "metadata": {
+    "artist": "SRM",
+    "bits_per_sample": [
+      8,
+      8,
+      8
+    ],
+    "compression": 7,
+    "datetime": "2025:04:28 11:21:11",
+    "dtype": "uint8",
+    "image_height": 1024,
+    "image_width": 1024,
+    "make": "Olympus Soft Imaging Solutions",
+    "model": "Tengra",
+    "n_pages": 2,
+    "orientation": 1,
+    "photometric": 2,
+    "resolution_unit": 2,
+    "samples_per_pixel": 3,
+    "shape": [
+      1024,
+      1024,
+      3
+    ],
+    "x_resolution": [
+      72,
+      1
+    ],
+    "y_resolution": [
+      72,
+      1
+    ]
+  },
+  "parser_name": "microscopy-tif",
+  "parser_version": "1.0.0",
+  "technique": "sem"
+}
