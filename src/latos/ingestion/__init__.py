@@ -13,6 +13,7 @@ This package owns the path from "raw file on disk" to "Measurement in DB":
 
 from __future__ import annotations
 
+from latos.ingestion.array_store import ArrayStore
 from latos.ingestion.base_parser import BaseParser
 from latos.ingestion.hashing import (
     FileFingerprint,
@@ -27,6 +28,8 @@ __all__ = [
     # Parser API
     "BaseParser",
     "ParsedData",
+    # Storage
+    "ArrayStore",
     # Hashing
     "FileFingerprint",
     "HashCache",

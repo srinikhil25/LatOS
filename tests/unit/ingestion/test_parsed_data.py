@@ -46,8 +46,9 @@ class TestValidConstruction:
         # .tif metadata-only parsers return no arrays.
         ParsedData(**_good_kwargs(arrays={}))
 
-    def test_2d_array_allowed(self):
-        ParsedData(**_good_kwargs(arrays={"image": np.zeros((10, 10))}))
+    def test_single_array_allowed(self):
+        # One array (just intensity, no x-axis) is fine.
+        ParsedData(**_good_kwargs(arrays={"intensity": np.array([1.0, 2.0, 3.0])}))
 
     def test_none_instrument_allowed(self):
         ParsedData(**_good_kwargs(instrument=None))
@@ -114,9 +115,37 @@ class TestArraysValidation:
         with pytest.raises(ValidationError, match=r"np\.ndarray"):
             ParsedData(**_good_kwargs(arrays={"x": [1.0, 2.0, 3.0]}))
 
+    def test_2d_array_rejected(self):
+        # Stage 1C is 1-D only. 2-D image content is deferred to Stage 5.
+        with pytest.raises(ValidationError, match="1-D"):
+            ParsedData(**_good_kwargs(arrays={"image": np.zeros((10, 10))}))
+
     def test_3d_array_rejected(self):
-        with pytest.raises(ValidationError, match="ndim"):
+        with pytest.raises(ValidationError, match="1-D"):
             ParsedData(**_good_kwargs(arrays={"cube": np.zeros((2, 2, 2))}))
+
+    def test_mismatched_lengths_rejected(self):
+        with pytest.raises(ValidationError, match="same length"):
+            ParsedData(
+                **_good_kwargs(
+                    arrays={
+                        "two_theta": np.array([10.0, 20.0, 30.0]),
+                        "intensity": np.array([100.0, 250.0]),  # length 2 vs. 3
+                    },
+                ),
+            )
+
+    def test_three_arrays_same_length_allowed(self):
+        # Thermoelectric: temperature + seebeck + conductivity, all co-indexed.
+        ParsedData(
+            **_good_kwargs(
+                arrays={
+                    "temperature": np.array([300.0, 400.0, 500.0]),
+                    "seebeck": np.array([-50.0, -60.0, -70.0]),
+                    "conductivity": np.array([1e3, 1.2e3, 1.5e3]),
+                },
+            ),
+        )
 
 
 # ─── metadata validation ────────────────────────────────────────────

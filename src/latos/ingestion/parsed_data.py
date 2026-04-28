@@ -104,8 +104,24 @@ class ParsedData:
             )
 
     def _check_arrays(self) -> None:
+        """Validate that arrays is dict[str, 1-D np.ndarray] with all same length.
+
+        The 1-D constraint matches every Stage 1C parser (XRD, XPS, UV-DRS,
+        Hall, thermoelectric, EDS — all spectroscopy/scan data). 2-D image
+        content is intentionally NOT supported here; if Stage 5 needs it,
+        we'll relax this validator and extend the array store at that point.
+
+        The same-length constraint reflects the reality of measurement data:
+        you have one independent variable (the x-axis) and one or more
+        co-indexed dependent variables (y-axes). Anything that legitimately
+        needs different-length arrays in one measurement should either split
+        into separate measurements or stash the smaller arrays in `metadata`.
+        Enforcing this here lets `ArrayStore` write a flat Parquet table
+        that pandas/DuckDB/etc. can read without nested-type machinery.
+        """
         if not isinstance(self.arrays, dict):
             raise ValidationError("arrays must be a dict[str, np.ndarray]")
+        lengths: set[int] = set()
         for key, arr in self.arrays.items():
             if not isinstance(key, str) or not key:
                 raise ValidationError(f"arrays keys must be non-empty strings, got {key!r}")
@@ -113,10 +129,15 @@ class ParsedData:
                 raise ValidationError(
                     f"arrays[{key!r}] must be np.ndarray, got {type(arr).__name__}",
                 )
-            if arr.ndim not in (1, 2):
+            if arr.ndim != 1:
                 raise ValidationError(
-                    f"arrays[{key!r}] must be 1-D or 2-D, got ndim={arr.ndim}",
+                    f"arrays[{key!r}] must be 1-D, got ndim={arr.ndim}",
                 )
+            lengths.add(arr.shape[0])
+        if len(lengths) > 1:
+            raise ValidationError(
+                f"all arrays must have the same length, got lengths={sorted(lengths)}",
+            )
 
     def _check_metadata(self) -> None:
         if not isinstance(self.metadata, dict):
