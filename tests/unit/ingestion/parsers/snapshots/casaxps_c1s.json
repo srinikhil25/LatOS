@@ -1,0 +1,62 @@
+{
+  "arrays": {
+    "binding_energy": {
+      "dtype": "float64",
+      "head": [
+        296.0658,
+        295.9658,
+        295.8658,
+        295.7658,
+        295.6658
+      ],
+      "length": 201,
+      "sha256": "980cfb6246c6cae70622afeae8bb4c89efbb14643c28dfcd7de9bcc306d39624",
+      "tail": [
+        276.4658,
+        276.3658,
+        276.2658,
+        276.1658,
+        276.0658
+      ]
+    },
+    "intensity": {
+      "dtype": "float64",
+      "head": [
+        6568.75,
+        6590.0,
+        6498.75,
+        6648.75,
+        6806.25
+      ],
+      "length": 201,
+      "sha256": "fee3b0ea56e46f515143dd63254462367ca72bd921719dfeed6ba7afe6e92075",
+      "tail": [
+        5152.5,
+        5151.25,
+        5192.5,
+        5332.5,
+        5350.0
+      ]
+    }
+  },
+  "instrument": null,
+  "issues": [
+    {
+      "acknowledged": false,
+      "field": "data",
+      "message": "1 data row(s) could not be parsed; skipped.",
+      "severity": "warning"
+    }
+  ],
+  "measured_at": null,
+  "metadata": {
+    "be_end": 276.0658,
+    "be_start": 296.0658,
+    "filename_stem": "casaxps_c1s",
+    "n_points": 201,
+    "region": "C1s"
+  },
+  "parser_name": "casaxps-csv",
+  "parser_version": "1.0.0",
+  "technique": "xps"
+}

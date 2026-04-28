@@ -1,0 +1,67 @@
+{
+  "arrays": {
+    "reflectance": {
+      "dtype": "float64",
+      "head": [
+        9.68,
+        9.688,
+        9.443,
+        9.387,
+        8.566
+      ],
+      "length": 1401,
+      "sha256": "052a92cc62748194c0ac1b51c029b6e677d50c003e2206b9e06899ef385e4a9b",
+      "tail": [
+        7.543,
+        7.5,
+        7.449,
+        7.485,
+        7.503
+      ]
+    },
+    "wavelength": {
+      "dtype": "float64",
+      "head": [
+        200.0,
+        201.0,
+        202.0,
+        203.0,
+        204.0
+      ],
+      "length": 1401,
+      "sha256": "9c93b08186edb5d15a6b0c5f2290dd1007ec9ea5280fcdec271af4aa3fc4d50c",
+      "tail": [
+        1596.0,
+        1597.0,
+        1598.0,
+        1599.0,
+        1600.0
+      ]
+    }
+  },
+  "instrument": null,
+  "issues": [
+    {
+      "acknowledged": false,
+      "field": "sheets",
+      "message": "Workbook has 4 sheets; only the first ('CS') was parsed. Skipped: ['CS-1', 'CS-3', 'CS-5']",
+      "severity": "warning"
+    }
+  ],
+  "measured_at": null,
+  "metadata": {
+    "all_sheet_names": [
+      "CS",
+      "CS-1",
+      "CS-3",
+      "CS-5"
+    ],
+    "n_points": 1401,
+    "sheet_name": "CS",
+    "wavelength_max_nm": 1600.0,
+    "wavelength_min_nm": 200.0
+  },
+  "parser_name": "uvdrs-xlsx",
+  "parser_version": "1.0.0",
+  "technique": "uv_drs"
+}
