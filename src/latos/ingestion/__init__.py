@@ -15,6 +15,12 @@ from __future__ import annotations
 
 from latos.ingestion.array_store import ArrayStore
 from latos.ingestion.base_parser import BaseParser
+from latos.ingestion.crawler import (
+    CrawlEntry,
+    CrawlReport,
+    ProgressCallback,
+    crawl,
+)
 from latos.ingestion.hashing import (
     FileFingerprint,
     HashCache,
@@ -47,4 +53,9 @@ __all__ = [
     "ParserMatch",
     "ParserRegistry",
     "default_registry",
+    # Crawler
+    "CrawlEntry",
+    "CrawlReport",
+    "ProgressCallback",
+    "crawl",
 ]
