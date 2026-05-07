@@ -128,6 +128,54 @@
         ]
       },
       "notes": "Nine parsers covering all seven Stage 1 techniques, dispatched by confidence-pick (BaseParser.can_parse returns 0..1, threshold 0.5). Every parser ships with a golden-file snapshot test against a real fixture from D:/Materials-Informatics/data_raw/. ArrayStore writes Parquet atomically (.tmp + os.replace) so cancelled ingestions don't poison the parse cache. ParsedData enforces 1-D arrays + same-length-within-a-measurement; 2-D image content deferred to Stage 5. Default registry registers parsers in collision-aware order; the .xlsx pair (UV-DRS vs Thermoelectric) is disambiguated by content sniff and verified by integration test."
+    },
+    {
+      "date": "2026-05-07",
+      "stage": 1,
+      "stage_name": "Stage 1D — File Crawler + Project Orchestrator",
+      "metrics": {
+        "tests_passing": 560,
+        "tests_failing": 0,
+        "test_coverage_pct_overall": 89,
+        "test_coverage_ingestion_crawler_pct": 93,
+        "test_coverage_ingestion_orchestrator_pct": 96,
+        "test_coverage_ingestion_module_pct": 89,
+        "source_files": 47,
+        "test_files": 24,
+        "new_tests_in_stage": 66,
+        "test_breakdown": {
+          "1D.1_crawler": 28,
+          "1D.2_orchestrator": 26,
+          "1D.3_integration": 12
+        },
+        "real_data_ingestion": {
+          "dataset": "Dhivya MXene (D:/Materials-Informatics/data_raw/dhivya_data)",
+          "total_files": 161,
+          "dataset_size_mb": 590,
+          "parsed_count": 76,
+          "skipped_unclassified": 84,
+          "skipped_hash_failed": 0,
+          "parse_failed": 0,
+          "samples_inferred": 12,
+          "techniques_recognized": 6,
+          "techniques_list": ["xrd", "xps", "uv_drs", "hall", "thermoelectric", "sem"],
+          "wall_clock_first_ingest_sec": 2.6,
+          "wall_clock_reingest_cached_sec": 0.2,
+          "speedup_on_reopen": "13x"
+        },
+        "stage1_done_criteria_met": {
+          "ingest_dhivya_data": true,
+          "saves_to_latos_data_db": true,
+          "reopen_under_1_second": true,
+          "all_files_processed_no_crash": true,
+          "test_coverage_above_70": true
+        },
+        "mypy_strict_errors": 0,
+        "ruff_errors": 0,
+        "test_runtime_sec": 21.3,
+        "commits": ["0c22bb7", "f0335ce", "90d9193"]
+      },
+      "notes": "Crawler walks folders, hashes files (SHA-256 with mtime/size cache), and dispatches by parser confidence. Orchestrator wires crawler → parsers → mappers → repository → array_store, builds a Project with a sample-grouping heuristic (parent folder name, walking past generic technique labels). Integration test verified end-to-end on real Dhivya dataset: 161 files ingested in 2.6s, 76 parsed correctly, 84 correctly identified as non-data (PDFs, JPEGs, .docx). Re-ingestion cached path takes 0.2s, hitting the Stage 1 done-criterion of <1s reopens. Bug surfaced by real data: find_parser(min_confidence=0.0) was letting zero-confidence parsers through, making the first-registered parser a spurious best-match for every unrelated file; fixed with a positive epsilon. Repository factory now a context manager so SQLite engine disposal is guaranteed (otherwise leaked handles block tmp_path cleanup on Windows). Stage 1 done-criteria met; ready for Stage 1E (PySide6 desktop shell)."
     }
   ]
 }
