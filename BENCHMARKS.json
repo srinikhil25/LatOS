@@ -176,6 +176,55 @@
         "commits": ["0c22bb7", "f0335ce", "90d9193"]
       },
       "notes": "Crawler walks folders, hashes files (SHA-256 with mtime/size cache), and dispatches by parser confidence. Orchestrator wires crawler → parsers → mappers → repository → array_store, builds a Project with a sample-grouping heuristic (parent folder name, walking past generic technique labels). Integration test verified end-to-end on real Dhivya dataset: 161 files ingested in 2.6s, 76 parsed correctly, 84 correctly identified as non-data (PDFs, JPEGs, .docx). Re-ingestion cached path takes 0.2s, hitting the Stage 1 done-criterion of <1s reopens. Bug surfaced by real data: find_parser(min_confidence=0.0) was letting zero-confidence parsers through, making the first-registered parser a spurious best-match for every unrelated file; fixed with a positive epsilon. Repository factory now a context manager so SQLite engine disposal is guaranteed (otherwise leaked handles block tmp_path cleanup on Windows). Stage 1 done-criteria met; ready for Stage 1E (PySide6 desktop shell)."
+    },
+    {
+      "date": "2026-05-07",
+      "stage": 1,
+      "stage_name": "Stage 1E — PySide6 Desktop Shell",
+      "metrics": {
+        "tests_passing_default_slice": 584,
+        "tests_passing_ui_slice": 85,
+        "tests_passing_total": 669,
+        "tests_failing": 0,
+        "test_coverage_pct_default_slice": 88,
+        "test_coverage_ui_app_pct": 100,
+        "test_coverage_ui_main_window_pct": 100,
+        "test_coverage_ui_themes_pct": 100,
+        "test_coverage_ui_pages_welcome_pct": 100,
+        "test_coverage_ui_pages_project_picker_pct": 99,
+        "test_coverage_ui_pages_overview_pct": 99,
+        "test_coverage_ui_pages_sample_review_pct": 99,
+        "test_coverage_ui_services_recent_projects_pct": 97,
+        "test_coverage_ui_services_ingestion_worker_pct": 100,
+        "test_coverage_ui_dialogs_ingestion_progress_pct": 99,
+        "source_files": 54,
+        "ui_pages": 4,
+        "ui_pages_list": ["WelcomePage", "ProjectPickerPage", "OverviewPage", "SampleReviewPage"],
+        "ui_dialogs": 1,
+        "ui_services": 2,
+        "ui_services_list": ["RecentProjectsService", "IngestionWorker"],
+        "new_tests_in_stage": 85,
+        "test_breakdown": {
+          "1E.1_app_skeleton_main_window_themes_welcome": 12,
+          "1E.2_recent_projects_service_and_picker_page": 31,
+          "1E.3_ingestion_worker_and_progress_dialog": 14,
+          "1E.4_overview_page": 12,
+          "1E.5_sample_review_page": 12,
+          "main_window_integration_growth": 4
+        },
+        "ingestion_thread_model": "QObject + moveToThread (Qt docs pattern #2)",
+        "cancellation_mechanism": "threading.Event polled from on_progress callback; raises _IngestionCancelledError",
+        "recent_projects_state_path": "$LATOS_HOME/recent.json (default ~/.latos/recent.json)",
+        "recent_projects_max_entries": 20,
+        "smoke_launch_passed": true,
+        "headless_qt_platform": "offscreen",
+        "ui_test_suite_runtime_sec": 4,
+        "mypy_strict_errors": 0,
+        "ruff_errors": 0,
+        "test_runtime_default_sec": 29.8,
+        "commits": ["163ec8e", "3377028", "7634bdf", "19cd057", "1b2833d"]
+      },
+      "notes": "Latos is now a real desktop app. `latos-app` launches a FluentWindow with four sidebar pages (Welcome, Open, Overview, Review), one modal IngestionProgressDialog, and two Qt-free services (RecentProjectsService, IngestionWorker). Ingestion runs on a QThread via moveToThread; cancellation uses a threading.Event polled from the orchestrator's on_progress callback (crawl-phase only, by design). RecentProjectsService is pure Python: atomic-write JSON, tolerant load, filter-on-read, MRU semantics, 20-entry cap. UI tests use a stub MagicMock(spec=Orchestrator) so the suite never touches real SQLite/Parquet — wiring is what's verified. Bugs caught and fixed: CardWidget.clicked signature shadowing (renamed to pickRequested), method `list()` shadowing builtins inside class scope (renamed to entries()), QDialog.result() override clash (renamed to ingestion_result()), real ingestion accidentally firing in tests (added orchestrator_factory hook + stub fixture), DeprecationWarning from QMouseEvent ctor (replaced with direct signal emit), and assorted ruff naming-convention noqa annotations for Qt-required mixedCase signals + Qt-required event-handler camelCase names. Stage 1 fully complete: foundation → persistence → parsers → ingestion → desktop shell."
     }
   ]
 }

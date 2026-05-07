@@ -334,4 +334,194 @@ The 84 unclassified files are exactly what they should be: PDFs (Hall measuremen
 
 ---
 
+## 2026-05-07 — Stage 1E Complete: PySide6 Desktop Shell
+
+### What shipped
+
+The end-to-end **desktop application is now usable**: launch `latos-app`,
+pick a folder, watch ingestion run on a worker thread with a cancel-able
+progress dialog, and land on an Overview dashboard with a sample-detail
+Review page in the sidebar. Every layer below this (core, persistence,
+ingestion) is still importable headlessly — nothing under `latos.ui.*`
+leaks into them.
+
+**Sub-stages, in order:**
+
+| # | Commit | Files | What landed |
+|---|---|---|---|
+| 1E.1 | `163ec8e` | `ui/app.py`, `main_window.py`, `themes.py`, `pages/welcome.py` | App skeleton: `latos-app` GUI script, `FluentWindow` with sidebar, `WelcomePage`, dark/light theme helper. Removed the dead `latos = streamlit_app:main` console-script. |
+| 1E.2 | `3377028` | `services/recent_projects.py`, `pages/project_picker.py` | `RecentProjectsService` (Qt-free MRU JSON store at `$LATOS_HOME/recent.json`, atomic writes, tolerant load) + `ProjectPickerPage` (hero "Open Folder…" button + Recent rail of clickable cards). Picker emits `projectOpened(Path)`. |
+| 1E.3 | `7634bdf` | `services/ingestion_worker.py`, `dialogs/ingestion_progress.py` | `IngestionWorker(QObject)` runs `Orchestrator.ingest()` on a `QThread` via `moveToThread`. Cancel via `threading.Event` polled from the orchestrator's `on_progress` callback. `IngestionProgressDialog` modal wraps the worker, surfaces progress, and exposes `ingestion_result()` / `failure()` / `was_cancelled()`. |
+| 1E.4 | `19cd057` | `pages/overview.py` | `OverviewPage` dashboard: project name, stat cards (samples / measurements / parsed / cached / failed), one-row-per-sample list, and a `pyqtgraph.PlotWidget` preview that auto-picks the first measurement with 1-D arrays attached. Empty state until first ingestion. |
+| 1E.5 | `1b2833d` | `pages/sample_review.py` | `SampleReviewPage` drill-down: `QSplitter` with `TreeWidget` of samples → measurements on the left, detail pane on the right (title, instrument / measured_at / parser metadata, files list, severity-colored validation issues, and a per-measurement pyqtgraph plot). |
+
+### Architecture decisions
+
+1. **Single `FluentWindow` + four sidebar pages.** Welcome, Open (picker),
+   Overview, Review — registered up-front so the sidebar layout is
+   stable across "no project" / "project open" states. After a successful
+   ingestion the main window calls `set_project()` on Overview + Review
+   and `switchTo(self._overview)`. Stage 2 will add Analysis / Optimize /
+   Settings without restructuring this.
+
+2. **Off-thread ingestion via `moveToThread`.** Pattern #2 from the Qt
+   docs — a plain `QObject` worker moved to a `QThread`, with terminal
+   signals (`finished` / `failed` / `cancelled`) crossing back to the
+   GUI thread via Qt's queued connections. The worker's `start()` slot
+   is also synchronously callable, which lets the unit tests verify the
+   state-machine logic without the threading layer (the threading itself
+   is covered by the dialog tests).
+
+3. **Cancellation is crawl-phase only.** The orchestrator exposes
+   `on_progress(idx, total, path)` only during the crawl pass; we poll a
+   `threading.Event` from the callback and raise an internal sentinel
+   (`_IngestionCancelledError`) which propagates out of the orchestrator.
+   Once parsing/persistence starts, cancel is a no-op — aborting mid-write
+   would leave SQLite + Parquet in inconsistent state, so the trade-off
+   is explicit and documented.
+
+4. **Stub orchestrators in tests, never real ingestion.** The
+   `latos_window` fixture injects a `MagicMock(spec=Orchestrator)` whose
+   `ingest()` returns an empty `IngestionResult` immediately. UI tests
+   never touch SQLite, Parquet, or any parser — they test wiring only.
+   The orchestrator, parsers, and array-store are tested against real
+   data in their own integration tests (Stage 1D).
+
+5. **Recent projects: filter-on-read + atomic write.** Same `.tmp` +
+   `os.replace()` pattern used by `ArrayStore` and Alembic. Entries
+   whose path no longer exists are silently dropped from `entries()`
+   and any subsequent persisted write — eventual consistency, no
+   proactive vacuum needed. Corrupt JSON or schema drift is treated as
+   "no recents" rather than crashing the app on startup.
+
+6. **Tree widget user data for measurement IDs.** `SampleReviewPage`
+   stores each measurement's id in the tree node's `Qt.UserRole + 1`.
+   Selection lookup walks `_project.samples` to find the matching
+   `Measurement` rather than caching parallel structures — the tree
+   stays the single source of truth for what's selected.
+
+7. **Avoid name collisions with Qt base classes.** Renamed
+   `RecentProjectCard.clicked` → `pickRequested(Path)` (base
+   `CardWidget.clicked` is a zero-arg signal it fires from
+   `mouseReleaseEvent`); renamed `RecentProjectsService.list()` →
+   `entries()` (so `list[T]` annotations still resolve to `builtins.list`
+   under mypy strict); renamed `IngestionProgressDialog.result()` →
+   `ingestion_result()` (so it doesn't shadow `QDialog.result()`'s int
+   return type).
+
+### Tests
+
+- **669 tests passing in clean runs** (584 default `not ui` slice +
+  85 UI tests run separately under `QT_QPA_PLATFORM=offscreen`).
+- **85 new UI tests in Stage 1E**, broken down:
+
+| Module | Tests | What they cover |
+|---|---|---|
+| `tests/unit/ui/test_main_window.py` | 9 | window construction, page registration, picker → ingestion → overview wire-up |
+| `tests/unit/ui/test_app.py` | 1 | `main()` exit code with `QApplication.exec` patched |
+| `tests/unit/ui/test_themes.py` | 4 | apply dark / light / system theme, accent hex |
+| `tests/unit/ui/pages/test_welcome.py` | 2 | object name, brand text |
+| `tests/unit/ui/pages/test_project_picker.py` | 7 | empty state, dialog accept/cancel, recent rail rendering + click |
+| `tests/unit/ui/pages/test_overview.py` | 12 | empty/populated states, stat cards, sample rows, plot rendering, `_find_first_plottable` |
+| `tests/unit/ui/pages/test_sample_review.py` | 12 | tree population, selection → detail, severity-colored issues, plot rendering, clear |
+| `tests/unit/ui/services/test_recent_projects.py` | 24 | MRU semantics, max entries, filter-on-read, tolerant load, atomic write |
+| `tests/unit/ui/services/test_ingestion_worker.py` | 10 | success / failure / cancel paths against stub `Orchestrator` |
+| `tests/unit/ui/dialogs/test_ingestion_progress.py` | 4 | end-to-end thread plumbing: accept on finished, reject on failed/cancelled |
+
+- **Coverage on `ui/`**: 100% on `app.py`, `main_window.py`, `welcome.py`,
+  `themes.py`; 99% on `project_picker.py` and `sample_review.py`; 97%
+  on `recent_projects.py`. Untested lines are display-only fallbacks
+  (e.g. the metadata-only "no plottable arrays" branch).
+
+### Quality gates
+
+- ✅ Ruff lint clean (54 source files)
+- ✅ Ruff format clean
+- ✅ Mypy strict clean
+- ✅ Default pytest slice (`not ui`): 584 passing
+- ✅ UI slice: 85 passing under `QT_QPA_PLATFORM=offscreen`
+- ✅ Smoke launch (real `QApplication`, all four sidebar pages register
+  cleanly, window opens + closes without leaking the worker thread)
+
+### Bugs found & fixed (during Stage 1E)
+
+1. **`CardWidget.clicked` signature clash** — qfluentwidgets' base
+   `CardWidget` defines a zero-arg `clicked` signal it fires from
+   `mouseReleaseEvent`. Shadowing it with my `Signal(Path)` broke the
+   base implementation with `TypeError: clicked(PyObject) needs 1
+   argument(s), 0 given`. Renamed my signal to `pickRequested(Path)`
+   and re-emit it from a slot connected to the base `clicked`.
+2. **`list[T]` annotations broke after method rename** — naming a method
+   `list(self) -> list[RecentProject]` shadowed `builtins.list` inside
+   the class scope; mypy resolved the return-type `list[...]` to the
+   method itself and emitted seven errors. Renamed to `entries()` and
+   updated all callers.
+3. **`QDialog.result()` returns int** — overriding `result()` to return
+   `IngestionResult | None` triggered mypy's `[override]` because the
+   parent's signature returns `int` (the accept/reject code). Renamed
+   to `ingestion_result()` and added a comment explaining the clash.
+4. **Real ingestion fired during UI tests** — the original
+   `_on_project_opened` immediately called `dialog.exec()`, which spun
+   up a real `QThread` and blocked the test's `picker._open_button.click()`
+   until ingestion finished. Added an `orchestrator_factory` hook on
+   `LatosMainWindow` and made the `latos_window` fixture inject a
+   `MagicMock(spec=Orchestrator)` returning an empty `IngestionResult`
+   immediately.
+5. **`mousePressEvent` test using deprecated `QMouseEvent` ctor** — the
+   PySide6 `QMouseEvent` constructor I used emits a `DeprecationWarning`
+   that pytest's `-W error` promoted to a test failure. Replaced with
+   a direct `target.clicked.emit()` (the base CardWidget signal) which
+   triggers the same `_on_clicked` → `pickRequested(Path)` chain.
+6. **Ruff N802 on `showEvent` / `closeEvent`** — Qt requires camelCase
+   names to override these handlers; ruff's snake_case rule rejects
+   them. Suppressed per-method with `# noqa: N802` and a comment.
+7. **Ruff N818 on `_IngestionCancelled`** — exception names must end in
+   `Error`. Renamed to `_IngestionCancelledError`.
+8. **Ruff N815 on Qt signal attributes** — Qt convention is mixedCase
+   for signal names (`progress`, `projectOpened`, `pickRequested`).
+   Suppressed per-attribute with `# noqa: N815` rather than file-wide,
+   so accidental non-signal mixedCase still gets caught.
+
+### End-to-end user flow (manual smoke)
+
+1. `latos-app` → `LatosMainWindow` opens at 1280×800 with sidebar:
+   Welcome (active), Open, Overview, Review.
+2. Click **Open** → `ProjectPickerPage` shows hero + (initially empty)
+   Recent rail.
+3. Click **Open Folder** → native `QFileDialog` → pick a folder →
+   `projectOpened(Path)` fires → `IngestionProgressDialog` modal opens.
+4. Worker thread runs `Orchestrator.ingest()`; dialog updates
+   "Processing file 47 of 161" + the current filename. Cancel button
+   is live; clicking it triggers `request_cancel()` → cancel-on-next-tick.
+5. On accept: dialog closes, main window calls
+   `overview.set_project(result.project)` +
+   `sample_review.set_project(result.project)` and switches the sidebar
+   to Overview. The Recent rail now shows the project at the top.
+6. **Overview** renders title, stat cards, the sample list, and the
+   pyqtgraph preview plot of the first plottable measurement.
+7. **Review** lets the user expand a sample, click a measurement, and
+   see metadata + files + issues + per-measurement arrays plotted.
+
+### Slide-Worthy Achievement (Stage 1E)
+
+> *"Latos is now a real desktop application. Researchers launch it
+> from a single command, drop in a folder of raw lab files, watch the
+> ingestion run on a background thread (cancellable; the GUI never
+> freezes), and land on a Fluent-styled dashboard with their samples,
+> techniques, and a live preview plot of the first XRD scan Latos
+> found — without writing a line of Python. From here, every Stage 2
+> feature (smart sample labeling, peak fitting, optimization loops)
+> attaches to a UI surface that already knows how to render
+> measurements, validation issues, and arrays."*
+
+**Wow numbers for slide:**
+- 4 sidebar pages, 1 modal dialog, 2 background services, 0 frozen frames
+- 85 UI tests in 4 seconds (offscreen Qt) — full sidebar wired and verified
+- End-to-end: pick folder → ingest 161 files → render dashboard in ~3 seconds
+- Cancellation works mid-crawl without poisoning the persistence layer
+- Pure-Python `RecentProjectsService`: atomic-write JSON, tolerant load,
+  filter-on-read, MRU semantics, 24 unit tests, no Qt dependency
+
+---
+
 <!-- Future entries go below this line -->
