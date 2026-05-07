@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from latos.ui.main_window import LatosMainWindow
+from latos.ui.pages.overview import OverviewPage
 from latos.ui.pages.project_picker import ProjectPickerPage
 from latos.ui.pages.welcome import WelcomePage
 
@@ -53,6 +54,12 @@ class TestPagesRegistered:
         picker = latos_window.findChild(ProjectPickerPage, "ProjectPickerPage")
         assert picker is not None
 
+    def test_overview_page_present_in_widget_tree(self, latos_window: LatosMainWindow):
+        overview = latos_window.findChild(OverviewPage, "OverviewPage")
+        assert overview is not None
+        # Empty state until a project is opened.
+        assert overview.project is None
+
 
 class TestProjectOpenedSlot:
     def test_initial_current_project_is_none(self, latos_window: LatosMainWindow):
@@ -95,3 +102,8 @@ class TestProjectOpenedSlot:
         assert latos_window.last_ingestion_result.project.root_path == chosen
         # And the folder shows up as a recent in the injected service.
         assert [e.path for e in recent_service.entries()] == [chosen.resolve()]
+        # Overview page got populated with the (empty) project.
+        overview = latos_window.findChild(OverviewPage, "OverviewPage")
+        assert overview is not None
+        assert overview.project is not None
+        assert overview.project.root_path == chosen

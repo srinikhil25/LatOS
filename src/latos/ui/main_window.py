@@ -25,18 +25,13 @@ from qfluentwidgets import FluentIcon, FluentWindow
 
 from latos.ingestion.orchestrator import IngestionResult
 from latos.ui.dialogs.ingestion_progress import IngestionProgressDialog
+from latos.ui.pages.overview import OverviewPage
 from latos.ui.pages.project_picker import ProjectPickerPage
 from latos.ui.pages.welcome import WelcomePage
 from latos.ui.services.ingestion_worker import OrchestratorFactory
 from latos.ui.services.recent_projects import RecentProjectsService
 
 __all__ = ["LatosMainWindow"]
-
-
-# Type alias: dialog factory used by the main window. Production passes
-# `None` → we use `IngestionProgressDialog` as-is. Tests inject a hook
-# that returns a stub dialog so the test doesn't trigger real ingestion.
-DialogFactory = "type[IngestionProgressDialog]"
 
 
 # Default window size. Big enough to fit the four-pane Overview layout
@@ -94,7 +89,7 @@ class LatosMainWindow(FluentWindow):  # type: ignore[misc]
         """Construct every page and register it with the sidebar.
 
         Order matters: the first page registered is the one shown on
-        startup. Subsequent stages will add Overview and Review pages
+        startup. Stage 1E.5 will add Sample / Measurement detail pages
         here.
         """
         self._welcome = WelcomePage()
@@ -104,20 +99,31 @@ class LatosMainWindow(FluentWindow):  # type: ignore[misc]
         self._project_picker.projectOpened.connect(self._on_project_opened)
         self.addSubInterface(self._project_picker, FluentIcon.FOLDER_ADD, "Open")
 
+        # Overview is registered up-front (showing the empty state) so
+        # the sidebar layout is stable across "no project" / "project
+        # open" states. After a successful ingestion we populate it and
+        # navigate to it.
+        self._overview = OverviewPage()
+        self.addSubInterface(self._overview, FluentIcon.PIE_SINGLE, "Overview")
+
     def _on_project_opened(self, path: Path) -> None:
         """Slot fired when the user picks a folder.
 
-        Records the path on `current_project_root`, then opens the
-        `IngestionProgressDialog`. On accept, stores the result on
-        `last_ingestion_result` for the Overview page (1E.4) to consume.
+        Records the path on `current_project_root`, runs the
+        `IngestionProgressDialog`, and on success populates the
+        Overview page and switches the sidebar to it.
         """
         self._current_project_root = path
         dialog = self._make_ingestion_dialog(path)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._last_ingestion_result = dialog.ingestion_result()
+            result = dialog.ingestion_result()
+            self._last_ingestion_result = result
+            if result is not None:
+                self._overview.set_project(result.project)
+                self.switchTo(self._overview)
         # Cancel / failure paths leave `_last_ingestion_result` untouched
-        # — the user can re-pick the folder to retry, and the project
-        # picker stays the active page until 1E.4 wires the Overview.
+        # — the user can re-pick the folder to retry. The project picker
+        # remains the active page so the user can correct course.
 
     # ------------------------------------------------------------------
     # Hook so tests can swap in a stub dialog.
