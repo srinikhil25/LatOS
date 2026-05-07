@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 import pytest
 
 from latos.ui.main_window import LatosMainWindow
+from latos.ui.pages.project_picker import ProjectPickerPage
 from latos.ui.pages.welcome import WelcomePage
+
+if TYPE_CHECKING:
+    from pytestqt.qtbot import QtBot
+
+    from latos.ui.services.recent_projects import RecentProjectsService
 
 pytestmark = pytest.mark.ui
 
@@ -32,10 +41,50 @@ class TestWindowConstruction:
         assert min_size.height() == 600
 
 
-class TestWelcomePageRegistered:
+class TestPagesRegistered:
     def test_welcome_page_present_in_widget_tree(self, latos_window: LatosMainWindow):
         # `addSubInterface` parents the page to the FluentWindow's
         # stacked widget. A simple findChild verifies the registration
         # succeeded.
         welcome = latos_window.findChild(WelcomePage, "WelcomePage")
         assert welcome is not None
+
+    def test_project_picker_page_present_in_widget_tree(self, latos_window: LatosMainWindow):
+        picker = latos_window.findChild(ProjectPickerPage, "ProjectPickerPage")
+        assert picker is not None
+
+
+class TestProjectOpenedSlot:
+    def test_initial_current_project_is_none(self, latos_window: LatosMainWindow):
+        assert latos_window.current_project_root is None
+
+    def test_picker_signal_updates_current_project_root(
+        self,
+        qtbot: QtBot,
+        recent_service: RecentProjectsService,
+        latos_window: LatosMainWindow,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        # Drive the picker exactly the way a real user would: patch the
+        # dialog to return a chosen folder and click the open button.
+        chosen = tmp_path / "ChosenProject"
+        chosen.mkdir()
+
+        from latos.ui.pages import project_picker as picker_module
+
+        monkeypatch.setattr(
+            picker_module.QFileDialog,
+            "getExistingDirectory",
+            staticmethod(lambda *args, **kwargs: str(chosen)),
+        )
+
+        picker = latos_window.findChild(ProjectPickerPage, "ProjectPickerPage")
+        assert picker is not None
+
+        with qtbot.waitSignal(picker.projectOpened, timeout=1000):
+            picker._open_button.click()
+
+        assert latos_window.current_project_root == chosen
+        # And the folder shows up as a recent in the injected service.
+        assert [e.path for e in recent_service.entries()] == [chosen.resolve()]
