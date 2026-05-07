@@ -28,6 +28,12 @@ from latos.ingestion.hashing import (
     hash_bytes,
     hash_file,
 )
+from latos.ingestion.orchestrator import (
+    FileOutcome,
+    IngestionResult,
+    Orchestrator,
+    Outcome,
+)
 from latos.ingestion.parsed_data import ParsedData
 from latos.ingestion.registry import (
     MIN_CONFIDENCE,
@@ -58,4 +64,9 @@ __all__ = [
     "CrawlReport",
     "ProgressCallback",
     "crawl",
+    # Orchestrator
+    "FileOutcome",
+    "IngestionResult",
+    "Orchestrator",
+    "Outcome",
 ]
