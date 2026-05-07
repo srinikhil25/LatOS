@@ -27,6 +27,7 @@ from latos.ingestion.orchestrator import IngestionResult
 from latos.ui.dialogs.ingestion_progress import IngestionProgressDialog
 from latos.ui.pages.overview import OverviewPage
 from latos.ui.pages.project_picker import ProjectPickerPage
+from latos.ui.pages.sample_review import SampleReviewPage
 from latos.ui.pages.welcome import WelcomePage
 from latos.ui.services.ingestion_worker import OrchestratorFactory
 from latos.ui.services.recent_projects import RecentProjectsService
@@ -106,6 +107,12 @@ class LatosMainWindow(FluentWindow):  # type: ignore[misc]
         self._overview = OverviewPage()
         self.addSubInterface(self._overview, FluentIcon.PIE_SINGLE, "Overview")
 
+        # Same pattern as Overview — register early, populate on
+        # ingestion-complete. The Review page lets the user drill into
+        # individual samples / measurements.
+        self._sample_review = SampleReviewPage()
+        self.addSubInterface(self._sample_review, FluentIcon.SEARCH, "Review")
+
     def _on_project_opened(self, path: Path) -> None:
         """Slot fired when the user picks a folder.
 
@@ -120,6 +127,7 @@ class LatosMainWindow(FluentWindow):  # type: ignore[misc]
             self._last_ingestion_result = result
             if result is not None:
                 self._overview.set_project(result.project)
+                self._sample_review.set_project(result.project)
                 self.switchTo(self._overview)
         # Cancel / failure paths leave `_last_ingestion_result` untouched
         # — the user can re-pick the folder to retry. The project picker

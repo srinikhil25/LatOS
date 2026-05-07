@@ -10,6 +10,7 @@ import pytest
 from latos.ui.main_window import LatosMainWindow
 from latos.ui.pages.overview import OverviewPage
 from latos.ui.pages.project_picker import ProjectPickerPage
+from latos.ui.pages.sample_review import SampleReviewPage
 from latos.ui.pages.welcome import WelcomePage
 
 if TYPE_CHECKING:
@@ -60,6 +61,11 @@ class TestPagesRegistered:
         # Empty state until a project is opened.
         assert overview.project is None
 
+    def test_sample_review_page_present_in_widget_tree(self, latos_window: LatosMainWindow):
+        review = latos_window.findChild(SampleReviewPage, "SampleReviewPage")
+        assert review is not None
+        assert review.project is None
+
 
 class TestProjectOpenedSlot:
     def test_initial_current_project_is_none(self, latos_window: LatosMainWindow):
@@ -107,3 +113,9 @@ class TestProjectOpenedSlot:
         assert overview is not None
         assert overview.project is not None
         assert overview.project.root_path == chosen
+        # Same for the sample review page — both are populated in
+        # `_on_project_opened`.
+        review = latos_window.findChild(SampleReviewPage, "SampleReviewPage")
+        assert review is not None
+        assert review.project is not None
+        assert review.project.root_path == chosen
