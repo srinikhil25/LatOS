@@ -221,6 +221,23 @@ class TestClassification:
         assert entry.best_match_parser == "rigaku-xrd-txt"
         assert entry.confidence == pytest.approx(0.7)
 
+    def test_unrelated_file_has_no_best_match(self, tmp_path: Path):
+        """Regression: a PDF/JPEG should NOT report a spurious best-match parser.
+
+        Earlier the diagnostic call used `min_confidence=0.0`, which let
+        parsers returning exactly 0.0 through; the first registered
+        parser became a fake "best match" for files no parser could
+        recognize. The fix uses a positive epsilon, so genuinely
+        unrelated files now report `best_match_parser=None`.
+        """
+        # `.pdf` extension; no parser claims it.
+        _write(tmp_path / "report.pdf", b"%PDF-1.4 fake content")
+        report = crawl(tmp_path, default_registry())
+        entry = report.entries[0]
+        assert entry.classified_parser is None
+        assert entry.best_match_parser is None
+        assert entry.confidence == 0.0
+
 
 # ─── Error handling ─────────────────────────────────────────────────
 class TestErrorHandling:

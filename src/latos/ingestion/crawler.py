@@ -325,20 +325,25 @@ def _process_file(
     except OSError as exc:
         error = f"hash failed: {exc}"
 
-    # Classify. We ask the registry with min_confidence=0.0 so we get the
-    # best match even when below threshold (for diagnostics), then split
-    # into `classified_parser` (>= threshold) vs. `best_match_parser`
-    # (any non-zero score).
+    # Classify. We want both the threshold-respecting answer AND the
+    # diagnostic best-match-regardless-of-threshold, so we ask twice.
+    # NOTE: the diagnostic call uses a tiny positive epsilon, NOT 0.0.
+    # If we passed 0.0, the registry's `score < min_confidence` filter
+    # (which uses strict <) would let parsers returning exactly 0.0
+    # through, and the first-registered parser would become a spurious
+    # "best match" for completely unrelated files (PDFs, JPEGs, etc.).
+    # The epsilon ensures only parsers with genuine non-zero confidence
+    # are reported as best-match.
     classified_parser: str | None = None
     best_match_parser: str | None = None
     confidence = 0.0
     if error is None:
-        match = registry.find_parser(path, min_confidence=0.0)
-        if match is not None:
-            best_match_parser = match.parser.name
-            confidence = match.confidence
+        diagnostic_match = registry.find_parser(path, min_confidence=1e-9)
+        if diagnostic_match is not None:
+            best_match_parser = diagnostic_match.parser.name
+            confidence = diagnostic_match.confidence
             if confidence >= threshold:
-                classified_parser = match.parser.name
+                classified_parser = diagnostic_match.parser.name
 
     return CrawlEntry(
         path=path,
