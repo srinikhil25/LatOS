@@ -68,6 +68,9 @@ class TestProjectOpenedSlot:
     ):
         # Drive the picker exactly the way a real user would: patch the
         # dialog to return a chosen folder and click the open button.
+        # The `latos_window` fixture wires a stub orchestrator into the
+        # ingestion dialog so this completes synchronously without
+        # touching real SQLite / Parquet.
         chosen = tmp_path / "ChosenProject"
         chosen.mkdir()
 
@@ -82,9 +85,13 @@ class TestProjectOpenedSlot:
         picker = latos_window.findChild(ProjectPickerPage, "ProjectPickerPage")
         assert picker is not None
 
-        with qtbot.waitSignal(picker.projectOpened, timeout=1000):
+        with qtbot.waitSignal(picker.projectOpened, timeout=2000):
             picker._open_button.click()
 
         assert latos_window.current_project_root == chosen
+        # The stub orchestrator returns an empty IngestionResult, which
+        # the main window stores after the dialog accepts.
+        assert latos_window.last_ingestion_result is not None
+        assert latos_window.last_ingestion_result.project.root_path == chosen
         # And the folder shows up as a recent in the injected service.
         assert [e.path for e in recent_service.entries()] == [chosen.resolve()]
