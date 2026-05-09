@@ -55,9 +55,20 @@ pytestmark = [
 
 @pytest.fixture(scope="module")
 def ingestion_result(tmp_path_factory: pytest.TempPathFactory):
-    """Copy the real dataset to a tmp project root and ingest it once."""
+    """Copy the real dataset to a tmp project root and ingest it once.
+
+    We exclude `.latos/` from the copy: a previous run on the source
+    folder may have left a populated SQLite cache there, and copying
+    it along makes every file show up as `SKIPPED_CACHED` on this
+    "fresh" ingestion. Filtering `.latos/` (and `__pycache__/` for
+    good measure) ensures the test exercises a clean parse path.
+    """
     proj = tmp_path_factory.mktemp("dhivya_ingest") / "Dhivya"
-    shutil.copytree(_DHIVYA_SOURCE, proj)
+    shutil.copytree(
+        _DHIVYA_SOURCE,
+        proj,
+        ignore=shutil.ignore_patterns(".latos", "__pycache__", ".DS_Store"),
+    )
 
     orchestrator = Orchestrator(registry=default_registry())
     t0 = time.perf_counter()
