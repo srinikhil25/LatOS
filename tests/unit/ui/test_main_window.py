@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from latos.ui.main_window import LatosMainWindow
+from latos.ui.pages.cluster_review import ClusterReviewPage
 from latos.ui.pages.overview import OverviewPage
 from latos.ui.pages.project_picker import ProjectPickerPage
 from latos.ui.pages.sample_review import SampleReviewPage
@@ -66,6 +67,13 @@ class TestPagesRegistered:
         assert review is not None
         assert review.project is None
 
+    def test_cluster_review_page_present_in_widget_tree(self, latos_window: LatosMainWindow):
+        cluster = latos_window.findChild(ClusterReviewPage, "ClusterReviewPage")
+        assert cluster is not None
+        # Empty until a project is opened — no clusters, no project root.
+        assert cluster.clusters == ()
+        assert cluster.project_root is None
+
 
 class TestProjectOpenedSlot:
     def test_initial_current_project_is_none(self, latos_window: LatosMainWindow):
@@ -119,3 +127,9 @@ class TestProjectOpenedSlot:
         assert review is not None
         assert review.project is not None
         assert review.project.root_path == chosen
+        # Cluster review picks up the project root so Apply can persist
+        # decisions to `<root>/.latos/cluster_decisions.json`. The stub
+        # ingestion has zero samples, so the cluster list is empty.
+        cluster = latos_window.findChild(ClusterReviewPage, "ClusterReviewPage")
+        assert cluster is not None
+        assert cluster.project_root == chosen

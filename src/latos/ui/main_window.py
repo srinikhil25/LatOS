@@ -18,19 +18,25 @@ Why a single window
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QSize
 from PySide6.QtWidgets import QDialog
 from qfluentwidgets import FluentIcon, FluentWindow
 
+from latos.ingestion.labeling.cluster import SampleCluster
 from latos.ingestion.orchestrator import IngestionResult
 from latos.ui.dialogs.ingestion_progress import IngestionProgressDialog
+from latos.ui.pages.cluster_review import ClusterReviewPage
 from latos.ui.pages.overview import OverviewPage
 from latos.ui.pages.project_picker import ProjectPickerPage
 from latos.ui.pages.sample_review import SampleReviewPage
 from latos.ui.pages.welcome import WelcomePage
 from latos.ui.services.ingestion_worker import OrchestratorFactory
 from latos.ui.services.recent_projects import RecentProjectsService
+
+if TYPE_CHECKING:
+    from latos.core.models import Project, Sample
 
 __all__ = ["LatosMainWindow"]
 
@@ -107,6 +113,14 @@ class LatosMainWindow(FluentWindow):  # type: ignore[misc]
         self._overview = OverviewPage()
         self.addSubInterface(self._overview, FluentIcon.PIE_SINGLE, "Overview")
 
+        # Cluster review page. Lets the user merge/rename auto-clustered
+        # samples produced by Stage 2C (or, for now, derived from the
+        # ingested project's `Sample` rows). Sits before "Review" in the
+        # rail because clustering decisions are upstream of the
+        # measurement-level drill-down.
+        self._cluster_review = ClusterReviewPage()
+        self.addSubInterface(self._cluster_review, FluentIcon.TILES, "Clustering")
+
         # Same pattern as Overview — register early, populate on
         # ingestion-complete. The Review page lets the user drill into
         # individual samples / measurements.
@@ -128,6 +142,10 @@ class LatosMainWindow(FluentWindow):  # type: ignore[misc]
             if result is not None:
                 self._overview.set_project(result.project)
                 self._sample_review.set_project(result.project)
+                self._cluster_review.set_clusters(
+                    _clusters_from_project(result.project),
+                    project_root=result.project.root_path,
+                )
                 self.switchTo(self._overview)
         # Cancel / failure paths leave `_last_ingestion_result` untouched
         # — the user can re-pick the folder to retry. The project picker
@@ -144,3 +162,28 @@ class LatosMainWindow(FluentWindow):  # type: ignore[misc]
             orchestrator_factory=self._orchestrator_factory,
             parent=self,
         )
+
+
+def _clusters_from_project(project: Project) -> tuple[SampleCluster, ...]:
+    """Convert a `Project`'s samples into Stage 2C-shaped clusters.
+
+    For 2D.4 we treat each ingested `Sample` as one cluster. The full
+    Stage 2 pipeline (extract_hints → cluster_samples) hasn't been
+    wired through the orchestrator yet — that's a separate task — but
+    keeping the page driven by `SampleCluster` lets the UI swap to
+    the real pipeline output the moment we wire it up. Until then,
+    the user can still merge / rename / split samples that Stage 1's
+    folder-name heuristic produced.
+    """
+    return tuple(_cluster_from_sample(s) for s in project.samples)
+
+
+def _cluster_from_sample(sample: Sample) -> SampleCluster:
+    files = tuple(f.path for m in sample.measurements for f in m.files)
+    aliases = tuple(sorted({sample.canonical_name, *sample.aliases}))
+    return SampleCluster(
+        canonical=sample.canonical_name,
+        aliases=aliases,
+        file_paths=tuple(sorted(set(files))),
+        normalized_forms=(),
+    )
