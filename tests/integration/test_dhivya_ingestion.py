@@ -158,6 +158,57 @@ class TestSamples:
         assert "CS (Pure)" in names or "CS-3" in names
 
 
+# ─── Stage 2: labeling pipeline ─────────────────────────────────────
+class TestLabelingPipeline:
+    """Stage 2C clustering against the real Dhivya dataset.
+
+    The dataset is the regression motivator: Stage 1's per-folder
+    heuristic over-splits things like `CS Pure` (in XRD) and
+    `CS (Pure)` (in XPS) into two samples. The labeling pipeline
+    must collapse those.
+    """
+
+    def test_clustering_reduces_or_preserves_sample_count(self, ingestion_result):
+        from latos.ingestion.labeling.pipeline import cluster_project
+
+        result, _, _ = ingestion_result
+        clusters = cluster_project(result.project)
+        # Clustering can only collapse samples; never invent new ones.
+        assert len(clusters) <= len(result.project.samples), (
+            f"Pipeline produced {len(clusters)} clusters from "
+            f"{len(result.project.samples)} samples - clustering must not grow the set"
+        )
+
+    def test_cs_pure_variants_merged_into_single_cluster(self, ingestion_result):
+        from latos.ingestion.labeling.pipeline import cluster_project
+
+        result, _, _ = ingestion_result
+        clusters = cluster_project(result.project)
+
+        # Find any cluster that absorbed both `CS Pure` and `CS (Pure)`
+        # aliases. With the default threshold this regression is the
+        # primary thing we're guarding against. If the dataset only
+        # contains one of the two variants this test silently passes —
+        # we'd rather not fail on data drift.
+        names_to_aliases = [set(c.aliases) for c in clusters]
+        cs_pure_present = any(
+            any(x.lower().startswith("cs pure") for x in a) for a in names_to_aliases
+        )
+        cs_paren_present = any(any("(pure)" in x.lower() for x in a) for a in names_to_aliases)
+        if cs_pure_present and cs_paren_present:
+            # Both variants exist: they must land in the same cluster.
+            for aliases in names_to_aliases:
+                lowered = {x.lower() for x in aliases}
+                has_pure = any(x.startswith("cs pure") for x in lowered)
+                has_paren = any("(pure)" in x for x in lowered)
+                if has_pure and has_paren:
+                    return
+            raise AssertionError(
+                "Both `CS Pure` and `CS (Pure)` variants are present but landed "
+                "in different clusters - the Stage 2 regression case is firing"
+            )
+
+
 # ─── Persistence ────────────────────────────────────────────────────
 class TestPersistence:
     def test_database_file_created(self, ingestion_result):

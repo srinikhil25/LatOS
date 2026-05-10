@@ -525,3 +525,169 @@ leaks into them.
 ---
 
 <!-- Future entries go below this line -->
+
+## 2026-05-11 — Stage 2 Complete: Smart Sample Labeling
+
+### What shipped
+
+Stage 1's per-folder heuristic picks one sample name per file. That
+breaks the moment a researcher writes `CS Pure` in the XRD folder and
+`CS (Pure)` in the XPS folder — Stage 1 produces two `Sample`s for
+what is one logical sample. Stage 2 fixes that.
+
+The new layer takes the orchestrator's per-file output, extracts every
+plausible sample-name hint (path, filename, future: parser metadata),
+normalizes them aggressively, builds a similarity graph with
+`rapidfuzz` + `networkx`, and produces a tuple of `SampleCluster`s. A
+new sidebar page lets the user review the auto-clustering, rename
+canonicals, and merge or revert clusters; their decisions persist as
+JSON in `.latos/cluster_decisions.json`.
+
+**Sub-stages, in order:**
+
+| # | Commit | Files | What landed |
+|---|---|---|---|
+| 2A | `a1eed0c` | `labeling/hints.py`, tests | `SampleHints` dataclass + `extract_hints(path, parsed_data?, root?)`. Per-source confidences (metadata=0.85–1.00, filename=0.70, immediate non-generic parent=0.80, deeper parents decay to 0.30, generic folders=0.20). 34 unit tests covering path walks, filename cleaning regex, generic-folder fallback. |
+| 2B | `5925e09` | `labeling/normalize.py`, tests | `normalize(s)` (NFKC + lowercase + leading-prefix scrub + separator strip, idempotent under hypothesis property tests) and `tokens(s)`. Collapses `CS Pure`, `cs_pure`, `CS-Pure`, `CS (Pure)`, `cs.pure` to the same string. 44 unit tests including hypothesis idempotency. |
+| 2C | `ad4bfd6` | `labeling/cluster.py`, tests | `SampleCluster` + `cluster_samples(hints, threshold=0.85)`. Combines `fuzz.ratio`, `fuzz.token_sort_ratio`, `JaroWinkler.normalized_similarity` via `max(...)`. Files vote into components by summed confidence; empty-file components are filtered. 38 unit tests covering the Dhivya regression, distinct-but-similar separation, threshold boundaries, fallback paths. |
+| 2D | `b7eb482` | `labeling/decisions.py`, `ui/pages/cluster_review.py`, `ui/main_window.py`, tests | `ClusterDecisions` (renames + merges + splits) with atomic JSON persistence at `<root>/.latos/cluster_decisions.json`. `apply_decisions()` runs splits → merges → renames in that order. `ClusterReviewPage`: editable `TableWidget` with inline rename, multi-select Merge, Apply / Revert. Wired into the sidebar between Open and Review. 65 tests across the data layer + the page. |
+| 2 | this entry | `labeling/pipeline.py`, hint-weight tuning, integration test | `cluster_project(project)` walks every file in every measurement and runs the Stage 2A→2C pipeline against the persisted `Project`. Hint weights re-tuned: immediate-parent jumped from 0.60 → 0.80 (above filename's 0.70) so a researcher's deliberate folder structure outranks the filename hint. Dhivya integration test gained a `TestLabelingPipeline` class. |
+
+### Architecture decisions
+
+1. **Pipeline runs as a post-process, not inside the orchestrator.**
+   Folding clustering into ingestion would mean reordering parse → cluster →
+   persist, which is a much bigger surgery. The post-process approach lets
+   re-clustering with different thresholds work without re-parsing files —
+   important for the UI's "Apply" / "Revert" loop.
+
+2. **User decisions live in JSON, not the database.** `cluster_decisions.json`
+   is portable when sharing a project folder, easy to inspect with a text
+   editor, and survives `Orchestrator.ingest()` re-runs because it's keyed
+   by *auto* canonical (what Stage 2C produced) rather than database row IDs.
+
+3. **Splits → merges → renames apply order.** Splits run first (so a file
+   pulled out of cluster A into "MX-7" is no longer in A when A merges with
+   B), then merges, then renames last (so the rename targets the surviving
+   merged canonical). Tested explicitly.
+
+4. **Path keys in splits are `str(Path(...))`.** Cross-platform stringification:
+   `Path("/p/a.csv")` becomes `\p\a.csv` on Windows and `/p/a.csv` on Linux,
+   so any tests that touch split keys must derive them via `str(Path(...))`
+   rather than hard-coding forward slashes.
+
+5. **Editable canonical, but auto-canonical pinned per row.** The cluster
+   review table stores the *auto* canonical (Stage 2C's name) on each row
+   via `Qt.UserRole + 1`. After a rename, the rename slot finds the auto
+   canonical via that role data instead of from the now-renamed cell text —
+   so editing the renamed name a second time still targets the same auto
+   canonical instead of nesting renames.
+
+6. **Empty-file clusters dropped from output.** If a generic folder name
+   ("XRD", "data") appears in any hint extractor's output but no file's
+   strongest signal lands on it, the resulting connected component would
+   become a phantom cluster with zero files. The materialize step skips
+   empty-file components. The Dhivya regression tests would have produced
+   ghost "XRD" / "XPS" clusters without this filter.
+
+7. **Hint-weight tuning: immediate parent > filename.** During pipeline
+   integration the test `test_distinct_samples_stay_separate` failed because
+   one-character filenames (`a.xrdml`, `b.xrdml`) outvoted the folder
+   (`CS-1`, `CS-3`). With folder=0.60 and filename=0.70, every file would
+   cluster on its filename stem (`run`, `scan`) and the sample name embedded
+   in the folder would be lost. Bumped immediate-parent to 0.80; folder now
+   wins whenever it carries real information, filename remains the fallback
+   when the parent is generic or absent.
+
+### Real-data behaviour (Dhivya, 161 files)
+
+Stage 1 produced 12 samples; Stage 2 collapses to 11. Reduction of one
+because the headline regression case is now fixed:
+
+| Cluster | Aliases | Files | Note |
+|---|---|---|---|
+| `CS Pure` | `CS Pure`, `CS (Pure)` | 5 | ✅ The headline regression collapsed |
+| `CS` | `CS`, `CS-1`, `CS-3`, `CS-5`, `Cs 3d`, `Cs3Bi2I9` | 19 | ⚠️ Over-merged: short prefix-similar names chain in the graph |
+| `Dr.MN-dhivya-cscbi1` | `cscbi1`, `cscbi5`, `cskbi3` | 3 | ⚠️ Over-merged: one-char Levenshtein |
+| `cUsE3` | `cUsE3` | 27 | Untouched |
+| Other clusters (8) | varies | 1–4 each | Untouched |
+
+The over-merging of `CS-1` / `CS-3` / `CS-5` is a known limitation: short
+strings with a common prefix get high Jaro-Winkler scores, and when several
+of them are present they chain into one connected component. Mitigations
+already in place:
+
+- Cluster review page: the user can **revert** the over-merge or **rename**
+  the surviving canonical in seconds.
+- Threshold is per-call: a future "Strict" mode in the UI could pass `0.95`.
+
+A chemistry-aware similarity booster (e.g. recognizing that `Cs1Bi2I9` and
+`Cs3Bi2I9` differ in stoichiometry, not in spelling) is on the roadmap; for
+now the human-in-the-loop review handles it.
+
+### Tests
+
+- **746 tests passing** total (up from 700 at end of Stage 1E + Stage 2C).
+- **Stage 2 added 181 tests** across the four sub-stages and the integration:
+
+| Module | Tests | What it covers |
+|---|---|---|
+| `tests/unit/ingestion/labeling/test_hints.py` | 34 | Path walks, filename cleaning, metadata extraction, generic-folder fallback |
+| `tests/unit/ingestion/labeling/test_normalize.py` | 44 | NFKC, lowercase, prefix scrub, separator strip, idempotency hypothesis property |
+| `tests/unit/ingestion/labeling/test_cluster.py` | 38 | Similarity metric, canonical picking, full Dhivya regression + threshold edges |
+| `tests/unit/ingestion/labeling/test_decisions.py` | 36 | Rename / merge / split builders, JSON round-trip, atomic write, apply order |
+| `tests/unit/ingestion/labeling/test_pipeline.py` | 7 | Project → hints → clusters end-to-end, dedup, root forwarding, threshold passthrough |
+| `tests/unit/ui/pages/test_cluster_review.py` | 29 | Empty state, populate, rename, merge, apply (writes JSON), revert, summary text |
+| `tests/integration/test_dhivya_ingestion.py` | +2 | Pipeline reduces or preserves sample count; CS Pure regression collapsed |
+
+### Quality gates
+
+- ✅ Ruff lint clean (63 source files)
+- ✅ Ruff format clean
+- ✅ Mypy strict clean
+- ✅ Default pytest slice: 614 passing
+- ✅ UI slice: 132 passing under `QT_QPA_PLATFORM=offscreen`
+- ✅ Dhivya integration: 14 tests passing on real 161-file dataset
+
+### Bugs found & fixed (during Stage 2)
+
+1. **Filename hint outvoted folder hint** — see architecture decision #7.
+   Fixed by bumping immediate-parent path weight from 0.60 to 0.80.
+2. **`Counter[str]` typing under mypy strict** — `Counter` defaults to
+   int values; using it for float vote weights crashed mypy strict.
+   Switched to `dict[str, float]` with explicit `max(..., key=...)`
+   for the deterministic tiebreak.
+3. **Ghost clusters from generic path segments** — without the empty-file
+   filter, hints for "XRD" / "XPS" would surface as standalone clusters
+   in the output. Filter added to `_materialize_clusters`.
+4. **Path stringification cross-platform** — split keys recorded with
+   forward slashes failed on Windows. Tests now use `str(Path(...))`.
+5. **`with_merge(["only-one-name"])` was creating a single-name group**
+   that was silently a no-op at apply time but cluttered the JSON file.
+   Now dropped at the data layer.
+6. **Hypothesis caught `normalize(normalize(x)) != normalize(x)`** —
+   `str.lower()` decomposes some characters (Turkish capital İ, etc.).
+   Fixed by adding a final NFKC pass after separator scrubbing.
+
+### Demo flow (manual)
+
+1. Launch `latos-app`.
+2. Open Folder → pick a Dhivya-shaped project.
+3. Wait for ingestion (the existing 1E.3 progress dialog).
+4. Sidebar lands on Overview with stat cards.
+5. Click "Clustering" in the sidebar.
+6. See the auto-clustered table: one row per cluster with editable
+   canonical name, alias chips, file count.
+7. Click any sample name to rename it inline.
+8. Multi-select rows + click "Merge selected" to combine clusters.
+9. Click Apply — JSON written to `<project>/.latos/cluster_decisions.json`.
+10. Re-open the project later; decisions reload automatically.
+
+### Wow numbers for slide
+
+- 12 Stage 1 samples → 11 Stage 2 clusters (Dhivya regression collapsed)
+- Cluster phase: 42 ms on 161 files → "free" relative to the 6.6 s ingest
+- 181 new tests, 96% coverage on the cluster review page, 100% on `decisions.py`
+- User edits round-trip atomically through `cluster_decisions.json`
+- Pipeline is `extract_hints → normalize → cluster_samples → apply_decisions`
+  — four pure functions, easy to refactor or rerun with different thresholds

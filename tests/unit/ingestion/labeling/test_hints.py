@@ -130,8 +130,11 @@ class TestPathSegments:
             Path("/proj/data/characterization/XRD/CS-1/run.xrdml"),
             root=Path("/proj"),
         )
-        # Depth 0 is non-generic (`CS-1`).
-        assert hints.confidence_per_source.get("path_segment_d0") == pytest.approx(0.60)
+        # Depth 0 is non-generic (`CS-1`). The immediate-parent weight
+        # is 0.80 - the highest of any non-metadata signal - so a
+        # researcher's deliberate folder structure outranks the
+        # filename hint (0.70) when both exist.
+        assert hints.confidence_per_source.get("path_segment_d0") == pytest.approx(0.80)
         # The generic parents above it share one bucket.
         assert "path_segment_generic" in hints.confidence_per_source
         # The non-generic walk stops emitting numbered tags after `CS-1`

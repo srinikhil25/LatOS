@@ -225,6 +225,76 @@
         "commits": ["163ec8e", "3377028", "7634bdf", "19cd057", "1b2833d"]
       },
       "notes": "Latos is now a real desktop app. `latos-app` launches a FluentWindow with four sidebar pages (Welcome, Open, Overview, Review), one modal IngestionProgressDialog, and two Qt-free services (RecentProjectsService, IngestionWorker). Ingestion runs on a QThread via moveToThread; cancellation uses a threading.Event polled from the orchestrator's on_progress callback (crawl-phase only, by design). RecentProjectsService is pure Python: atomic-write JSON, tolerant load, filter-on-read, MRU semantics, 20-entry cap. UI tests use a stub MagicMock(spec=Orchestrator) so the suite never touches real SQLite/Parquet — wiring is what's verified. Bugs caught and fixed: CardWidget.clicked signature shadowing (renamed to pickRequested), method `list()` shadowing builtins inside class scope (renamed to entries()), QDialog.result() override clash (renamed to ingestion_result()), real ingestion accidentally firing in tests (added orchestrator_factory hook + stub fixture), DeprecationWarning from QMouseEvent ctor (replaced with direct signal emit), and assorted ruff naming-convention noqa annotations for Qt-required mixedCase signals + Qt-required event-handler camelCase names. Stage 1 fully complete: foundation → persistence → parsers → ingestion → desktop shell."
+    },
+    {
+      "date": "2026-05-11",
+      "stage": 2,
+      "stage_name": "Stage 2 — Smart Sample Labeling",
+      "metrics": {
+        "tests_passing_default_slice": 614,
+        "tests_passing_ui_slice": 132,
+        "tests_passing_total": 746,
+        "tests_failing": 0,
+        "test_coverage_labeling_hints_pct": 100,
+        "test_coverage_labeling_normalize_pct": 100,
+        "test_coverage_labeling_cluster_pct": 93,
+        "test_coverage_labeling_decisions_pct": 100,
+        "test_coverage_labeling_pipeline_pct": 100,
+        "test_coverage_ui_pages_cluster_review_pct": 96,
+        "test_coverage_ui_main_window_pct": 93,
+        "source_files": 63,
+        "labeling_modules": [
+          "labeling/hints.py",
+          "labeling/normalize.py",
+          "labeling/cluster.py",
+          "labeling/decisions.py",
+          "labeling/pipeline.py"
+        ],
+        "ui_pages": 5,
+        "ui_pages_list": [
+          "WelcomePage",
+          "ProjectPickerPage",
+          "OverviewPage",
+          "ClusterReviewPage",
+          "SampleReviewPage"
+        ],
+        "new_tests_in_stage": 181,
+        "test_breakdown": {
+          "2A_hints": 34,
+          "2B_normalize": 44,
+          "2C_cluster": 38,
+          "2D_decisions": 36,
+          "2D_cluster_review_page": 29,
+          "pipeline_unit": 7,
+          "main_window_integration_growth": 1,
+          "dhivya_integration_growth": 2
+        },
+        "similarity_threshold_default": 0.85,
+        "similarity_metrics_combined_via": "max(rapidfuzz.fuzz.ratio, rapidfuzz.fuzz.token_sort_ratio, rapidfuzz.distance.JaroWinkler.normalized_similarity)",
+        "graph_library": "networkx",
+        "decisions_storage": "<root>/.latos/cluster_decisions.json (atomic write)",
+        "decision_apply_order": "splits -> merges -> renames",
+        "hint_weight_immediate_parent_non_generic": 0.80,
+        "hint_weight_filename_stem": 0.70,
+        "hint_weight_metadata_high_confidence": 1.00,
+        "hint_weight_path_segment_generic": 0.20,
+        "real_data_clustering": {
+          "dataset": "Dhivya MXene (D:/Materials-Informatics/data_raw/dhivya_data)",
+          "stage1_samples": 12,
+          "stage2_clusters": 11,
+          "regression_collapsed_cs_pure_variants": true,
+          "cluster_phase_runtime_ms": 42,
+          "ingest_runtime_sec": 6.6,
+          "known_overmerge_cases": ["CS / CS-1 / CS-3 / CS-5", "cscbi1 / cscbi5 / cskbi3"],
+          "overmerge_mitigation": "user can revert / split via ClusterReviewPage; chemistry-aware booster on roadmap"
+        },
+        "mypy_strict_errors": 0,
+        "ruff_errors": 0,
+        "ui_test_suite_runtime_sec": 11,
+        "test_runtime_default_sec": 50.5,
+        "commits": ["a1eed0c", "5925e09", "ad4bfd6", "b7eb482"]
+      },
+      "notes": "Stage 2 replaces Stage 1's per-folder heuristic with a real labeling pipeline. extract_hints (path / filename / future: parser metadata) -> normalize (NFKC + lowercase + prefix scrub + separator strip, idempotent under hypothesis) -> cluster_samples (rapidfuzz + networkx connected components, confidence-weighted file voting, empty-file components filtered) -> apply_decisions (renames + merges + splits with deterministic apply order). On the real Dhivya dataset, Stage 1's 12 samples collapse to 11 clusters with the headline regression (`CS Pure` vs `CS (Pure)`) merged. ClusterReviewPage is the user's escape hatch for over-merging: editable canonical names, multi-select Merge, Apply (atomic write to `.latos/cluster_decisions.json`), Revert. Hint weights re-tuned during integration: immediate-parent jumped from 0.60 to 0.80 so a researcher's deliberate folder structure outranks the filename hint. Ghost clusters from generic path segments are filtered before output. Cross-platform path stringification (str(Path(...))) avoids Windows-vs-POSIX backslash mismatches in split keys. Known limitation: short prefix-similar names chain in the similarity graph (CS-1 / CS-3 / CS-5 over-merge into CS); the cluster review page handles this in the UI loop and a chemistry-aware similarity booster is on the roadmap. Stage 2 done-criteria met; ready for Stage 3 (analysis layer)."
     }
   ]
 }

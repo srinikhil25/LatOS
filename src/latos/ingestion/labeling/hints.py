@@ -120,7 +120,18 @@ _GENERIC_FOLDER_NAMES: frozenset[str] = frozenset(
 # parent. We decay by 0.1 per level out to 4 levels; deeper segments
 # share the floor weight. Generic segments collapse to a single low
 # weight regardless of depth.
-_PATH_DEPTH_WEIGHTS: tuple[float, ...] = (0.60, 0.50, 0.40, 0.30)
+#
+# Why immediate parent wins over filename (0.80 > 0.70): in materials
+# data folder structure is the deliberate organisation researchers
+# impose ("XRD/CS-1/run3.xrdml"); the filename is typically a
+# scan/run/index that doesn't identify the sample. The Dhivya dataset
+# pinned this: with folder=0.60 and filename=0.70, every file would
+# cluster on its filename stem ("run", "scan") and the sample name
+# embedded in the folder would be lost. Keeping a non-generic
+# immediate parent above the filename weight lets the folder win
+# whenever it carries real information; filename remains the fallback
+# when the parent is generic (XRD, data, ...) or absent.
+_PATH_DEPTH_WEIGHTS: tuple[float, ...] = (0.80, 0.50, 0.40, 0.30)
 _PATH_FLOOR_WEIGHT = 0.30
 _PATH_GENERIC_WEIGHT = 0.20
 
