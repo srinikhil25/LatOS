@@ -80,7 +80,7 @@ class RigakuXrdTxtParser(BaseParser):
     """Parser for Rigaku Ultima-series XRD `.txt` exports."""
 
     name: ClassVar[str] = "rigaku-xrd-txt"
-    version: ClassVar[str] = "1.0.0"
+    version: ClassVar[str] = "1.0.1"
     technique: ClassVar[Technique] = Technique.XRD
     supported_extensions: ClassVar[tuple[str, ...]] = (".txt",)
 

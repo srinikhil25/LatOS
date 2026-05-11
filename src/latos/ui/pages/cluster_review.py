@@ -252,10 +252,18 @@ class ClusterReviewPage(QWidget):
         # cells dropped into edit mode rather than extending the
         # selection, so "Merge selected" appeared to do nothing.
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        # Edit only on double-click / Enter. Without this, a *single*
+        # click on the canonical cell (column 0 is editable) dropped
+        # into edit mode instead of selecting the row, so the user
+        # could never Ctrl-click a second row to build a merge
+        # selection. Standard spreadsheet behaviour: click selects,
+        # double-click edits.
+        self._table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+        )
         # Show row numbers - they double as the "click here to select
-        # the whole row" affordance. Without this header visible,
-        # clicking on a cell either enters edit mode or selects only
-        # that one cell, and the merge button never sees >=2 rows.
+        # the whole row" affordance.
         self._table.verticalHeader().setVisible(True)
         # The Aliases column eats the spare width; the others fit content.
         header = self._table.horizontalHeader()
@@ -268,10 +276,10 @@ class ClusterReviewPage(QWidget):
         # A footer caption documenting how the editable column works,
         # so the user doesn't have to guess.
         hint = StrongBodyLabel(
-            "Click a sample name to rename it. Click the row number on the left to "
-            "select a row; Ctrl+click extends the selection. With two or more rows "
-            "selected, click Merge to combine them. Apply saves your edits to "
-            ".latos/cluster_decisions.json.",
+            "Double-click a sample name to rename it. Click a row to select it; "
+            "Ctrl+click adds another row; Shift+click selects a range. With two "
+            "or more rows selected, click Merge to combine them. Apply saves "
+            "your edits to .latos/cluster_decisions.json.",
             self,
         )
         hint.setObjectName("ClusterReviewHint")

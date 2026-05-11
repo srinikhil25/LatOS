@@ -62,6 +62,6 @@
     "wavelength_min_nm": 200.0
   },
   "parser_name": "uvdrs-xlsx",
-  "parser_version": "1.0.0",
+  "parser_version": "1.0.1",
   "technique": "uv_drs"
 }

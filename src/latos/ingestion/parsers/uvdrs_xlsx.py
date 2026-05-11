@@ -53,7 +53,7 @@ class UvDrsXlsxParser(BaseParser):
     """Parser for UV-DRS Excel `.xlsx` workbooks."""
 
     name: ClassVar[str] = "uvdrs-xlsx"
-    version: ClassVar[str] = "1.0.0"
+    version: ClassVar[str] = "1.0.1"
     technique: ClassVar[Technique] = Technique.UV_DRS
     supported_extensions: ClassVar[tuple[str, ...]] = (".xlsx",)
 

@@ -60,7 +60,7 @@ class CasaXpsCsvParser(BaseParser):
     """Parser for CasaXPS-exported `.csv` region files."""
 
     name: ClassVar[str] = "casaxps-csv"
-    version: ClassVar[str] = "1.0.0"
+    version: ClassVar[str] = "1.0.1"
     technique: ClassVar[Technique] = Technique.XPS
     supported_extensions: ClassVar[tuple[str, ...]] = (".csv",)
 

@@ -65,7 +65,7 @@ class BrukerSpxParser(BaseParser):
     """Parser for Bruker EDS `.spx` (TRTSpectrum XML) files."""
 
     name: ClassVar[str] = "bruker-eds-spx"
-    version: ClassVar[str] = "1.0.0"
+    version: ClassVar[str] = "1.0.1"
     technique: ClassVar[Technique] = Technique.EDS
     supported_extensions: ClassVar[tuple[str, ...]] = (".spx",)
 

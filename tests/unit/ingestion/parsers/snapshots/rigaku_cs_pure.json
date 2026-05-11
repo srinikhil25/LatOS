@@ -55,6 +55,6 @@
     "scan_start_deg": 5.01086644
   },
   "parser_name": "rigaku-xrd-asc",
-  "parser_version": "1.0.0",
+  "parser_version": "1.0.1",
   "technique": "xrd"
 }

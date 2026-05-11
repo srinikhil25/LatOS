@@ -76,6 +76,6 @@
     "y_unit": "Count"
   },
   "parser_name": "rigaku-xrd-txt",
-  "parser_version": "1.0.0",
+  "parser_version": "1.0.1",
   "technique": "xrd"
 }

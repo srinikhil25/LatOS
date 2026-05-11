@@ -60,7 +60,7 @@ class HallXlsParser(BaseParser):
     """Parser for Hall-effect `.xls` workbooks (single-temperature export)."""
 
     name: ClassVar[str] = "hall-xls"
-    version: ClassVar[str] = "1.0.0"
+    version: ClassVar[str] = "1.0.1"
     technique: ClassVar[Technique] = Technique.HALL
     supported_extensions: ClassVar[tuple[str, ...]] = (".xls",)
 

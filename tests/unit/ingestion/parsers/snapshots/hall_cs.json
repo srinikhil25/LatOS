@@ -98,6 +98,6 @@
     "v72_mv__label": "V72 (mV)"
   },
   "parser_name": "hall-xls",
-  "parser_version": "1.0.0",
+  "parser_version": "1.0.1",
   "technique": "hall"
 }

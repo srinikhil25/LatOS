@@ -50,6 +50,6 @@
     ]
   },
   "parser_name": "microscopy-tif",
-  "parser_version": "1.0.0",
+  "parser_version": "1.0.1",
   "technique": "sem"
 }

@@ -57,6 +57,6 @@
     "region": "C1s"
   },
   "parser_name": "casaxps-csv",
-  "parser_version": "1.0.0",
+  "parser_version": "1.0.1",
   "technique": "xps"
 }

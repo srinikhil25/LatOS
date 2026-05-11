@@ -238,6 +238,25 @@ class TestRename:
 # ---------------------------------------------------------------------------
 
 
+def _select_rows(page: ClusterReviewPage, rows: tuple[int, ...]) -> None:
+    """Programmatically multi-select rows under ExtendedSelection mode.
+
+    `QTableWidget.selectRow(n)` REPLACES the selection in
+    ExtendedSelection mode (it mirrors a plain click), so the only way
+    to build a >1-row selection from code is via the selection model
+    with `Select | Rows` flags - the same operation Qt performs
+    internally when the user Ctrl-clicks a row number.
+    """
+    from PySide6.QtCore import QItemSelectionModel
+
+    model = page._table.selectionModel()
+    model.clearSelection()
+    flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+    for r in rows:
+        index = page._table.model().index(r, 0)
+        model.select(index, flags)
+
+
 class TestMerge:
     def test_merge_two_selected_rows(self, qtbot: QtBot):
         page = ClusterReviewPage()
@@ -249,9 +268,7 @@ class TestMerge:
             )
         )
 
-        # Select both rows.
-        page._table.selectRow(0)
-        page._table.selectRow(1)
+        _select_rows(page, (0, 1))
         page.merge_selected()
 
         # Single resulting cluster.
@@ -283,7 +300,7 @@ class TestMerge:
                 _cluster("B", files=("/p/b.csv",)),
             )
         )
-        page._table.selectRow(0)
+        _select_rows(page, (0,))
         page.merge_selected()
         assert page.decisions == ClusterDecisions()
 
@@ -296,10 +313,32 @@ class TestMerge:
                 _cluster("B", files=("/p/b.csv",)),
             )
         )
-        page._table.selectRow(0)
-        page._table.selectRow(1)
+        _select_rows(page, (0, 1))
         with qtbot.waitSignal(page.decisionsChanged, timeout=500):
             page.merge_selected()
+
+    def test_extended_selection_mode_set(self, qtbot: QtBot):
+        # Guard against accidental regression to MultiSelection. The
+        # bug was that MultiSelection + editable cells caused single
+        # clicks to drop into edit mode instead of extending the
+        # selection - users saw "Merge does nothing" because the
+        # button never saw >=2 selected rows.
+        from PySide6.QtWidgets import QAbstractItemView
+
+        page = ClusterReviewPage()
+        qtbot.addWidget(page)
+        assert page._table.selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection
+        # Edit triggers should require an explicit double-click or
+        # Enter so single-click selects the row instead of editing.
+        triggers = page._table.editTriggers()
+        assert triggers & QAbstractItemView.EditTrigger.DoubleClicked
+        assert not (triggers & QAbstractItemView.EditTrigger.SelectedClicked)
+        # Vertical header (row numbers) must not be hidden - it's the
+        # primary affordance users click to select a row.
+        # `isVisible()` is False until the widget is shown, so we use
+        # `isHidden()` which reflects the configured visibility flag
+        # regardless of paint state.
+        assert not page._table.verticalHeader().isHidden()
 
 
 # ---------------------------------------------------------------------------

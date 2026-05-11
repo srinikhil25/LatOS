@@ -57,6 +57,6 @@
     "primary_energy_kv": 25.0
   },
   "parser_name": "bruker-eds-spx",
-  "parser_version": "1.0.0",
+  "parser_version": "1.0.1",
   "technique": "eds"
 }

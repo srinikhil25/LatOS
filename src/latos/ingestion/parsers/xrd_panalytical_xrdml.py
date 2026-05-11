@@ -122,7 +122,7 @@ class PanalyticalXrdmlParser(BaseParser):
     """Parser for PANalytical Empyrean `.xrdml` XML files."""
 
     name: ClassVar[str] = "panalytical-xrdml"
-    version: ClassVar[str] = "1.0.0"
+    version: ClassVar[str] = "1.0.1"
     technique: ClassVar[Technique] = Technique.XRD
     supported_extensions: ClassVar[tuple[str, ...]] = (".xrdml",)
 

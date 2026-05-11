@@ -74,7 +74,7 @@ class MicroscopyTifParser(BaseParser):
     """Parser for microscopy `.tif`/`.tiff` files (metadata-only)."""
 
     name: ClassVar[str] = "microscopy-tif"
-    version: ClassVar[str] = "1.0.0"
+    version: ClassVar[str] = "1.0.1"
     # Default to SEM; orchestrator/Stage 2 can override based on context.
     technique: ClassVar[Technique] = Technique.SEM
     supported_extensions: ClassVar[tuple[str, ...]] = (".tif", ".tiff")

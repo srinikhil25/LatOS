@@ -57,7 +57,7 @@ class RigakuXrdAscParser(BaseParser):
     """Parser for Rigaku ASCII `.ASC` two-column XRD exports."""
 
     name: ClassVar[str] = "rigaku-xrd-asc"
-    version: ClassVar[str] = "1.0.0"
+    version: ClassVar[str] = "1.0.1"
     technique: ClassVar[Technique] = Technique.XRD
     # `.asc` (lowercase) is the canonical match key — `_extension_matches`
     # is case-insensitive, so `.ASC` files match too.

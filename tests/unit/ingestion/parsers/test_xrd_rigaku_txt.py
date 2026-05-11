@@ -77,8 +77,11 @@ class TestClassMetadata:
         assert RigakuXrdTxtParser.name == "rigaku-xrd-txt"
 
     def test_version_is_semver(self):
-        # Stage 1C.3 ships 1.0.0. Bumping requires regenerating snapshot.
-        assert RigakuXrdTxtParser.version == "1.0.0"
+        # Stage 1C.3 shipped 1.0.0; 1.0.1 added a format-label fallback
+        # for the `instrument` field so the UI never shows "unknown
+        # instrument". Bumping the version invalidates the parse cache
+        # so old persisted measurements get refreshed on the next ingest.
+        assert RigakuXrdTxtParser.version == "1.0.1"
 
     def test_technique(self):
         assert RigakuXrdTxtParser.technique is Technique.XRD

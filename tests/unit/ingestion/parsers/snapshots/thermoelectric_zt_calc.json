@@ -145,6 +145,6 @@
     "sheet_name": "CS"
   },
   "parser_name": "thermoelectric-xlsx",
-  "parser_version": "1.0.0",
+  "parser_version": "1.0.1",
   "technique": "thermoelectric"
 }

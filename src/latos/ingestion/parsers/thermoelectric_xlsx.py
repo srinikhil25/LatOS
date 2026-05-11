@@ -61,7 +61,7 @@ class ThermoelectricXlsxParser(BaseParser):
     """Parser for thermoelectric-property `.xlsx` workbooks."""
 
     name: ClassVar[str] = "thermoelectric-xlsx"
-    version: ClassVar[str] = "1.0.0"
+    version: ClassVar[str] = "1.0.1"
     technique: ClassVar[Technique] = Technique.THERMOELECTRIC
     supported_extensions: ClassVar[tuple[str, ...]] = (".xlsx",)
 
