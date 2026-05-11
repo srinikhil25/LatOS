@@ -127,7 +127,7 @@ class HallXlsParser(BaseParser):
             technique=self.technique,
             arrays={},  # Hall is scalar at a single temperature.
             metadata=metadata,
-            instrument=None,
+            instrument="Hall effect (xls export)",
             measured_at=None,
             issues=tuple(issues),
             parser_name=self.name,
@@ -140,7 +140,7 @@ class HallXlsParser(BaseParser):
             technique=self.technique,
             arrays={},
             metadata={},
-            instrument=None,
+            instrument="Hall effect (xls export)",
             measured_at=None,
             issues=tuple(issues),
             parser_name=self.name,

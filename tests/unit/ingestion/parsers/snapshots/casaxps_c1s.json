@@ -39,7 +39,7 @@
       ]
     }
   },
-  "instrument": null,
+  "instrument": "CasaXPS export",
   "issues": [
     {
       "acknowledged": false,

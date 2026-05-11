@@ -216,7 +216,9 @@ class PanalyticalXrdmlParser(BaseParser):
             technique=self.technique,
             arrays={},
             metadata={},
-            instrument=None,
+            # Fall back to the format label when the XML didn't yield a
+            # specific instrument name (the success path may override).
+            instrument="PANalytical (.xrdml)",
             measured_at=None,
             issues=tuple(issues),
             parser_name=self.name,

@@ -217,7 +217,7 @@ class RigakuXrdAscParser(BaseParser):
             technique=self.technique,
             arrays=arrays,
             metadata=metadata,
-            instrument=None,  # No instrument info in the file.
+            instrument="Rigaku XRD (.ASC)",  # File format has no hardware id.
             measured_at=None,  # No timestamp.
             issues=tuple(issues),
             parser_name=self.name,

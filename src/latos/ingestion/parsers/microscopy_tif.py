@@ -171,7 +171,9 @@ class MicroscopyTifParser(BaseParser):
             technique=self.technique,
             arrays={},
             metadata={},
-            instrument=None,
+            # The success path extracts the actual TIFF Software tag when
+            # present; this fallback covers files with no readable tags.
+            instrument="Microscopy (.tif)",
             measured_at=None,
             issues=tuple(issues),
             parser_name=self.name,

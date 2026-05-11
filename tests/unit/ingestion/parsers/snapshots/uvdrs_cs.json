@@ -39,7 +39,7 @@
       ]
     }
   },
-  "instrument": null,
+  "instrument": "UV-DRS (xlsx export)",
   "issues": [
     {
       "acknowledged": false,

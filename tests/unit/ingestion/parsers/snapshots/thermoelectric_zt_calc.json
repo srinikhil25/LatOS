@@ -115,7 +115,7 @@
       ]
     }
   },
-  "instrument": null,
+  "instrument": "Thermoelectric (xlsx export)",
   "issues": [
     {
       "acknowledged": false,

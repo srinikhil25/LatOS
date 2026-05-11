@@ -171,7 +171,10 @@ class RigakuXrdTxtParser(BaseParser):
             else {}
         )
 
-        instrument = raw_headers.get("Gonio") or None
+        # Use the goniometer model when the header carries one; fall back
+        # to a generic format label otherwise so the UI never shows
+        # "unknown instrument".
+        instrument = raw_headers.get("Gonio") or "Rigaku XRD (TXT export)"
 
         return ParsedData(
             technique=self.technique,

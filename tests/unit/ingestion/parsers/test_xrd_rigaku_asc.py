@@ -96,9 +96,11 @@ class TestParseHappyPath:
     def test_metadata_includes_n_points(self):
         assert self.result.metadata["n_points"] == len(self.result.arrays["two_theta"])
 
-    def test_no_instrument_no_timestamp(self):
-        # `.ASC` carries neither.
-        assert self.result.instrument is None
+    def test_format_label_instrument_and_no_timestamp(self):
+        # `.ASC` carries no hardware id and no timestamp - we surface a
+        # format-level label as a friendlier UI fallback than "unknown
+        # instrument", and leave measured_at as None.
+        assert self.result.instrument == "Rigaku XRD (.ASC)"
         assert self.result.measured_at is None
 
     def test_negative_intensity_warning_consistent_with_threshold(self):

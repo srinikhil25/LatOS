@@ -195,7 +195,10 @@ class CasaXpsCsvParser(BaseParser):
             technique=self.technique,
             arrays=arrays,
             metadata=metadata,
-            instrument=None,
+            # CasaXPS .csv exports rarely carry the source spectrometer model
+            # in a parseable form. Fall back to a software label so the UI
+            # shows something more useful than "unknown instrument".
+            instrument="CasaXPS export",
             measured_at=None,
             issues=tuple(issues),
             parser_name=self.name,

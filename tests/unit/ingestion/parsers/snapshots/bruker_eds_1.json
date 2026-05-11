@@ -39,7 +39,7 @@
       ]
     }
   },
-  "instrument": null,
+  "instrument": "Bruker EDS (.spx)",
   "issues": [
     {
       "acknowledged": false,

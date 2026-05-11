@@ -51,6 +51,8 @@ from latos.core.enums import Severity
 from latos.ingestion.array_store import ArrayStore
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from latos.core.models import Measurement, Project, Sample
 
 __all__ = ["SampleReviewPage"]
@@ -64,6 +66,20 @@ _MEASUREMENT_ID_ROLE = Qt.ItemDataRole.UserRole + 1
 # How many distinct 1-D arrays we need before plotting one against
 # another. Mirrors the heuristic in `OverviewPage._render_plot`.
 _MIN_ARRAYS_FOR_XY_PLOT = 2
+
+# Below this point count, the default pyqtgraph thin line is hard to
+# spot on a white background — small Hall / thermoelectric datasets
+# (13 temperatures) look like an empty plot to a casual eye. We add
+# markers + a thicker pen below this threshold so few-point data is
+# unmistakably present.
+_FEW_POINT_THRESHOLD = 50
+
+# Pen + symbol styling. Kept here rather than inline so a future
+# theme system can override them in one place.
+_PLOT_PEN = {"color": "#0F6CBD", "width": 2}
+_PLOT_SYMBOL = "o"
+_PLOT_SYMBOL_SIZE = 7
+_PLOT_SYMBOL_BRUSH = "#0F6CBD"
 
 
 # A small dot character we colorize per-severity to draw the eye to
@@ -348,7 +364,7 @@ class SampleReviewPage(QWidget):
             y = arrays[y_name]
             self._plot_widget.setLabel("bottom", x_name)
             self._plot_widget.setLabel("left", y_name)
-            self._plot_widget.plot(x, y, pen="b")
+            self._plot_curve(x, y)
             self._plot_caption.setText(f"{y_name} vs {x_name}")
         else:
             import numpy as np  # noqa: PLC0415  (cheap on this hot path)
@@ -358,8 +374,31 @@ class SampleReviewPage(QWidget):
             x = np.arange(len(y))
             self._plot_widget.setLabel("bottom", "index")
             self._plot_widget.setLabel("left", y_name)
-            self._plot_widget.plot(x, y, pen="b")
+            self._plot_curve(x, y)
             self._plot_caption.setText(f"{y_name} vs index")
+
+    def _plot_curve(self, x: np.ndarray, y: np.ndarray) -> None:
+        """Plot (x, y) with a styling that works for both sparse and dense data.
+
+        For datasets with few points (Hall / thermoelectric, ~13
+        temperatures) the default thin blue line is easy to mistake
+        for an empty plot. We add filled markers below
+        `_FEW_POINT_THRESHOLD` so the data is unmistakably present,
+        and use a thicker pen across the board so XRD scans don't
+        look anemic either.
+        """
+        if len(x) < _FEW_POINT_THRESHOLD:
+            self._plot_widget.plot(
+                x,
+                y,
+                pen=_PLOT_PEN,
+                symbol=_PLOT_SYMBOL,
+                symbolSize=_PLOT_SYMBOL_SIZE,
+                symbolBrush=_PLOT_SYMBOL_BRUSH,
+                symbolPen=_PLOT_SYMBOL_BRUSH,
+            )
+        else:
+            self._plot_widget.plot(x, y, pen=_PLOT_PEN)
 
     # ------------------------------------------------------------------
     # Helpers

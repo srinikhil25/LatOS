@@ -244,8 +244,19 @@ class ClusterReviewPage(QWidget):
         self._table.setColumnCount(len(_HEADERS))
         self._table.setHorizontalHeaderLabels(_HEADERS)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        self._table.verticalHeader().setVisible(False)
+        # ExtendedSelection (vs MultiSelection) gives standard
+        # spreadsheet UX: plain click selects, Ctrl+click extends,
+        # Shift+click selects a range. With the row-number header
+        # visible (below) the user has an obvious affordance to click.
+        # MultiSelection was a bad choice here - clicks on editable
+        # cells dropped into edit mode rather than extending the
+        # selection, so "Merge selected" appeared to do nothing.
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        # Show row numbers - they double as the "click here to select
+        # the whole row" affordance. Without this header visible,
+        # clicking on a cell either enters edit mode or selects only
+        # that one cell, and the merge button never sees >=2 rows.
+        self._table.verticalHeader().setVisible(True)
         # The Aliases column eats the spare width; the others fit content.
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(_COL_CANONICAL, QHeaderView.ResizeMode.ResizeToContents)
@@ -257,8 +268,10 @@ class ClusterReviewPage(QWidget):
         # A footer caption documenting how the editable column works,
         # so the user doesn't have to guess.
         hint = StrongBodyLabel(
-            "Click a sample name to rename it. Select multiple rows and click Merge "
-            "to combine clusters. Apply saves your edits to .latos/cluster_decisions.json.",
+            "Click a sample name to rename it. Click the row number on the left to "
+            "select a row; Ctrl+click extends the selection. With two or more rows "
+            "selected, click Merge to combine them. Apply saves your edits to "
+            ".latos/cluster_decisions.json.",
             self,
         )
         hint.setObjectName("ClusterReviewHint")
