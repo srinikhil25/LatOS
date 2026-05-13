@@ -103,11 +103,14 @@ class TestParseHappyPath:
         warning_fields = [i.field for i in self.result.issues]
         assert "measured_at" in warning_fields
 
-    def test_technique_default_warning_present(self):
-        # The parser always emits an INFO note that the technique was
-        # defaulted — Stage 2 will refine.
-        info_messages = [i.message for i in self.result.issues]
-        assert any("technique" in m.lower() for m in info_messages)
+    def test_no_stale_technique_default_note(self):
+        # The old INFO "Technique defaulted to SEM; refine in Stage 2"
+        # note has been removed — the orchestrator now does
+        # folder-aware refinement (TEM/STEM/FE-SEM) for real, so the
+        # disclaimer was misleading and noisy on every Review-page
+        # measurement.
+        technique_issues = [i for i in self.result.issues if i.field == "technique"]
+        assert technique_issues == []
 
     def test_no_errors(self):
         assert not self.result.has_errors

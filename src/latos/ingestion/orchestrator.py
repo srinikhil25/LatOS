@@ -44,9 +44,8 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
 
-from latos.core.enums import FileRole, Severity
+from latos.core.enums import FileRole, Severity, Technique
 from latos.core.models import (
     FileRef,
     Measurement,
@@ -57,11 +56,13 @@ from latos.core.models import (
     utc_now,
 )
 from latos.ingestion.array_store import ArrayStore
+from latos.ingestion.base_parser import BaseParser
 from latos.ingestion.crawler import (
     CrawlEntry,
     ProgressCallback,
     crawl,
 )
+from latos.ingestion.parsed_data import ParsedData
 from latos.ingestion.registry import ParserRegistry
 from latos.persistence.db import (
     ensure_project_dirs,
@@ -281,8 +282,13 @@ class Orchestrator:
                     samples_by_name[s.canonical_name] = acc
                 unassigned = list(existing.unassigned_files)
 
+            current_run_ids: set[str] = set()
             for entry in report.entries:
-                outcome = self._handle_entry(
+                # A single file can produce multiple measurements (e.g. a
+                # multi-sheet workbook → one measurement per sheet); the
+                # orchestrator iterates the list and records one
+                # FileOutcome per produced (or skipped) measurement.
+                entry_outcomes = self._handle_entry(
                     entry=entry,
                     root=root,
                     project_id=project_id,
@@ -290,14 +296,17 @@ class Orchestrator:
                     samples_by_name=samples_by_name,
                     cached_files=cached_files,
                 )
-                outcomes.append(outcome)
+                outcomes.extend(entry_outcomes)
+                for o in entry_outcomes:
+                    if o.outcome in (Outcome.PARSED, Outcome.PARSED_WITH_ISSUES) and (
+                        o.measurement_id is not None
+                    ):
+                        current_run_ids.add(o.measurement_id)
 
-            # Dedupe: `FileRow.sha256` is UNIQUE in the schema, so the
-            # same file content cannot appear in two measurements. On a
-            # parser-version cache miss, we created a new measurement
-            # alongside the seeded old one — keep the most recently
-            # parsed of any pair sharing a sha256.
-            _dedupe_measurements_by_sha256(samples_by_name)
+            # Dedupe: drop OLD measurements superseded by current-run
+            # ones with the same sha256. Sibling measurements from
+            # this run (multi-sheet workbook → one per sheet) all stay.
+            _dedupe_measurements_by_sha256(samples_by_name, current_run_ids=current_run_ids)
 
             project = Project(
                 id=project_id,
@@ -321,7 +330,7 @@ class Orchestrator:
         except Exception:
             return None
 
-    def _handle_entry(
+    def _handle_entry(  # noqa: PLR0911
         self,
         *,
         entry: CrawlEntry,
@@ -330,85 +339,118 @@ class Orchestrator:
         store: ArrayStore,
         samples_by_name: dict[str, _SampleAccumulator],
         cached_files: dict[str, tuple[str, str]],
-    ) -> FileOutcome:
-        """Process one crawl entry. Updates `samples_by_name` in place."""
+    ) -> list[FileOutcome]:
+        """Process one crawl entry.
+
+        Returns a list because a single file can produce multiple
+        measurements (multi-sheet workbooks → one measurement per
+        sheet). Updates `samples_by_name` in place.
+        """
         # Hash failure → can't dedup or parse safely.
         if entry.error is not None or entry.sha256 is None:
-            return FileOutcome(
-                path=entry.path,
-                relative_path=entry.relative_path,
-                sha256=entry.sha256,
-                outcome=Outcome.SKIPPED_HASH_FAILED,
-                sample_name=None,
-                parser_name=None,
-                measurement_id=None,
-                error=entry.error,
-            )
+            return [
+                FileOutcome(
+                    path=entry.path,
+                    relative_path=entry.relative_path,
+                    sha256=entry.sha256,
+                    outcome=Outcome.SKIPPED_HASH_FAILED,
+                    sample_name=None,
+                    parser_name=None,
+                    measurement_id=None,
+                    error=entry.error,
+                ),
+            ]
 
         # Below confidence threshold → unknown technique. Not parsed.
         if entry.classified_parser is None:
-            return FileOutcome(
-                path=entry.path,
-                relative_path=entry.relative_path,
-                sha256=entry.sha256,
-                outcome=Outcome.SKIPPED_UNCLASSIFIED,
-                sample_name=None,
-                parser_name=entry.best_match_parser,  # diagnostic
-                measurement_id=None,
-                error=None,
-            )
+            return [
+                FileOutcome(
+                    path=entry.path,
+                    relative_path=entry.relative_path,
+                    sha256=entry.sha256,
+                    outcome=Outcome.SKIPPED_UNCLASSIFIED,
+                    sample_name=None,
+                    parser_name=entry.best_match_parser,  # diagnostic
+                    measurement_id=None,
+                    error=None,
+                ),
+            ]
 
         # Find the parser instance for this classification.
         match = self.registry.find_parser(entry.path)
         if match is None:
             # Defensive: classified_parser was set, but find_parser now
             # disagrees. Treat as unclassified.
-            return FileOutcome(
-                path=entry.path,
-                relative_path=entry.relative_path,
-                sha256=entry.sha256,
-                outcome=Outcome.SKIPPED_UNCLASSIFIED,
-                sample_name=None,
-                parser_name=entry.classified_parser,
-                measurement_id=None,
-                error=None,
-            )
+            return [
+                FileOutcome(
+                    path=entry.path,
+                    relative_path=entry.relative_path,
+                    sha256=entry.sha256,
+                    outcome=Outcome.SKIPPED_UNCLASSIFIED,
+                    sample_name=None,
+                    parser_name=entry.classified_parser,
+                    measurement_id=None,
+                    error=None,
+                ),
+            ]
         parser = match.parser
 
         # Cache hit: same sha256 already stored with the same parser_version → skip.
         cached = cached_files.get(entry.sha256)
         if cached is not None and cached[1] == parser.version:
-            return FileOutcome(
-                path=entry.path,
-                relative_path=entry.relative_path,
-                sha256=entry.sha256,
-                outcome=Outcome.SKIPPED_CACHED,
-                sample_name=None,
-                parser_name=parser.name,
-                measurement_id=cached[0],
-                error=None,
-            )
+            return [
+                FileOutcome(
+                    path=entry.path,
+                    relative_path=entry.relative_path,
+                    sha256=entry.sha256,
+                    outcome=Outcome.SKIPPED_CACHED,
+                    sample_name=None,
+                    parser_name=parser.name,
+                    measurement_id=cached[0],
+                    error=None,
+                ),
+            ]
 
-        # Parse.
+        # Parse — `parse_all` may return multiple ParsedData (one per
+        # workbook sheet, etc.) or just one for the typical case.
         try:
-            parsed = parser.parse(entry.path)
+            parsed_list = parser.parse_all(entry.path)
         except Exception as exc:
-            return FileOutcome(
-                path=entry.path,
-                relative_path=entry.relative_path,
-                sha256=entry.sha256,
-                outcome=Outcome.PARSE_FAILED,
-                sample_name=None,
-                parser_name=parser.name,
-                measurement_id=None,
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            return [
+                FileOutcome(
+                    path=entry.path,
+                    relative_path=entry.relative_path,
+                    sha256=entry.sha256,
+                    outcome=Outcome.PARSE_FAILED,
+                    sample_name=None,
+                    parser_name=parser.name,
+                    measurement_id=None,
+                    error=f"{type(exc).__name__}: {exc}",
+                ),
+            ]
 
-        # Build domain objects + persist arrays.
-        sample_name, generic_warning = _infer_sample_name(entry.path, root)
-        measurement_id = new_id()
+        if not parsed_list:
+            # Parser returned zero results — treat as a parse failure.
+            return [
+                FileOutcome(
+                    path=entry.path,
+                    relative_path=entry.relative_path,
+                    sha256=entry.sha256,
+                    outcome=Outcome.PARSE_FAILED,
+                    sample_name=None,
+                    parser_name=parser.name,
+                    measurement_id=None,
+                    error="parse_all returned no ParsedData entries",
+                ),
+            ]
 
-        parsed_data_path = store.write(measurement_id, parsed)
+        # Pre-compute the path-based fallback sample name once per file —
+        # all sheets share it when the parser doesn't supply a sheet name.
+        path_sample_name, path_generic_warning = _infer_sample_name(entry.path, root)
+        # Folder-aware technique refinement for parsers that default to
+        # a placeholder (microscopy → SEM by default; the folder tells
+        # us whether it's actually TEM, STEM, FE-SEM, etc.).
+        refined_technique = _refine_technique_from_folders(entry.path, root)
 
         file_ref = FileRef(
             path=entry.path,
@@ -418,14 +460,73 @@ class Orchestrator:
             scanned_at=entry.mtime,
         )
 
+        outcomes: list[FileOutcome] = []
+        for parsed in parsed_list:
+            outcomes.append(
+                self._persist_one_parsed(
+                    parsed=parsed,
+                    entry=entry,
+                    parser=parser,
+                    project_id=project_id,
+                    store=store,
+                    samples_by_name=samples_by_name,
+                    file_ref=file_ref,
+                    path_sample_name=path_sample_name,
+                    path_generic_warning=path_generic_warning,
+                    refined_technique=refined_technique,
+                ),
+            )
+        return outcomes
+
+    def _persist_one_parsed(
+        self,
+        *,
+        parsed: ParsedData,
+        entry: CrawlEntry,
+        parser: BaseParser,
+        project_id: str,
+        store: ArrayStore,
+        samples_by_name: dict[str, _SampleAccumulator],
+        file_ref: FileRef,
+        path_sample_name: str,
+        path_generic_warning: ValidationIssue | None,
+        refined_technique: Technique | None,
+    ) -> FileOutcome:
+        """Persist one `ParsedData` as a `Measurement` and return its outcome."""
+        # Sheet name (when the parser provides one) is a stronger
+        # sample-name signal than the file's parent folder: a workbook
+        # like `zT calculation.xlsx` with sheets ["CS", "CSCBI-1", ...]
+        # tells us each sheet is a distinct sample. Stage 2's labeling
+        # pipeline still gets to merge cosmetically-different names
+        # across files.
+        sheet_name = parsed.metadata.get("sheet_name") if parsed.metadata else None
+        if isinstance(sheet_name, str) and sheet_name.strip():
+            sample_name = sheet_name.strip()
+            generic_warning = None  # sheet name isn't a fallback
+        else:
+            sample_name = path_sample_name
+            generic_warning = path_generic_warning
+
+        measurement_id = new_id()
+        parsed_data_path = store.write(measurement_id, parsed)
+
         issues = list(parsed.issues)
         if generic_warning is not None:
             issues.append(generic_warning)
 
+        # Apply technique refinement only when the parser defaulted to
+        # a placeholder (microscopy → SEM). Other parsers know their
+        # technique with certainty and shouldn't be overridden.
+        technique = (
+            refined_technique
+            if refined_technique is not None and parsed.technique is Technique.SEM
+            else parsed.technique
+        )
+
         measurement = Measurement(
             id=measurement_id,
             sample_id=_get_or_create_sample_id(samples_by_name, sample_name, project_id),
-            technique=parsed.technique,
+            technique=technique,
             instrument=parsed.instrument,
             measured_at=parsed.measured_at,
             parsed_at=utc_now(),
@@ -463,6 +564,46 @@ def _normalize_folder(name: str) -> str:
 def _is_generic(name: str) -> bool:
     """True if `name` is a generic technique/data folder label."""
     return _normalize_folder(name) in _GENERIC_FOLDER_NAMES
+
+
+# Folder-name → technique map for microscopy. Keys are case-insensitive
+# normalized folder names (whitespace-collapsed via `_normalize_folder`).
+# Microscopy parsers default to SEM because TIFF tags rarely identify
+# the actual modality; the user's folder structure usually does.
+_MICROSCOPY_FOLDER_TECHNIQUES: dict[str, Technique] = {
+    "sem": Technique.SEM,
+    "fe-sem": Technique.SEM,
+    "fe sem": Technique.SEM,
+    "hr-fe-sem": Technique.SEM,
+    "hr fe sem": Technique.SEM,
+    "tem": Technique.TEM,
+    "hr-tem": Technique.TEM,
+    "hr tem": Technique.TEM,
+    "stem": Technique.STEM,
+}
+
+
+def _refine_technique_from_folders(path: Path, root: Path) -> Technique | None:
+    """Return a more specific microscopy technique from parent folder names.
+
+    The microscopy TIFF parser defaults to `Technique.SEM` because TIFF
+    metadata rarely identifies the modality (SEM vs TEM vs STEM). Most
+    researchers organise images into folders like `TEM/`, `HR-FE-SEM/`,
+    or `STEM/`, so we walk parents and pick the first match.
+
+    Returns `None` when no parent folder matches our microscopy
+    keywords — the caller leaves the parser's default in place. Stops
+    at the project root so we never look at user-system folders.
+    """
+    p = path.parent
+    for _ in range(_MAX_PARENT_LOOKUP_DEPTH):
+        if p in (root, p.parent):
+            break
+        match = _MICROSCOPY_FOLDER_TECHNIQUES.get(_normalize_folder(p.name))
+        if match is not None:
+            return match
+        p = p.parent
+    return None
 
 
 def _infer_sample_name(path: Path, root: Path) -> tuple[str, ValidationIssue | None]:
@@ -545,29 +686,49 @@ def _get_or_create_sample_id(
 
 def _dedupe_measurements_by_sha256(
     samples_by_name: dict[str, _SampleAccumulator],
+    *,
+    current_run_ids: set[str],
 ) -> None:
-    """Drop measurements whose file sha256s are also held by a newer measurement.
+    """Drop OLD measurements superseded by current-run ones with the same sha256.
 
-    `FileRow.sha256` is UNIQUE across the project. The same physical file
-    can legitimately appear in two measurements transiently — e.g. when a
-    parser-version bump causes us to create a new measurement alongside
-    the seeded-from-DB old one. We keep the measurement with the latest
-    `parsed_at` per sha256 and drop the others. Mutates accumulators in
-    place; samples may end up empty (kept as-is — the user's review UI
-    can decide what to do).
+    A single file can legitimately appear in multiple measurements -
+    a multi-sheet workbook produces one measurement per sheet, all
+    referencing the same sha256. Stage 1F dropped the UNIQUE(sha256)
+    constraint to allow this.
+
+    The dedup invariant is narrower than it used to be: for any sha256
+    that the current run produced at least one measurement for, drop
+    every prior measurement seeded from the existing project (those
+    were created from an older parser version or before the
+    multi-sheet expansion). Files where the current run produced no
+    measurements (cache hit) keep their seeded measurement untouched.
+
+    Mutates accumulators in place; samples may end up empty (kept
+    as-is - the user's review UI decides what to do).
     """
-    # Determine which measurement_id "owns" each sha256 (latest parsed_at wins).
-    owner_per_sha: dict[str, tuple[Any, str]] = {}
+    # Find which sha256s the current run produced at least one measurement for.
+    current_shas: set[str] = set()
     for acc in samples_by_name.values():
         for m in acc.measurements:
-            for f in m.files:
-                current = owner_per_sha.get(f.sha256)
-                if current is None or m.parsed_at > current[0]:
-                    owner_per_sha[f.sha256] = (m.parsed_at, m.id)
-    keep_ids = {mid for _, mid in owner_per_sha.values()}
+            if m.id in current_run_ids:
+                for f in m.files:
+                    current_shas.add(f.sha256)
 
+    # For each sha256 in current_shas, drop measurements NOT in current_run_ids
+    # (those are the stale seeded ones). All current-run siblings stay.
     for acc in samples_by_name.values():
-        acc.measurements = [m for m in acc.measurements if m.id in keep_ids]
+        kept: list[Measurement] = []
+        for m in acc.measurements:
+            file_shas = {f.sha256 for f in m.files}
+            if m.id in current_run_ids:
+                kept.append(m)
+            elif file_shas & current_shas:
+                # Seeded measurement whose file was re-parsed this
+                # run — drop it.
+                continue
+            else:
+                kept.append(m)
+        acc.measurements = kept
 
 
 # ─── Cache helpers ────────────────────────────────────────────────────

@@ -8,10 +8,12 @@ Excel (`.xlsx`). The user's UV-DRS workflow produces spreadsheets where:
 - Columns C+: derived quantities (Kubelka-Munk, Tauc plot inputs, etc.)
 
 Multi-sheet workbooks are common: each sheet is a different sample
-(e.g. "CS", "CS-1", "CS-3", ...). Stage 1C parses ONLY the first sheet
-and emits a warning listing the other sheet names that were skipped.
-Stage 2 (sample resolution) will eventually expand a multi-sheet
-workbook into one measurement per sheet.
+(e.g. "CS", "CS-1", "CS-3", ...). `parse_all()` returns one
+`ParsedData` per non-empty sheet — the orchestrator creates one
+`Measurement` per sheet, and the sheet name flows into
+`metadata["sheet_name"]` so the sample-name heuristic can prefer it
+over the folder-name fallback. `parse()` returns the first non-empty
+sheet's data alone (for callers that only want a primary view).
 
 Validation policy: see `xrd_rigaku_txt.py` — same contract.
 """
@@ -53,7 +55,10 @@ class UvDrsXlsxParser(BaseParser):
     """Parser for UV-DRS Excel `.xlsx` workbooks."""
 
     name: ClassVar[str] = "uvdrs-xlsx"
-    version: ClassVar[str] = "1.0.1"
+    # 1.0.2: parse_all returns one ParsedData per non-empty sheet; the
+    # old single-sheet behaviour with a "skipped sheets" warning is
+    # gone (every sheet is now its own measurement).
+    version: ClassVar[str] = "1.0.2"
     technique: ClassVar[Technique] = Technique.UV_DRS
     supported_extensions: ClassVar[tuple[str, ...]] = (".xlsx",)
 
@@ -84,72 +89,100 @@ class UvDrsXlsxParser(BaseParser):
         finally:
             wb.close()
 
-    # ─── parse ───────────────────────────────────────────────────────
+    # ─── parse / parse_all ───────────────────────────────────────────
     def parse(self, path: Path) -> ParsedData:
-        """Parse a UV-DRS `.xlsx` into a `ParsedData`. Reads only sheet 0."""
-        issues: list[ValidationIssue] = []
+        """Parse the first non-empty sheet only.
 
+        Kept as a primary-view shortcut for callers that don't care
+        about multi-sheet workbooks. Most production callers should
+        use `parse_all` instead — the orchestrator already does.
+        """
+        results = self.parse_all(path)
+        if not results:
+            return self._empty_result(
+                [
+                    ValidationIssue(
+                        field="data",
+                        severity=Severity.ERROR,
+                        message="No non-empty sheets in workbook.",
+                        detected_at=utc_now(),
+                    ),
+                ],
+            )
+        return results[0]
+
+    def parse_all(self, path: Path) -> tuple[ParsedData, ...]:
+        """Parse every non-empty sheet, one ParsedData per sheet.
+
+        Empty / non-UV-DRS-shaped sheets are skipped silently — a
+        workbook with a leading "Summary" or "Notes" sheet shouldn't
+        blow up. If every sheet is empty, `parse()` surfaces a single
+        error ParsedData (so the orchestrator records a failure rather
+        than dropping the file silently).
+        """
         try:
             wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
         except Exception as exc:
-            issues.append(
-                ValidationIssue(
-                    field="file",
-                    severity=Severity.ERROR,
-                    message=f"Could not open workbook: {exc}",
-                    detected_at=utc_now(),
+            return (
+                self._empty_result(
+                    [
+                        ValidationIssue(
+                            field="file",
+                            severity=Severity.ERROR,
+                            message=f"Could not open workbook: {exc}",
+                            detected_at=utc_now(),
+                        ),
+                    ],
                 ),
             )
-            return self._empty_result(issues)
 
         try:
             sheet_names = list(wb.sheetnames)
-            sheet = wb[sheet_names[0]]
-            wavelength, reflectance = _read_sheet_first_two_columns(sheet, issues)
+            results: list[ParsedData] = []
+            for sheet_name in sheet_names:
+                issues: list[ValidationIssue] = []
+                sheet = wb[sheet_name]
+                wavelength, reflectance = _read_sheet_first_two_columns(sheet, issues)
+                if not wavelength:
+                    # Empty / unparseable sheet — skip silently. We don't
+                    # want one stray "Notes" sheet to produce a junk
+                    # measurement.
+                    continue
+                results.append(
+                    self._build_parsed_data(
+                        sheet_name=sheet_name,
+                        all_sheet_names=sheet_names,
+                        wavelength=wavelength,
+                        reflectance=reflectance,
+                        issues=issues,
+                    ),
+                )
         finally:
             wb.close()
 
-        if not wavelength:
-            issues.append(
-                ValidationIssue(
-                    field="data",
-                    severity=Severity.ERROR,
-                    message="No numeric (wavelength, reflectance) rows found.",
-                    detected_at=utc_now(),
-                ),
-            )
+        return tuple(results)
 
-        if len(sheet_names) > 1:
-            others = sheet_names[1:]
-            issues.append(
-                ValidationIssue(
-                    field="sheets",
-                    severity=Severity.WARNING,
-                    message=(
-                        f"Workbook has {len(sheet_names)} sheets; only the first "
-                        f"({sheet_names[0]!r}) was parsed. Skipped: {others}"
-                    ),
-                    detected_at=utc_now(),
-                ),
-            )
-
-        arrays: dict[str, np.ndarray] = (
-            {
-                "wavelength": np.asarray(wavelength, dtype=np.float64),
-                "reflectance": np.asarray(reflectance, dtype=np.float64),
-            }
-            if wavelength
-            else {}
-        )
-
-        metadata: dict[str, Any] = {
-            "sheet_name": sheet_names[0],
-            "all_sheet_names": sheet_names,
-            "n_points": len(wavelength),
-            "wavelength_min_nm": min(wavelength) if wavelength else None,
-            "wavelength_max_nm": max(wavelength) if wavelength else None,
+    # ─── Internals ───────────────────────────────────────────────────
+    def _build_parsed_data(
+        self,
+        *,
+        sheet_name: str,
+        all_sheet_names: list[str],
+        wavelength: list[float],
+        reflectance: list[float],
+        issues: list[ValidationIssue],
+    ) -> ParsedData:
+        arrays = {
+            "wavelength": np.asarray(wavelength, dtype=np.float64),
+            "reflectance": np.asarray(reflectance, dtype=np.float64),
         }
-
+        metadata: dict[str, Any] = {
+            "sheet_name": sheet_name,
+            "all_sheet_names": all_sheet_names,
+            "n_points": len(wavelength),
+            "wavelength_min_nm": min(wavelength),
+            "wavelength_max_nm": max(wavelength),
+        }
         return ParsedData(
             technique=self.technique,
             arrays=arrays,

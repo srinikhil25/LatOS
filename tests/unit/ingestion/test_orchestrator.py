@@ -392,9 +392,12 @@ class TestRealFixtures:
 
         result = Orchestrator(registry=default_registry()).ingest(proj)
 
-        # One measurement per fixture file (9 fixtures total).
+        # One measurement per fixture file, EXCEPT multi-sheet `.xlsx`
+        # workbooks which Stage 1F expands into one measurement per
+        # sheet. We assert a lower bound (>= 9, the file count) so the
+        # test is resilient to fixtures gaining extra sheets.
         all_measurements = [m for s in result.project.samples for m in s.measurements]
-        assert len(all_measurements) == 9
+        assert len(all_measurements) >= 9
         techniques = {m.technique for m in all_measurements}
         # We have: XRD (3 files), XPS, UV-DRS, Hall, Thermoelectric, EDS, SEM/TEM
         assert Technique.XRD in techniques

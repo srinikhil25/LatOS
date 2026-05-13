@@ -137,7 +137,32 @@ class BaseParser(ABC):
         The returned `ParsedData.parser_name` MUST equal `self.name` and
         `parser_version` MUST equal `self.version`. The base class does
         not check this — the contract is verified by tests.
+
+        For files that produce multiple measurements (e.g. multi-sheet
+        workbooks), `parse()` returns the primary / first measurement
+        only. Use `parse_all()` when you need every measurement.
         """
+
+    def parse_all(self, path: Path) -> tuple[ParsedData, ...]:
+        """Parse `path` into one or more `ParsedData` entries.
+
+        One file commonly produces one measurement (XRD scan, XPS region
+        export, TEM image). Some formats pack multiple measurements
+        into a single file: an Excel workbook with one sheet per sample
+        is the headline case. Those parsers override `parse_all` to
+        return one `ParsedData` per sheet. The orchestrator iterates
+        the result, creating one `Measurement` per entry.
+
+        Default implementation wraps `parse()` so every existing parser
+        keeps working without changes. Implementations that override
+        `parse_all` should keep `parse` consistent — typically by
+        returning `parse_all(path)[0]`. An empty tuple is legal and
+        means "no measurements could be salvaged from this file".
+
+        Must NOT raise on malformed input. Errors surface as
+        `ValidationIssue`s on the returned `ParsedData` entries.
+        """
+        return (self.parse(path),)
 
     # ─── Helpers for subclasses ──────────────────────────────────────
     def _extension_matches(self, path: Path) -> bool:

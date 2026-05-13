@@ -75,11 +75,23 @@ def file_to_row(file_ref: FileRef, project_id: str, measurement_id: str | None) 
         file_ref: The domain object.
         project_id: Required — files always belong to a project.
         measurement_id: None for unassigned files.
+
+    The row ID is derived from (measurement_id, sha256) - or from
+    (project_id, sha256) for unassigned files. Stage 1 used
+    `sha256[:32]` alone, assuming one file = one row, but Stage 1F's
+    multi-sheet support means several measurements can reference one
+    file (one row per (measurement, file) pair). Mixing the
+    measurement_id into the derivation keeps the row ID stable across
+    re-saves of the same (measurement, file) pair while avoiding
+    collisions between siblings.
     """
-    # Use sha256 as a stable PK derivation so re-saving the same file is idempotent.
-    # We pad/truncate to 32 chars (the sha256 already starts with 64 hex chars).
+    import hashlib  # noqa: PLC0415 — only needed inside this hot path
+
+    discriminator = (measurement_id or project_id).encode("utf-8")
+    seed = discriminator + b":" + file_ref.sha256.encode("utf-8")
+    row_id = hashlib.sha256(seed).hexdigest()[:32]
     return FileRow(
-        id=file_ref.sha256[:32],
+        id=row_id,
         measurement_id=measurement_id,
         project_id=project_id,
         path=str(file_ref.path),

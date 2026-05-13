@@ -113,8 +113,20 @@ class TestParseHappyPath:
         all_sheets = self.result.metadata["all_sheet_names"]
         assert len(all_sheets) >= 2
 
-    def test_multi_sheet_warning_present(self):
-        assert any(i.field == "sheets" for i in self.result.issues)
+    def test_multi_sheet_no_longer_warns_about_skipped_sheets(self):
+        # As of 1.0.2 the parser exposes `parse_all()` so every sheet
+        # is parsed as its own measurement. No "Workbook has N sheets"
+        # warning is emitted any more.
+        assert not any(i.field == "sheets" for i in self.result.issues)
+
+    def test_parse_all_returns_one_result_per_sheet(self):
+        # Fixture has multiple sheets - parse_all should produce one
+        # ParsedData per sheet with a valid TE header.
+        results = ThermoelectricXlsxParser().parse_all(GOLDEN)
+        assert len(results) >= 2
+        sheet_names = [r.metadata["sheet_name"] for r in results]
+        # Each sheet's name appears as the metadata `sheet_name`.
+        assert len(sheet_names) == len(set(sheet_names))
 
     def test_no_errors(self):
         assert not self.result.has_errors

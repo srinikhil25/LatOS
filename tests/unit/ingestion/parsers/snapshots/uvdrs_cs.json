@@ -40,14 +40,7 @@
     }
   },
   "instrument": "UV-DRS (xlsx export)",
-  "issues": [
-    {
-      "acknowledged": false,
-      "field": "sheets",
-      "message": "Workbook has 4 sheets; only the first ('CS') was parsed. Skipped: ['CS-1', 'CS-3', 'CS-5']",
-      "severity": "warning"
-    }
-  ],
+  "issues": [],
   "measured_at": null,
   "metadata": {
     "all_sheet_names": [
@@ -62,6 +55,6 @@
     "wavelength_min_nm": 200.0
   },
   "parser_name": "uvdrs-xlsx",
-  "parser_version": "1.0.1",
+  "parser_version": "1.0.2",
   "technique": "uv_drs"
 }

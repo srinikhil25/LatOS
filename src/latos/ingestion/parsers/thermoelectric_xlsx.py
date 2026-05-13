@@ -61,7 +61,10 @@ class ThermoelectricXlsxParser(BaseParser):
     """Parser for thermoelectric-property `.xlsx` workbooks."""
 
     name: ClassVar[str] = "thermoelectric-xlsx"
-    version: ClassVar[str] = "1.0.1"
+    # 1.0.2: parse_all returns one ParsedData per non-empty sheet; the
+    # old single-sheet behaviour with a "skipped sheets" warning is
+    # gone (every sheet is now its own measurement).
+    version: ClassVar[str] = "1.0.2"
     technique: ClassVar[Technique] = Technique.THERMOELECTRIC
     supported_extensions: ClassVar[tuple[str, ...]] = (".xlsx",)
 
@@ -91,68 +94,106 @@ class ThermoelectricXlsxParser(BaseParser):
         finally:
             wb.close()
 
-    # ─── parse ───────────────────────────────────────────────────────
+    # ─── parse / parse_all ───────────────────────────────────────────
     def parse(self, path: Path) -> ParsedData:
-        """Parse a thermoelectric `.xlsx` into a `ParsedData`."""
-        issues: list[ValidationIssue] = []
+        """Parse the first non-empty sheet only.
 
+        Primary-view shortcut. Production callers should use
+        `parse_all` to capture every sample in a multi-sheet workbook.
+        """
+        results = self.parse_all(path)
+        if not results:
+            return self._empty_result(
+                [
+                    ValidationIssue(
+                        field="data",
+                        severity=Severity.ERROR,
+                        message="No parseable sheets in workbook.",
+                        detected_at=utc_now(),
+                    ),
+                ],
+            )
+        return results[0]
+
+    def parse_all(self, path: Path) -> tuple[ParsedData, ...]:
+        """Parse every sheet with a recognizable header, one ParsedData per sheet.
+
+        A sheet without a `Temperature ... Seebeck ...` header row is
+        silently skipped (workbook intro / summary sheets shouldn't
+        produce empty measurements). If no sheet has a valid header,
+        `parse()` surfaces a single error ParsedData so the file isn't
+        dropped silently.
+        """
         try:
             wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
         except Exception as exc:
-            issues.append(
-                ValidationIssue(
-                    field="file",
-                    severity=Severity.ERROR,
-                    message=f"Could not open workbook: {exc}",
-                    detected_at=utc_now(),
+            return (
+                self._empty_result(
+                    [
+                        ValidationIssue(
+                            field="file",
+                            severity=Severity.ERROR,
+                            message=f"Could not open workbook: {exc}",
+                            detected_at=utc_now(),
+                        ),
+                    ],
                 ),
             )
-            return self._empty_result(issues)
 
         try:
             sheet_names = list(wb.sheetnames)
-            sheet = wb[sheet_names[0]]
-            arrays_dict, header_text = _read_te_sheet(sheet, issues)
+            results: list[ParsedData] = []
+            for sheet_name in sheet_names:
+                issues: list[ValidationIssue] = []
+                sheet = wb[sheet_name]
+                arrays_dict, header_text = _read_te_sheet(sheet, issues)
+                if not arrays_dict:
+                    # Sheet had no recognizable TE header - skip silently.
+                    continue
+                # Required-column check per sheet.
+                missing = [k for k in _REQUIRED_COLUMNS if k not in arrays_dict]
+                if missing:
+                    issues.append(
+                        ValidationIssue(
+                            field="data",
+                            severity=Severity.ERROR,
+                            message=f"Required columns missing: {missing}",
+                            detected_at=utc_now(),
+                        ),
+                    )
+                results.append(
+                    self._build_parsed_data(
+                        sheet_name=sheet_name,
+                        all_sheet_names=sheet_names,
+                        arrays_dict=arrays_dict,
+                        header_text=header_text,
+                        issues=issues,
+                    ),
+                )
         finally:
             wb.close()
 
-        if len(sheet_names) > 1:
-            others = sheet_names[1:]
-            issues.append(
-                ValidationIssue(
-                    field="sheets",
-                    severity=Severity.WARNING,
-                    message=(
-                        f"Workbook has {len(sheet_names)} sheets; only the first "
-                        f"({sheet_names[0]!r}) was parsed. Skipped: {others}"
-                    ),
-                    detected_at=utc_now(),
-                ),
-            )
+        return tuple(results)
 
-        # Required-column check — loud failure if essentials missing.
-        missing = [k for k in _REQUIRED_COLUMNS if k not in arrays_dict]
-        if missing:
-            issues.append(
-                ValidationIssue(
-                    field="data",
-                    severity=Severity.ERROR,
-                    message=f"Required columns missing: {missing}",
-                    detected_at=utc_now(),
-                ),
-            )
-
+    # ─── Internals ───────────────────────────────────────────────────
+    def _build_parsed_data(
+        self,
+        *,
+        sheet_name: str,
+        all_sheet_names: list[str],
+        arrays_dict: dict[str, list[float]],
+        header_text: list[str],
+        issues: list[ValidationIssue],
+    ) -> ParsedData:
         arrays: dict[str, np.ndarray] = {
             name: np.asarray(values, dtype=np.float64) for name, values in arrays_dict.items()
         }
-
         metadata: dict[str, Any] = {
-            "sheet_name": sheet_names[0],
-            "all_sheet_names": sheet_names,
+            "sheet_name": sheet_name,
+            "all_sheet_names": all_sheet_names,
             "n_points": len(next(iter(arrays_dict.values()))) if arrays_dict else 0,
             "headers_found": header_text,
         }
-
         return ParsedData(
             technique=self.technique,
             arrays=arrays,

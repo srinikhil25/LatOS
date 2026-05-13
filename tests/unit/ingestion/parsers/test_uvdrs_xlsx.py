@@ -106,9 +106,26 @@ class TestParseHappyPath:
         assert "CS" in all_sheets
         assert "CS-1" in all_sheets
 
-    def test_multi_sheet_warning_present(self):
-        # Fixture has 4 sheets, only first parsed → warning lists the rest.
-        assert any(i.field == "sheets" for i in self.result.issues)
+    def test_multi_sheet_no_longer_warns_about_skipped_sheets(self):
+        # As of 1.0.2 the parser exposes `parse_all()` so every sheet
+        # is parsed as its own measurement. The old "Workbook has N
+        # sheets" warning is therefore gone - skipping no longer
+        # happens - and `parse()` returns the first non-empty sheet
+        # alone (no warning either).
+        assert not any(i.field == "sheets" for i in self.result.issues)
+
+    def test_parse_all_returns_one_result_per_sheet(self):
+        # Fixture has 4 sheets, each with valid UV-DRS data → 4 results.
+        # The sheet names flow into each result's metadata so the
+        # orchestrator can route them to distinct samples.
+        results = UvDrsXlsxParser().parse_all(GOLDEN)
+        sheet_names = [r.metadata["sheet_name"] for r in results]
+        assert len(results) == 4
+        assert sheet_names == ["CS", "CS-1", "CS-3", "CS-5"]
+        # Each result should carry arrays - empty results are filtered.
+        for r in results:
+            assert "wavelength" in r.arrays
+            assert "reflectance" in r.arrays
 
     def test_no_errors(self):
         assert not self.result.has_errors

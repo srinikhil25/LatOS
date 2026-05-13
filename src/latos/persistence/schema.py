@@ -28,7 +28,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # Bumped on any schema change. Stored on every Project row so migrations
 # can detect mismatches between code and on-disk data.
-LATEST_SCHEMA_VERSION = 1
+LATEST_SCHEMA_VERSION = 2
 
 
 class UtcDateTime(TypeDecorator[datetime]):
@@ -167,13 +167,17 @@ class MeasurementRow(Base):
 class FileRow(Base):
     """A file on disk that contributed to a measurement (or is unassigned).
 
-    `sha256` is unique across the whole project — same content = same file row.
+    `sha256` is indexed but not unique: a multi-sheet workbook produces
+    one measurement per sheet, all sharing the same file (and therefore
+    the same sha256). Caching still works because the orchestrator
+    looks up by sha256 + parser_version and treats any match as "this
+    file was already processed".
+
     Either `measurement_id` is set (file belongs to a measurement) or
     `project_id` is set with `measurement_id` NULL (unassigned).
     """
 
     __tablename__ = "files"
-    __table_args__ = (UniqueConstraint("sha256", name="uq_file_sha256"),)
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     measurement_id: Mapped[str | None] = mapped_column(

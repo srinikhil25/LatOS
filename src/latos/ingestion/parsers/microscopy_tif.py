@@ -74,7 +74,10 @@ class MicroscopyTifParser(BaseParser):
     """Parser for microscopy `.tif`/`.tiff` files (metadata-only)."""
 
     name: ClassVar[str] = "microscopy-tif"
-    version: ClassVar[str] = "1.0.1"
+    # 1.0.2: dropped the stale "refine in Stage 2" INFO issue; the
+    # orchestrator now actually does folder-aware refinement (TEM/
+    # STEM/FE-SEM folders override the parser's SEM default).
+    version: ClassVar[str] = "1.0.2"
     # Default to SEM; orchestrator/Stage 2 can override based on context.
     technique: ClassVar[Technique] = Technique.SEM
     supported_extensions: ClassVar[tuple[str, ...]] = (".tif", ".tiff")
@@ -140,19 +143,11 @@ class MicroscopyTifParser(BaseParser):
             )
             return self._empty_result(issues)
 
-        # Technique inference disclaimer. Folder context is the only
-        # reliable signal for SEM/TEM/STEM — Stage 2 handles that.
-        issues.append(
-            ValidationIssue(
-                field="technique",
-                severity=Severity.INFO,
-                message=(
-                    "Technique defaulted to SEM; refine with folder context "
-                    "(TEM/, STEM/, SEM/, ...) in Stage 2 sample resolution."
-                ),
-                detected_at=utc_now(),
-            ),
-        )
+        # Technique inference disclaimer is no longer needed: the
+        # orchestrator now examines parent folders (TEM/, STEM/,
+        # HR-FE-SEM/, ...) and overrides this SEM default when one
+        # matches. The disclaimer used to fire on every microscopy
+        # file, cluttering the Review UI.
 
         return ParsedData(
             technique=self.technique,

@@ -121,17 +121,23 @@ class TestTechniques:
         techniques_found = {m.technique for s in result.project.samples for m in s.measurements}
         # The Dhivya dataset includes every Stage 1 technique. Asserting
         # the full set catches regressions in any single parser.
-        expected = {
+        expected_non_microscopy = {
             Technique.XRD,
             Technique.XPS,
             Technique.UV_DRS,
             Technique.HALL,
             Technique.THERMOELECTRIC,
-            # Microscopy: data has TEM/SEM .tif files.
-            Technique.SEM,
         }
-        missing = expected - techniques_found
-        assert not missing, f"Techniques missing from real-data ingest: {missing}"
+        missing = expected_non_microscopy - techniques_found
+        assert not missing, f"Non-microscopy techniques missing: {missing}"
+        # At least one microscopy technique should be present. Stage 1F
+        # added folder-aware refinement (TEM/STEM/FE-SEM folders override
+        # the parser's SEM default), so the Dhivya files now classify as
+        # whatever their folder says - asserting just `SEM` was wrong.
+        microscopy_techniques = {Technique.SEM, Technique.TEM, Technique.STEM}
+        assert techniques_found & microscopy_techniques, (
+            f"No microscopy technique found. Got: {sorted(t.value for t in techniques_found)}"
+        )
 
 
 # ─── Sample inference ───────────────────────────────────────────────
@@ -233,7 +239,15 @@ class TestPersistence:
     def test_re_ingest_is_fast_and_cached(self, tmp_path: Path):
         """Stage 1 done-criterion: 'reopening project takes <1 sec'."""
         proj = tmp_path / "Dhivya2"
-        shutil.copytree(_DHIVYA_SOURCE, proj)
+        # Ignore `.latos/` (and friends) on the copy so a stale DB from
+        # a prior manual test on the source folder doesn't get carried
+        # over - that would mix schemas and cause UNIQUE-constraint
+        # IntegrityErrors after Stage 1F dropped uq_file_sha256.
+        shutil.copytree(
+            _DHIVYA_SOURCE,
+            proj,
+            ignore=shutil.ignore_patterns(".latos", "__pycache__", ".DS_Store"),
+        )
         orchestrator = Orchestrator(registry=default_registry())
 
         # First ingest establishes the cache.
