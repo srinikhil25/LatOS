@@ -25,6 +25,7 @@ from latos.core.exceptions import ProjectNotFoundError
 from latos.core.models import Project, new_id
 from latos.persistence.db import session_scope
 from latos.persistence.mappers import (
+    analysis_result_to_row,
     file_to_row,
     issue_to_row,
     measurement_to_row,
@@ -151,6 +152,10 @@ class ProjectRepository:
                             measurement_id=measurement.id,
                         )
                         session.add(issue_row)
+
+                    for analysis_result in measurement.analysis_results:
+                        analysis_row = analysis_result_to_row(analysis_result)
+                        session.add(analysis_row)
 
             # Add unassigned files
             for file_ref in project.unassigned_files:

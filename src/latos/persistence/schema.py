@@ -28,7 +28,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # Bumped on any schema change. Stored on every Project row so migrations
 # can detect mismatches between code and on-disk data.
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 
 
 class UtcDateTime(TypeDecorator[datetime]):
@@ -162,6 +162,12 @@ class MeasurementRow(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    analysis_results: Mapped[list[AnalysisResultRow]] = relationship(
+        back_populates="measurement",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="AnalysisResultRow.computed_at",
+    )
 
 
 class FileRow(Base):
@@ -223,3 +229,38 @@ class ValidationIssueRow(Base):
     acknowledged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     measurement: Mapped[MeasurementRow] = relationship(back_populates="issues")
+
+
+class AnalysisResultRow(Base):
+    """A derived result produced by a Stage 3 analyzer on a measurement.
+
+    `params` and `outputs` are JSON columns - SQLite stores them as
+    TEXT and SQLAlchemy round-trips through Python dicts. `issues_json`
+    stores the analyzer's ValidationIssues as a list of dicts; keeping
+    them in one column (rather than a separate `analysis_issues`
+    table) avoids the extra-table cost for what is typically a
+    short, append-only list per result.
+    """
+
+    __tablename__ = "analysis_results"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    measurement_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("measurements.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    analyzer_name: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    analyzer_version: Mapped[str] = mapped_column(String, nullable=False)
+    params: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    outputs: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    derived_arrays_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    issues_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    computed_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
+
+    measurement: Mapped[MeasurementRow] = relationship(back_populates="analysis_results")

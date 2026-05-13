@@ -21,6 +21,7 @@ from latos.core.enums import FileRole, Severity, Technique
 from latos.core.exceptions import ValidationError
 
 __all__ = [
+    "AnalysisResult",
     "FileRef",
     "Measurement",
     "Project",
@@ -134,6 +135,80 @@ class ValidationIssue:
             raise ValidationError("ValidationIssue.detected_at must be timezone-aware")
 
 
+# ─── AnalysisResult ─────────────────────────────────────────────────
+@dataclass(frozen=True, slots=True)
+class AnalysisResult:
+    """A derived scientific result produced by running an analyzer on a measurement.
+
+    Stage 3 turns parsed measurements into derived numbers: band gap
+    from a UV-DRS Tauc plot, peak positions from XRD fitting, zT
+    re-computed from Seebeck + resistivity + thermal conductivity, etc.
+    Each run of an analyzer produces one `AnalysisResult`, persisted
+    alongside the measurement so re-opening the project shows them
+    again.
+
+    Multiple results can coexist for one measurement: same analyzer
+    with different parameters (e.g. Tauc plot tried at two different
+    band-gap-type assumptions), or different analyzers entirely. The
+    UI shows them grouped under their parent measurement.
+
+    Attributes:
+        id: Primary key (32-char hex UUID).
+        measurement_id: Foreign key to the owning Measurement.
+        analyzer_name: Lowercase kebab-case identifier (e.g. "uvdrs-tauc").
+            Mirrors the parser-name convention from Stage 1C.
+        analyzer_version: Semver string of the analyzer that produced this.
+            Bumping the analyzer's version invalidates prior results in
+            the same way `parser_version` invalidates parser cache.
+        params: Input knobs the analyzer was called with (band-gap type,
+            energy fit range, peak-finder prominence, ...). Stored as
+            JSON in SQLite. Keys must be JSON-safe (str, int, float, bool,
+            None, lists, dicts of these).
+        outputs: Derived numbers the analyzer produced (band_gap_ev,
+            peak_centers, zt_at_300k, ...). Same JSON-safety rules as
+            `params`.
+        derived_arrays_path: Optional path to a Parquet file holding
+            derived 1-D arrays (a fit curve, a Tauc-transformed
+            spectrum, peak-deconvolution components). `None` for
+            scalar-only results (band gap value, ZT) where no curve
+            output is needed.
+        issues: Validation problems the analyzer flagged. Same shape as
+            `Measurement.issues`.
+        computed_at: When this result was produced. Always UTC.
+    """
+
+    id: str
+    measurement_id: str
+    analyzer_name: str
+    analyzer_version: str
+    params: dict[str, Any] = field(default_factory=dict)
+    outputs: dict[str, Any] = field(default_factory=dict)
+    derived_arrays_path: Path | None = None
+    issues: tuple[ValidationIssue, ...] = field(default_factory=tuple)
+    computed_at: datetime = field(default_factory=utc_now)
+
+    def __post_init__(self) -> None:
+        _check_id(self.id, "AnalysisResult.id")
+        _check_id(self.measurement_id, "AnalysisResult.measurement_id")
+        if not self.analyzer_name:
+            raise ValidationError("AnalysisResult.analyzer_name cannot be empty")
+        if not self.analyzer_version:
+            raise ValidationError("AnalysisResult.analyzer_version cannot be empty")
+        if not isinstance(self.params, dict):
+            raise ValidationError("AnalysisResult.params must be a dict")
+        if not isinstance(self.outputs, dict):
+            raise ValidationError("AnalysisResult.outputs must be a dict")
+        if not isinstance(self.issues, tuple):
+            raise ValidationError("AnalysisResult.issues must be a tuple (immutable)")
+        if self.computed_at.tzinfo is None:
+            raise ValidationError("AnalysisResult.computed_at must be timezone-aware")
+
+    @property
+    def has_errors(self) -> bool:
+        """True if any issue has Severity.ERROR."""
+        return any(i.severity is Severity.ERROR for i in self.issues)
+
+
 # ─── Measurement ────────────────────────────────────────────────────
 @dataclass(frozen=True, slots=True)
 class Measurement:
@@ -155,6 +230,11 @@ class Measurement:
         files: Files that contributed to this measurement.
         issues: Validation problems detected so far.
         parsed_data_path: Optional path to a Parquet file holding bulk arrays.
+        analysis_results: `AnalysisResult` entries produced by Stage 3
+            analyzers (Tauc plot, peak fit, ZT computation, ...). Empty
+            tuple when no analyses have been run yet. Stored as a tuple
+            so the field can have a default value; downstream consumers
+            can sort or filter freely.
     """
 
     id: str
@@ -167,6 +247,7 @@ class Measurement:
     files: tuple[FileRef, ...]
     issues: tuple[ValidationIssue, ...] = field(default_factory=tuple)
     parsed_data_path: Path | None = None
+    analysis_results: tuple[AnalysisResult, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         _check_id(self.id, "Measurement.id")
@@ -181,6 +262,10 @@ class Measurement:
             raise ValidationError("Measurement.files must be a tuple (immutable)")
         if not isinstance(self.issues, tuple):
             raise ValidationError("Measurement.issues must be a tuple (immutable)")
+        if not isinstance(self.analysis_results, tuple):
+            raise ValidationError(
+                "Measurement.analysis_results must be a tuple (immutable)",
+            )
 
     @property
     def has_errors(self) -> bool:

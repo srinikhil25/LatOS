@@ -10,6 +10,7 @@ import pytest
 from latos.core.enums import FileRole, Severity, Technique
 from latos.core.exceptions import ValidationError
 from latos.core.models import (
+    AnalysisResult,
     FileRef,
     Measurement,
     Project,
@@ -548,3 +549,158 @@ class TestProject:
 def test_all_timestamps_round_trip_with_utc() -> None:
     p = _project()
     assert p.created_at.utcoffset() == UTC.utcoffset(p.created_at)
+
+
+# ─── AnalysisResult ─────────────────────────────────────────────────
+def _analysis_result(
+    *,
+    measurement_id: str | None = None,
+    analyzer_name: str = "uvdrs-tauc",
+    analyzer_version: str = "1.0.0",
+    params: dict | None = None,
+    outputs: dict | None = None,
+    issues: tuple[ValidationIssue, ...] = (),
+) -> AnalysisResult:
+    return AnalysisResult(
+        id=new_id(),
+        measurement_id=measurement_id if measurement_id is not None else new_id(),
+        analyzer_name=analyzer_name,
+        analyzer_version=analyzer_version,
+        params=params if params is not None else {"band_gap_type": "direct"},
+        outputs=outputs if outputs is not None else {"band_gap_ev": 2.05},
+        issues=issues,
+    )
+
+
+class TestAnalysisResult:
+    def test_constructs_with_valid_inputs(self) -> None:
+        r = _analysis_result()
+        assert r.analyzer_name == "uvdrs-tauc"
+        assert r.outputs == {"band_gap_ev": 2.05}
+        assert r.has_errors is False
+        assert r.derived_arrays_path is None
+
+    def test_immutable(self) -> None:
+        r = _analysis_result()
+        with pytest.raises((AttributeError, TypeError)):
+            r.analyzer_name = "other"  # type: ignore[misc]
+
+    def test_empty_analyzer_name_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _analysis_result(analyzer_name="")
+
+    def test_empty_analyzer_version_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _analysis_result(analyzer_version="")
+
+    def test_invalid_id_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AnalysisResult(
+                id="not-a-uuid",
+                measurement_id=new_id(),
+                analyzer_name="x",
+                analyzer_version="1",
+            )
+
+    def test_naive_computed_at_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AnalysisResult(
+                id=new_id(),
+                measurement_id=new_id(),
+                analyzer_name="x",
+                analyzer_version="1",
+                computed_at=datetime.now(),  # naive
+            )
+
+    def test_params_must_be_dict(self) -> None:
+        with pytest.raises(ValidationError):
+            AnalysisResult(
+                id=new_id(),
+                measurement_id=new_id(),
+                analyzer_name="x",
+                analyzer_version="1",
+                params=[("k", "v")],  # type: ignore[arg-type]
+            )
+
+    def test_outputs_must_be_dict(self) -> None:
+        with pytest.raises(ValidationError):
+            AnalysisResult(
+                id=new_id(),
+                measurement_id=new_id(),
+                analyzer_name="x",
+                analyzer_version="1",
+                outputs="not a dict",  # type: ignore[arg-type]
+            )
+
+    def test_issues_must_be_tuple(self) -> None:
+        with pytest.raises(ValidationError):
+            AnalysisResult(
+                id=new_id(),
+                measurement_id=new_id(),
+                analyzer_name="x",
+                analyzer_version="1",
+                issues=[],  # type: ignore[arg-type]
+            )
+
+    def test_has_errors_true_when_any_issue_is_error(self) -> None:
+        issue_e = ValidationIssue(
+            field="band_gap_ev",
+            severity=Severity.ERROR,
+            message="negative",
+            detected_at=utc_now(),
+        )
+        issue_w = ValidationIssue(
+            field="band_gap_ev",
+            severity=Severity.WARNING,
+            message="extrapolated",
+            detected_at=utc_now(),
+        )
+        r = _analysis_result(issues=(issue_w, issue_e))
+        assert r.has_errors is True
+
+    def test_has_errors_false_for_warnings_only(self) -> None:
+        issue_w = ValidationIssue(
+            field="band_gap_ev",
+            severity=Severity.WARNING,
+            message="extrapolated",
+            detected_at=utc_now(),
+        )
+        r = _analysis_result(issues=(issue_w,))
+        assert r.has_errors is False
+
+
+class TestMeasurementAnalysisResults:
+    def test_default_is_empty_tuple(self) -> None:
+        sid = new_id()
+        m = _measurement(sample_id=sid)
+        assert m.analysis_results == ()
+
+    def test_accepts_results(self) -> None:
+        sid = new_id()
+        m = Measurement(
+            id=new_id(),
+            sample_id=sid,
+            technique=Technique.UV_DRS,
+            instrument=None,
+            measured_at=utc_now(),
+            parsed_at=utc_now(),
+            parser_version="1.0.0",
+            files=(_file_ref(),),
+            analysis_results=(_analysis_result(), _analysis_result()),
+        )
+        assert len(m.analysis_results) == 2
+
+    def test_results_must_be_tuple(self) -> None:
+        sid = new_id()
+        with pytest.raises(ValidationError):
+            Measurement(
+                id=new_id(),
+                sample_id=sid,
+                technique=Technique.UV_DRS,
+                instrument=None,
+                measured_at=utc_now(),
+                parsed_at=utc_now(),
+                parser_version="1.0.0",
+                files=(_file_ref(),),
+                analysis_results=[_analysis_result()],  # type: ignore[arg-type]
+            )

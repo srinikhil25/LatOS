@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 from latos.core.enums import Severity, Technique
 from latos.core.exceptions import ProjectNotFoundError
-from latos.core.models import new_id
+from latos.core.models import AnalysisResult, new_id, utc_now
 from latos.persistence.repository import ProjectRepository
 
 from .conftest import make_issue, make_measurement, make_project, make_sample
@@ -135,6 +137,135 @@ class TestRoundTrip:
         repo.save(p_skel)
         loaded = repo.load(p_skel.id)
         assert len(loaded.unassigned_files) == 1
+
+
+    def test_measurement_with_analysis_results(self, repo: ProjectRepository) -> None:
+        """Stage 3A: AnalysisResults attached to a Measurement must round-trip."""
+        from latos.core.models import Measurement, Project, Sample, ValidationIssue
+
+        p_skel = make_project()
+        sid = new_id()
+        m_id = new_id()
+        # Build an AnalysisResult on this measurement, with a warning issue.
+        result = AnalysisResult(
+            id=new_id(),
+            measurement_id=m_id,
+            analyzer_name="uvdrs-tauc",
+            analyzer_version="1.0.0",
+            params={"band_gap_type": "direct"},
+            outputs={"band_gap_ev": 2.05, "r_squared": 0.998},
+            derived_arrays_path=Path("/arrays/tauc.parquet"),
+            issues=(
+                ValidationIssue(
+                    field="band_gap_ev",
+                    severity=Severity.WARNING,
+                    message="Fit range short",
+                    detected_at=utc_now(),
+                ),
+            ),
+        )
+        m = make_measurement(sid, technique=Technique.UV_DRS, file_sha="f" * 64)
+        m_with = Measurement(
+            id=m_id,
+            sample_id=m.sample_id,
+            technique=m.technique,
+            instrument=m.instrument,
+            measured_at=m.measured_at,
+            parsed_at=m.parsed_at,
+            parser_version=m.parser_version,
+            files=m.files,
+            issues=m.issues,
+            parsed_data_path=m.parsed_data_path,
+            analysis_results=(result,),
+        )
+        s = Sample(
+            id=sid,
+            project_id=p_skel.id,
+            canonical_name="CS",
+            measurements=(m_with,),
+        )
+        p = Project(
+            id=p_skel.id,
+            name=p_skel.name,
+            root_path=p_skel.root_path,
+            created_at=p_skel.created_at,
+            schema_version=p_skel.schema_version,
+            samples=(s,),
+        )
+        repo.save(p)
+        loaded = repo.load(p.id)
+        loaded_m = loaded.samples[0].measurements[0]
+        assert len(loaded_m.analysis_results) == 1
+        loaded_r = loaded_m.analysis_results[0]
+        assert loaded_r.analyzer_name == "uvdrs-tauc"
+        assert loaded_r.outputs["band_gap_ev"] == 2.05
+        assert loaded_r.derived_arrays_path == Path("/arrays/tauc.parquet")
+        assert len(loaded_r.issues) == 1
+        assert loaded_r.issues[0].severity is Severity.WARNING
+
+    def test_multiple_analysis_results_ordered_by_computed_at(
+        self,
+        repo: ProjectRepository,
+    ) -> None:
+        """Two AnalysisResults on one Measurement should both round-trip."""
+        from datetime import timedelta
+
+        from latos.core.models import Measurement, Project, Sample
+
+        p_skel = make_project()
+        sid = new_id()
+        m_id = new_id()
+        t0 = utc_now()
+        r1 = AnalysisResult(
+            id=new_id(),
+            measurement_id=m_id,
+            analyzer_name="uvdrs-tauc",
+            analyzer_version="1.0.0",
+            outputs={"band_gap_ev": 2.05},
+            computed_at=t0,
+        )
+        r2 = AnalysisResult(
+            id=new_id(),
+            measurement_id=m_id,
+            analyzer_name="uvdrs-tauc",
+            analyzer_version="1.0.0",
+            params={"band_gap_type": "indirect"},
+            outputs={"band_gap_ev": 1.92},
+            computed_at=t0 + timedelta(seconds=1),
+        )
+        m = make_measurement(sid, technique=Technique.UV_DRS, file_sha="9" * 64)
+        m_with = Measurement(
+            id=m_id,
+            sample_id=m.sample_id,
+            technique=m.technique,
+            instrument=m.instrument,
+            measured_at=m.measured_at,
+            parsed_at=m.parsed_at,
+            parser_version=m.parser_version,
+            files=m.files,
+            issues=m.issues,
+            parsed_data_path=m.parsed_data_path,
+            analysis_results=(r1, r2),
+        )
+        s = Sample(
+            id=sid,
+            project_id=p_skel.id,
+            canonical_name="CS",
+            measurements=(m_with,),
+        )
+        p = Project(
+            id=p_skel.id,
+            name=p_skel.name,
+            root_path=p_skel.root_path,
+            created_at=p_skel.created_at,
+            schema_version=p_skel.schema_version,
+            samples=(s,),
+        )
+        repo.save(p)
+        loaded = repo.load(p.id)
+        loaded_m = loaded.samples[0].measurements[0]
+        # `analysis_results` relationship is ordered by computed_at ASC
+        assert [r.outputs["band_gap_ev"] for r in loaded_m.analysis_results] == [2.05, 1.92]
 
 
 # ─── Re-save semantics ──────────────────────────────────────────────

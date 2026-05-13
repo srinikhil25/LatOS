@@ -11,6 +11,7 @@ from pathlib import Path
 
 from latos.core.enums import FileRole, Severity, Technique
 from latos.core.models import (
+    AnalysisResult,
     FileRef,
     Measurement,
     Project,
@@ -18,6 +19,7 @@ from latos.core.models import (
     ValidationIssue,
 )
 from latos.persistence.schema import (
+    AnalysisResultRow,
     FileRow,
     MeasurementRow,
     ProjectRow,
@@ -117,6 +119,63 @@ def issue_to_row(
     )
 
 
+def _issue_to_json(issue: ValidationIssue) -> dict[str, object]:
+    """Serialize a ValidationIssue to a JSON-safe dict.
+
+    Used to inline analyzer issues into `AnalysisResultRow.issues_json`
+    rather than spinning up a separate `analysis_issues` table. The
+    inverse is `_issue_from_json`.
+    """
+    return {
+        "field": issue.field,
+        "severity": issue.severity.value,
+        "message": issue.message,
+        "detected_at": issue.detected_at.isoformat(),
+        "acknowledged": issue.acknowledged,
+    }
+
+
+def _issue_from_json(payload: dict[str, object]) -> ValidationIssue:
+    """Inverse of `_issue_to_json`."""
+    from datetime import datetime  # noqa: PLC0415 — local import keeps module clean
+
+    detected_at_raw = payload["detected_at"]
+    if not isinstance(detected_at_raw, str):
+        raise TypeError(
+            "ValidationIssue.detected_at must be an ISO string in JSON, "
+            f"got {type(detected_at_raw)}"
+        )
+    return ValidationIssue(
+        field=str(payload["field"]),
+        severity=Severity(str(payload["severity"])),
+        message=str(payload["message"]),
+        detected_at=datetime.fromisoformat(detected_at_raw),
+        acknowledged=bool(payload.get("acknowledged", False)),
+    )
+
+
+def analysis_result_to_row(result: AnalysisResult) -> AnalysisResultRow:
+    """Convert an AnalysisResult dataclass into a fresh AnalysisResultRow.
+
+    Analyzer issues are inlined into `issues_json` rather than a sibling
+    table — they're a short, append-only list per result and don't need
+    their own query path.
+    """
+    return AnalysisResultRow(
+        id=result.id,
+        measurement_id=result.measurement_id,
+        analyzer_name=result.analyzer_name,
+        analyzer_version=result.analyzer_version,
+        params=dict(result.params),
+        outputs=dict(result.outputs),
+        derived_arrays_path=(
+            str(result.derived_arrays_path) if result.derived_arrays_path else None
+        ),
+        issues_json=[_issue_to_json(i) for i in result.issues],
+        computed_at=result.computed_at,
+    )
+
+
 # ─── ORM → Domain ───────────────────────────────────────────────────
 def row_to_file_ref(row: FileRow) -> FileRef:
     """Convert a FileRow into a FileRef domain dataclass."""
@@ -140,8 +199,29 @@ def row_to_issue(row: ValidationIssueRow) -> ValidationIssue:
     )
 
 
+def row_to_analysis_result(row: AnalysisResultRow) -> AnalysisResult:
+    """Convert an AnalysisResultRow into an AnalysisResult domain dataclass."""
+    return AnalysisResult(
+        id=row.id,
+        measurement_id=row.measurement_id,
+        analyzer_name=row.analyzer_name,
+        analyzer_version=row.analyzer_version,
+        params=dict(row.params),
+        outputs=dict(row.outputs),
+        derived_arrays_path=(
+            Path(row.derived_arrays_path) if row.derived_arrays_path else None
+        ),
+        issues=tuple(_issue_from_json(p) for p in row.issues_json),
+        computed_at=row.computed_at,
+    )
+
+
 def row_to_measurement(row: MeasurementRow) -> Measurement:
-    """Convert a MeasurementRow (with files + issues loaded) into a Measurement."""
+    """Convert a MeasurementRow (with relationships loaded) into a Measurement.
+
+    Expects `files`, `issues`, and `analysis_results` to be populated
+    (selectin loading handles this automatically).
+    """
     return Measurement(
         id=row.id,
         sample_id=row.sample_id,
@@ -153,6 +233,7 @@ def row_to_measurement(row: MeasurementRow) -> Measurement:
         files=tuple(row_to_file_ref(f) for f in row.files),
         issues=tuple(row_to_issue(i) for i in row.issues),
         parsed_data_path=Path(row.parsed_data_path) if row.parsed_data_path else None,
+        analysis_results=tuple(row_to_analysis_result(r) for r in row.analysis_results),
     )
 
 

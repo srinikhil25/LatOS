@@ -59,6 +59,7 @@ def test_upgrade_from_empty_creates_all_tables(tmp_path: Path) -> None:
     assert "measurements" in table_names
     assert "files" in table_names
     assert "validation_issues" in table_names
+    assert "analysis_results" in table_names
 
 
 @pytest.mark.slow
@@ -85,7 +86,14 @@ def test_downgrade_to_base_drops_all_tables(tmp_path: Path) -> None:
 
     table_names = {r[0] for r in rows}
     # alembic_version may stick around; but Latos tables must be gone
-    for t in ("projects", "samples", "measurements", "files", "validation_issues"):
+    for t in (
+        "projects",
+        "samples",
+        "measurements",
+        "files",
+        "validation_issues",
+        "analysis_results",
+    ):
         assert t not in table_names, f"{t} survived downgrade"
 
 

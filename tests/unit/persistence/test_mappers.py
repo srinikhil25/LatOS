@@ -6,17 +6,21 @@ from pathlib import Path
 
 from latos.core.enums import FileRole, Severity, Technique
 from latos.core.models import (
+    AnalysisResult,
     FileRef,
     Measurement,
     Sample,
+    ValidationIssue,
     new_id,
     utc_now,
 )
 from latos.persistence.mappers import (
+    analysis_result_to_row,
     file_to_row,
     issue_to_row,
     measurement_to_row,
     project_to_row,
+    row_to_analysis_result,
     row_to_file_ref,
     row_to_issue,
     row_to_measurement,
@@ -25,6 +29,7 @@ from latos.persistence.mappers import (
     sample_to_row,
 )
 from latos.persistence.schema import (
+    AnalysisResultRow,
     FileRow,
     MeasurementRow,
     ProjectRow,
@@ -198,6 +203,111 @@ def test_row_to_sample_propagates_measurements() -> None:
     assert recovered.canonical_name == "CS"
     assert len(recovered.measurements) == 1
     assert recovered.measurements[0].technique is Technique.XRD
+
+
+# ─── AnalysisResult ─────────────────────────────────────────────────
+def _make_analysis_result(
+    *,
+    measurement_id: str | None = None,
+    issues: tuple[ValidationIssue, ...] = (),
+    derived_arrays_path: Path | None = None,
+) -> AnalysisResult:
+    return AnalysisResult(
+        id=new_id(),
+        measurement_id=measurement_id if measurement_id is not None else new_id(),
+        analyzer_name="uvdrs-tauc",
+        analyzer_version="1.0.0",
+        params={"band_gap_type": "direct", "fit_range_ev": [1.5, 3.0]},
+        outputs={"band_gap_ev": 2.05, "r_squared": 0.998},
+        derived_arrays_path=derived_arrays_path,
+        issues=issues,
+    )
+
+
+class TestAnalysisResultMapper:
+    def test_to_row_preserves_fields(self) -> None:
+        mid = new_id()
+        r = _make_analysis_result(measurement_id=mid)
+        row = analysis_result_to_row(r)
+        assert isinstance(row, AnalysisResultRow)
+        assert row.id == r.id
+        assert row.measurement_id == mid
+        assert row.analyzer_name == "uvdrs-tauc"
+        assert row.analyzer_version == "1.0.0"
+        assert row.params["band_gap_type"] == "direct"
+        assert row.outputs["band_gap_ev"] == 2.05
+        assert row.derived_arrays_path is None
+        assert row.issues_json == []
+        assert row.computed_at == r.computed_at
+
+    def test_to_row_serializes_path(self) -> None:
+        r = _make_analysis_result(derived_arrays_path=Path("/arrays/foo.parquet"))
+        row = analysis_result_to_row(r)
+        assert isinstance(row.derived_arrays_path, str)
+        assert row.derived_arrays_path == str(Path("/arrays/foo.parquet"))
+
+    def test_to_row_serializes_issues_into_json(self) -> None:
+        issue = make_issue(severity=Severity.ERROR)
+        r = _make_analysis_result(issues=(issue,))
+        row = analysis_result_to_row(r)
+        assert len(row.issues_json) == 1
+        payload = row.issues_json[0]
+        assert payload["field"] == issue.field
+        assert payload["severity"] == "error"
+        assert payload["message"] == issue.message
+        # detected_at is serialized as ISO 8601
+        assert isinstance(payload["detected_at"], str)
+
+
+class TestAnalysisResultRoundTrip:
+    def test_round_trip_minimal(self) -> None:
+        original = _make_analysis_result()
+        row = analysis_result_to_row(original)
+        recovered = row_to_analysis_result(row)
+        assert recovered == original
+
+    def test_round_trip_with_path_and_issues(self) -> None:
+        issue = make_issue(severity=Severity.WARNING)
+        original = _make_analysis_result(
+            derived_arrays_path=Path("/arrays/tauc.parquet"),
+            issues=(issue,),
+        )
+        row = analysis_result_to_row(original)
+        recovered = row_to_analysis_result(row)
+        assert recovered == original
+        assert isinstance(recovered.derived_arrays_path, Path)
+        assert recovered.issues[0].severity is Severity.WARNING
+
+
+class TestMeasurementWithAnalysisResults:
+    def test_measurement_round_trip_with_analysis_results(self) -> None:
+        sid = new_id()
+        m = make_measurement(sid, technique=Technique.UV_DRS)
+        # Attach an AnalysisResult on a fresh Measurement (frozen dataclass).
+        result = _make_analysis_result(measurement_id=m.id)
+        m_with = Measurement(
+            id=m.id,
+            sample_id=m.sample_id,
+            technique=m.technique,
+            instrument=m.instrument,
+            measured_at=m.measured_at,
+            parsed_at=m.parsed_at,
+            parser_version=m.parser_version,
+            files=m.files,
+            issues=m.issues,
+            parsed_data_path=m.parsed_data_path,
+            analysis_results=(result,),
+        )
+        row = measurement_to_row(m_with)
+        # Simulate loaded relationships (the ORM does this normally).
+        row.files = [
+            file_to_row(f, project_id=new_id(), measurement_id=m.id) for f in m_with.files
+        ]
+        row.issues = []
+        row.analysis_results = [analysis_result_to_row(result)]
+        recovered = row_to_measurement(row)
+        assert len(recovered.analysis_results) == 1
+        assert recovered.analysis_results[0] == result
 
 
 def test_path_round_trips_as_pathlib() -> None:
