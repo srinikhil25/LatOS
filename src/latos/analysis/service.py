@@ -262,10 +262,7 @@ class AnalysisService:
                 kept = tuple(
                     r
                     for r in m.analysis_results
-                    if not (
-                        r.analyzer_name == target_name
-                        and _fingerprint(r.params) == target_fp
-                    )
+                    if not (r.analyzer_name == target_name and _fingerprint(r.params) == target_fp)
                 )
                 new_measurements.append(
                     Measurement(
@@ -362,8 +359,7 @@ def _validate_output(output: AnalyzerOutput, *, analyzer_name: str) -> None:
     """
     if not isinstance(output, AnalyzerOutput):
         raise AnalysisError(
-            f"Analyzer {analyzer_name!r} returned {type(output).__name__}, "
-            "expected AnalyzerOutput",
+            f"Analyzer {analyzer_name!r} returned {type(output).__name__}, expected AnalyzerOutput",
         )
     if not isinstance(output.outputs, dict):
         raise AnalysisError(
@@ -382,8 +378,7 @@ def _validate_output(output: AnalyzerOutput, *, analyzer_name: str) -> None:
         lengths.add(arr.shape[0])
     if len(lengths) > 1:
         raise AnalysisError(
-            f"Analyzer {analyzer_name!r} derived_arrays have mismatched lengths: "
-            f"{sorted(lengths)}",
+            f"Analyzer {analyzer_name!r} derived_arrays have mismatched lengths: {sorted(lengths)}",
         )
     if not isinstance(output.issues, tuple) or any(
         not isinstance(i, ValidationIssue) for i in output.issues

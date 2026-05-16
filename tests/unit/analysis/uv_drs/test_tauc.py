@@ -220,9 +220,7 @@ class TestPercentDetection:
             ),
         )
         # Same band gap regardless of scale.
-        assert abs(
-            out_fraction.outputs["band_gap_ev"] - out_percent.outputs["band_gap_ev"]
-        ) < 1e-6
+        assert abs(out_fraction.outputs["band_gap_ev"] - out_percent.outputs["band_gap_ev"]) < 1e-6
         # Percent path emits an INFO issue.
         kinds = {i.severity for i in out_percent.issues}
         assert Severity.INFO in kinds

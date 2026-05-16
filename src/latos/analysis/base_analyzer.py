@@ -144,8 +144,7 @@ class BaseAnalyzer(ABC):
             )
         if not isinstance(cls.version, str) or not _ANALYZER_VERSION_RE.match(cls.version):
             raise TypeError(
-                f"{cls.__name__}.version must be semver MAJOR.MINOR.PATCH, "
-                f"got {cls.version!r}",
+                f"{cls.__name__}.version must be semver MAJOR.MINOR.PATCH, got {cls.version!r}",
             )
         if not isinstance(cls.accepts_techniques, tuple) or not cls.accepts_techniques:
             raise TypeError(

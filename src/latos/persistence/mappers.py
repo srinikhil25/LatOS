@@ -208,9 +208,7 @@ def row_to_analysis_result(row: AnalysisResultRow) -> AnalysisResult:
         analyzer_version=row.analyzer_version,
         params=dict(row.params),
         outputs=dict(row.outputs),
-        derived_arrays_path=(
-            Path(row.derived_arrays_path) if row.derived_arrays_path else None
-        ),
+        derived_arrays_path=(Path(row.derived_arrays_path) if row.derived_arrays_path else None),
         issues=tuple(_issue_from_json(p) for p in row.issues_json),
         computed_at=row.computed_at,
     )

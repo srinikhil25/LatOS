@@ -178,10 +178,7 @@ class UvDrsTaucAnalyzer(BaseAnalyzer):
                 ValidationIssue(
                     field="band_gap_type",
                     severity=Severity.WARNING,
-                    message=(
-                        f"Unrecognized band_gap_type={gap_type!r}; "
-                        "falling back to 'direct'."
-                    ),
+                    message=(f"Unrecognized band_gap_type={gap_type!r}; falling back to 'direct'."),
                     detected_at=utc_now(),
                 ),
             )

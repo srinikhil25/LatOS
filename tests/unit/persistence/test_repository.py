@@ -138,7 +138,6 @@ class TestRoundTrip:
         loaded = repo.load(p_skel.id)
         assert len(loaded.unassigned_files) == 1
 
-
     def test_measurement_with_analysis_results(self, repo: ProjectRepository) -> None:
         """Stage 3A: AnalysisResults attached to a Measurement must round-trip."""
         from latos.core.models import Measurement, Project, Sample, ValidationIssue

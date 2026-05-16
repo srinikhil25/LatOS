@@ -300,9 +300,7 @@ class TestMeasurementWithAnalysisResults:
         )
         row = measurement_to_row(m_with)
         # Simulate loaded relationships (the ORM does this normally).
-        row.files = [
-            file_to_row(f, project_id=new_id(), measurement_id=m.id) for f in m_with.files
-        ]
+        row.files = [file_to_row(f, project_id=new_id(), measurement_id=m.id) for f in m_with.files]
         row.issues = []
         row.analysis_results = [analysis_result_to_row(result)]
         recovered = row_to_measurement(row)
