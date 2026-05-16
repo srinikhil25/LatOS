@@ -23,9 +23,20 @@ from PySide6.QtCore import QSize
 from PySide6.QtWidgets import QDialog
 from qfluentwidgets import FluentIcon, FluentWindow
 
+from latos.analysis import AnalysisService
+from latos.analysis import default_registry as analysis_default_registry
+from latos.ingestion.array_store import ArrayStore
 from latos.ingestion.labeling.pipeline import cluster_project
 from latos.ingestion.orchestrator import IngestionResult
+from latos.persistence.db import (
+    create_project_engine,
+    init_schema,
+    make_session_factory,
+    project_arrays_dir,
+)
+from latos.persistence.repository import ProjectRepository
 from latos.ui.dialogs.ingestion_progress import IngestionProgressDialog
+from latos.ui.pages.analysis import AnalysisPage
 from latos.ui.pages.cluster_review import ClusterReviewPage
 from latos.ui.pages.overview import OverviewPage
 from latos.ui.pages.project_picker import ProjectPickerPage
@@ -123,6 +134,13 @@ class LatosMainWindow(FluentWindow):  # type: ignore[misc]
         self._sample_review = SampleReviewPage()
         self.addSubInterface(self._sample_review, FluentIcon.SEARCH, "Review")
 
+        # Analysis page (Stage 3C) — register empty; bind a runtime
+        # AnalysisService + AnalyzerRegistry + ArrayStore after the
+        # project loads in `_on_project_opened`. Sits after Review
+        # because it operates on already-loaded measurements.
+        self._analysis = AnalysisPage()
+        self.addSubInterface(self._analysis, FluentIcon.IOT, "Analysis")
+
     def _on_project_opened(self, path: Path) -> None:
         """Slot fired when the user picks a folder.
 
@@ -142,6 +160,8 @@ class LatosMainWindow(FluentWindow):  # type: ignore[misc]
                     cluster_project(result.project),
                     project_root=result.project.root_path,
                 )
+                self._bind_analysis_runtime(result.project.root_path)
+                self._analysis.set_project(result.project)
                 self.switchTo(self._overview)
         # Cancel / failure paths leave `_last_ingestion_result` untouched
         # — the user can re-pick the folder to retry. The project picker
@@ -157,4 +177,33 @@ class LatosMainWindow(FluentWindow):  # type: ignore[misc]
             path,
             orchestrator_factory=self._orchestrator_factory,
             parent=self,
+        )
+
+    def _bind_analysis_runtime(self, project_root: Path) -> None:
+        """Construct the Stage 3 runtime and hand it to the Analysis page.
+
+        Builds a fresh SQLAlchemy engine + session factory pointed at
+        the project's data.db, a ProjectRepository on top, an
+        AnalysisService, the default AnalyzerRegistry, and an
+        ArrayStore over `.latos/arrays/`. Tests can monkey-patch this
+        method to inject stubs.
+
+        The engine is created per project-open: opening a different
+        project rebinds with a new engine. We don't currently dispose
+        the previous engine here — Stage 1's repository factory is the
+        owner of engine lifetime, and rebinding `_analysis_service`
+        drops the only reference. A future "Close project" action
+        will handle explicit teardown.
+        """
+        engine = create_project_engine(project_root)
+        init_schema(engine)
+        session_factory = make_session_factory(engine)
+        repository = ProjectRepository(session_factory)
+        array_store = ArrayStore(project_arrays_dir(project_root))
+        service = AnalysisService(repository=repository, array_store=array_store)
+        registry = analysis_default_registry()
+        self._analysis.bind_runtime(
+            service=service,
+            registry=registry,
+            array_store=array_store,
         )
