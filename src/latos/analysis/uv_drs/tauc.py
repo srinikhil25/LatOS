@@ -1,6 +1,6 @@
-# ruff: noqa: N806, RUF002
+# ruff: noqa: N806
 # N806: scientific code uses single uppercase letters (E, Y, F, R) by convention.
-# RUF002: Greek letters in docstrings are intentional physics notation.
+# (RUF002/003 for Greek letters in docstrings are ignored project-wide.)
 """UV-DRS Tauc-plot band gap analyzer.
 
 The Tauc method extracts a semiconductor's optical band gap from a

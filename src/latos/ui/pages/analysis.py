@@ -100,6 +100,10 @@ _SEVERITY_COLOR = {
 _PLOT_PEN = {"color": "#0F6CBD", "width": 2}
 _FIT_PEN = {"color": "#CA5010", "width": 2, "style": Qt.PenStyle.DashLine}
 _BAND_GAP_PEN = {"color": "#107C10", "width": 1, "style": Qt.PenStyle.DotLine}
+# Peak-center marker style: same dotted-green as the band-gap line so
+# the "this is the headline number / position" visual cue stays
+# consistent across analyzers.
+_PEAK_CENTER_PEN = {"color": "#107C10", "width": 1, "style": Qt.PenStyle.DotLine}
 
 # Bounds for spin-box widgets generated from `default_params`. Generous
 # enough to fit any sensible analyzer parameter; we don't try to infer
@@ -114,6 +118,30 @@ _INT_MAX = 1_000_000_000
 # against another (x vs y). Below this we fall back to plotting the
 # single array against its index.
 _MIN_DERIVED_ARRAYS_FOR_XY_PLOT = 2
+
+# Conventional y-axis names per technique. The plot picks the first
+# name in this tuple that's present in the derived arrays. Adding a
+# new convention here is the extension point for future analyzers.
+_PREFERRED_Y_AXIS_NAMES = (
+    "tauc_y",  # UV-DRS Tauc plot
+    "intensity_observed",  # XRD peak fit (raw observed scan)
+)
+
+
+def _pick_y_name(arrays: dict[str, Any], names: list[str]) -> str:
+    """Pick the y-axis array name from the derived arrays dict.
+
+    Preference order:
+    1. Any name in `_PREFERRED_Y_AXIS_NAMES` that's present.
+    2. The second array in insertion order (generic x/y fallback).
+    3. The only array name (degenerate fallback).
+    """
+    for preferred in _PREFERRED_Y_AXIS_NAMES:
+        if preferred in arrays:
+            return preferred
+    if len(names) >= _MIN_DERIVED_ARRAYS_FOR_XY_PLOT:
+        return names[1]
+    return names[0]
 
 
 class AnalysisPage(QWidget):
@@ -661,17 +689,27 @@ class AnalysisPage(QWidget):
         self._outputs_label.setText("\n".join(lines))
 
     def _render_result_plot(self, result: AnalysisResult) -> None:
-        """Plot the result's derived arrays.
+        """Plot the result's derived arrays with analyzer-conventional overlays.
 
-        Generic policy: pick the first array as x, the second as y. For
-        UV-DRS Tauc, that puts photon energy on the x-axis and
-        Kubelka-Munk on the y-axis by default — same convention the
-        underlying analyzer chose when populating `derived_arrays`.
+        Generic policy: the first derived array is the x-axis. The
+        y-axis preference list — picked from whichever name is present
+        first — encodes per-analyzer conventions without coupling the
+        page to specific analyzer classes:
 
-        Special case: if the result carries a `fit_line` array (Tauc's
-        linear-fit overlay) and a `band_gap_ev` scalar output, overlay
-        them on the same axes — that's the headline visualization the
-        whole stage exists to produce.
+            tauc_y              UV-DRS Tauc plot
+            intensity_observed  XRD peak-fit (raw observed scan)
+            <any second array>  generic fallback
+            <only array>        degenerate fallback
+
+        Overlays are pattern-based too. Any output / array with the
+        conventional name gets a conventional visual:
+
+        - `fit_line` array  → dashed orange overlay
+        - `band_gap_ev` scalar (Tauc) → vertical green line at x = Eg
+        - `peak_centers_2theta` list (XRD) → vertical green line per peak
+
+        New analyzers that emit these conventional names automatically
+        inherit the visualization without page changes.
         """
         self._plot_widget.clear()
         arrays = self._load_derived_arrays(result)
@@ -680,30 +718,41 @@ class AnalysisPage(QWidget):
             return
         names = list(arrays.keys())
         x_name = names[0]
-        # Prefer `tauc_y` if present (the Tauc analyzer's canonical
-        # y-axis), otherwise the second array (if any), otherwise the
-        # only array (degenerate but defensive).
-        if "tauc_y" in arrays:
-            y_name = "tauc_y"
-        elif len(names) >= _MIN_DERIVED_ARRAYS_FOR_XY_PLOT:
-            y_name = names[1]
-        else:
-            y_name = names[0]
+        y_name = _pick_y_name(arrays, names)
         x = arrays[x_name]
         y = arrays[y_name]
         self._plot_widget.setLabel("bottom", x_name)
         self._plot_widget.setLabel("left", y_name)
         self._plot_widget.plot(x, y, pen=_PLOT_PEN, name=y_name)
 
-        # Tauc-specific overlays. Cheap-and-defensive: only fire when
-        # both the array and the scalar are present.
+        # Generic fit-curve overlay. Any analyzer that produces a
+        # derived array named `fit_line` gets it dashed-orange on top
+        # of the observed curve.
         if "fit_line" in arrays:
             self._plot_widget.plot(x, arrays["fit_line"], pen=_FIT_PEN, name="fit")
+
+        # Tauc-style single-position marker (band gap).
         band_gap = result.outputs.get("band_gap_ev")
+        # XRD-style multi-position markers (peak centers). A list of
+        # numerics turns into one vertical line per entry; any
+        # non-numeric entry is silently skipped so a partial result
+        # can't crash the render.
+        peak_centers = result.outputs.get("peak_centers_2theta")
+        caption_parts: list[str] = []
         if isinstance(band_gap, int | float):
             line = pg.InfiniteLine(pos=float(band_gap), angle=90, pen=_BAND_GAP_PEN)
             self._plot_widget.addItem(line)
-            self._plot_caption.setText(f"Eg = {float(band_gap):.3f} eV")
+            caption_parts.append(f"Eg = {float(band_gap):.3f} eV")
+        if isinstance(peak_centers, list) and peak_centers:
+            n_drawn = 0
+            for pos in peak_centers:
+                if isinstance(pos, int | float):
+                    line = pg.InfiniteLine(pos=float(pos), angle=90, pen=_PEAK_CENTER_PEN)
+                    self._plot_widget.addItem(line)
+                    n_drawn += 1
+            caption_parts.append(f"{n_drawn} peak{'s' if n_drawn != 1 else ''}")
+        if caption_parts:
+            self._plot_caption.setText(" · ".join(caption_parts))
         else:
             self._plot_caption.setText(f"{y_name} vs {x_name}")
 

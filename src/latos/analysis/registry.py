@@ -121,15 +121,18 @@ def default_registry() -> AnalyzerRegistry:
 
     Currently registers:
     - `UvDrsTaucAnalyzer`: band gap from UV-DRS Kubelka-Munk + Tauc plot.
+    - `XrdPeakFitAnalyzer`: SNIP-baselined pseudo-Voigt peak fit for XRD.
 
-    Future stages will add `xrd-peak-fit`, `transport-zt`, etc.
+    Future stages will add `transport-zt`, XPS peak deconvolution, etc.
     """
     # Local imports keep the module light when only the registry types
     # are needed (e.g. by tests that build their own one-analyzer registry).
     from latos.analysis.uv_drs.tauc import UvDrsTaucAnalyzer  # noqa: PLC0415
+    from latos.analysis.xrd.peak_fit import XrdPeakFitAnalyzer  # noqa: PLC0415
 
     return AnalyzerRegistry(
         [
             UvDrsTaucAnalyzer(),
+            XrdPeakFitAnalyzer(),
         ],
     )

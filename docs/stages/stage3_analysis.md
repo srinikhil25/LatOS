@@ -1,8 +1,8 @@
 # Stage 3 — Derived analysis framework
 
-**Status:** 🚧 in progress (3A + 3B + 3C complete; 3D second analyzer pending)
-**Sub-stages covered so far:** 3A (`AnalysisResult` domain + persistence), 3B (analyzer protocol + UV-DRS Tauc), 3C (Analysis UI page)
-**Date range:** 2026-05-13 – present
+**Status:** ✅ complete (3A + 3B + 3C + 3D)
+**Sub-stages covered:** 3A (`AnalysisResult` domain + persistence), 3B (analyzer protocol + UV-DRS Tauc), 3C (Analysis UI page), 3D (XRD peak-fit analyzer)
+**Date range:** 2026-05-13 – 2026-05-18
 
 ## 1. Goal
 
@@ -157,6 +157,78 @@ caching, and persistent storage of results.
     visualization. Per-analyzer custom widgets stay an option if a
     truly bespoke render is needed later.
 
+- **Decision (3D):** Baseline by SNIP [\[ryan1988\]](../references.md#ryan1988)
+  rather than a polynomial / rolling-ball / asymmetric-least-squares fit.
+  - Alternatives considered: polynomial fit (rejected — chooses
+    degree per-spectrum, biases peak tails); rolling ball (rejected —
+    sensitive to ball radius vs. peak width interaction);
+    `pybaselines.whittaker.asls` (good but adds a second hyperparameter
+    `p` whose role is non-intuitive for end users).
+  - Why this won: SNIP is the literature consensus for XRD/XRF — one
+    hyperparameter (max half-window in 2θ degrees), insensitive to
+    peak count, and the optimizer used by GSAS-II, Bruker EVA, and
+    `xrdfit` [\[daniels2020\]](../references.md#daniels2020).
+
+- **Decision (3D):** Detection prominence threshold is
+  `max(3·σ_MAD, 0.01·max(corrected))`, not a single fixed value.
+  - Alternatives considered: fixed fraction-of-max only; fixed
+    absolute counts; second-derivative detection.
+  - Why this won: 3σ_MAD adapts to per-spectrum noise (MAD is robust
+    to peaks themselves), and the 1%-of-max floor catches the case
+    where the noise estimate collapses (extremely clean spectra
+    where `MAD ≈ 0`). Together they keep false-positive rate at the
+    Gaussian-3σ level (~0.3%) without missing weak real peaks.
+    Second-derivative detection is more sensitive to shoulders but
+    needs more aggressive smoothing and produces worse results on
+    noisy lab-scale data — deferred to a future version.
+
+- **Decision (3D):** Profile is pseudo-Voigt with a *single shared σ*
+  per peak (lmfit's `PseudoVoigtModel`), not Voigt or
+  Thompson-Cox-Hastings (separate σ_G, γ_L).
+  - Alternatives considered: True Voigt (convolution of Gaussian and
+    Lorentzian, two width parameters); TCH pseudo-Voigt.
+  - Why this won: A single σ + η captures both instrumental (Gaussian)
+    and finite-size (Lorentzian) contributions in one analytical form
+    and is what every XRD package reaches for first
+    [\[thompson1987\]](../references.md#thompson1987). True Voigt and
+    TCH need an instrument-broadening calibration scan to be
+    meaningful — a Stage 4 cross-modal task.
+
+- **Decision (3D):** Peaks whose ±2·FWHM windows overlap are fit as
+  a single composite model, not independently.
+  - Alternatives considered: Always fit one peak at a time on a
+    local window; always fit all peaks globally.
+  - Why this won: Per-cluster composite fitting is what handles
+    Kα₁/Kα₂ splits and overlapping reflections from solid solutions
+    without the weaker peak being absorbed into the stronger peak's
+    tail. A *global* fit would couple every peak in a scan to every
+    other peak — wasted parameters and worse convergence for
+    well-separated peaks.
+
+- **Decision (3D):** Empirically measure FWHM on a fine grid rather
+  than trusting lmfit's derived `fwhm` parameter.
+  - Alternatives considered: Use `result.params['fwhm']` from lmfit.
+  - Why this won: lmfit's `fwhm` derived parameter for
+    `PseudoVoigtModel` reports `2·σ` *regardless of η* — an internal
+    convention that only matches the actual curve FWHM for pure
+    Lorentzian (η=1). For mixed pseudo-Voigt, evaluating the model
+    on a 5001-point grid within ±5σ and measuring half-max crossings
+    gives the true FWHM. Verified against the synthetic-spectrum
+    closed form to within 2% on pure Lorentzian peaks.
+
+- **Decision (3D):** Per-peak `sigma` is constrained to
+  `[step, 3·σ_init]` during the composite fit.
+  - Alternatives considered: Unbounded `sigma`; tighter `[0.5σ_init,
+    2σ_init]` window.
+  - Why this won: Asymmetric doublets (e.g. 2:1 amplitude ratio,
+    Kα₁/Kα₂-like) without the upper bound let the weaker peak's
+    width balloon to absorb the tail of the stronger peak, dragging
+    its center 0.1–0.5° away from truth. 3× is loose enough to
+    accommodate genuine broadening (deformed crystallites, mixed
+    phases) and tight enough to break the absorption pathology. The
+    lower bound prevents the fit collapsing to a single sample
+    width.
+
 ## 4. Methods / algorithms
 
 ### 4.1 Cache key (Stage 3B)
@@ -242,6 +314,83 @@ A buggy analyzer returning the wrong shape raises `AnalysisError` at
 the service layer (an actual exception, not a soft issue) — bugs in
 analyzer code should fail loudly.
 
+### 4.7 SNIP baseline (XRD peak-fit, Stage 3D)
+
+The Statistics-sensitive Non-linear Iterative Peak-clipping algorithm
+[\[ryan1988\]](../references.md#ryan1988) iteratively shrinks each point
+toward the average of its neighbours at growing window widths:
+
+```math
+y_i^{(w+1)} = \min\!\Big(y_i^{(w)},\ \tfrac{1}{2}\big(y_{i-w}^{(w)} + y_{i+w}^{(w)}\big)\Big)
+```
+
+for `w = 1, 2, …, w_max`. The single hyperparameter `w_max` (half-window
+in samples — converted from a user-friendly 5° default by dividing by
+the scan step) controls how aggressively wide features get flattened
+into baseline. Real peaks survive because they're narrower than `w_max`;
+slowly-varying amorphous backgrounds get pressed into the baseline.
+
+### 4.8 Adaptive prominence threshold (Stage 3D)
+
+```math
+\text{prominence threshold} = \max\!\big(3\,\sigma_{\text{MAD}},\ 0.01 \cdot \max(\text{corrected})\big)
+```
+
+where σ_MAD is a robust noise estimate from the first differences of
+the corrected curve:
+
+```math
+\sigma_{\text{MAD}} = 1.4826 \cdot \frac{\text{median}(|\Delta y - \text{median}(\Delta y)|)}{\sqrt{2}}
+```
+
+The factor √2 corrects for the noise-doubling from differencing. The
+1.4826 consistency constant maps MAD to a Gaussian σ
+[Rousseeuw & Croux 1993]. Computing the noise from *differences*
+(rather than residuals against a smooth) keeps the estimate robust
+when peaks themselves dominate the spectrum.
+
+### 4.9 Composite pseudo-Voigt fit (Stage 3D)
+
+For peaks whose ±`fit_window_fwhm_multiplier`·FWHM windows overlap, the
+fit is run as an lmfit `CompositeModel` of `PseudoVoigtModel`s sharing
+a common 2θ window:
+
+```math
+y_{\text{model}}(x) = \sum_{k=1}^{N_{\text{cluster}}} A_k\,\big[(1-\eta_k)\,G(x;\,\mu_k,\,\sigma_k) + \eta_k\,L(x;\,\mu_k,\,\sigma_k)\big]
+```
+
+Initial guesses come from `scipy.signal.peak_widths` at the half-prominence
+level; each `sigma_k` is bounded to `[step, 3·σ_init]` and each `η_k` to
+`[0, 1]`. The Levenberg-Marquardt optimizer (lmfit default) then refines
+all `4·N_cluster` parameters jointly.
+
+### 4.10 Empirical FWHM measurement (Stage 3D)
+
+After the fit converges, the analyzer evaluates each peak's model on a
+5001-point grid spanning ±5σ around the center, locates the
+half-max crossings on both sides, and reports the FWHM as the
+crossing-to-crossing distance:
+
+```math
+\text{FWHM}_{\text{empirical}} = x_{\text{high crossing}} - x_{\text{low crossing}}
+```
+
+This bypasses lmfit's `fwhm` derived parameter which reports `2σ` (the
+Lorentzian limit) regardless of mixing fraction.
+
+### 4.11 Goodness-of-fit metrics (Stage 3D)
+
+For the global fit on the baseline-corrected curve:
+
+```math
+R^2 = 1 - \frac{\sum_i (y_i^{\text{obs}} - y_i^{\text{model}})^2}{\sum_i (y_i^{\text{obs}} - \bar{y}^{\text{obs}})^2}
+\qquad
+\chi^2_\nu = \frac{\sum_i (y_i^{\text{obs}} - y_i^{\text{model}})^2}{(N - 4\,N_{\text{peaks}}) \cdot \sigma_{\text{noise}}^2}
+```
+
+R² < 0.8 attaches a `Severity.WARNING` issue (model is missing a peak,
+miscalibrated baseline, or wrong line shape).
+
 ## 5. Implementation summary
 
 | File | What it owns |
@@ -255,8 +404,9 @@ analyzer code should fail loudly.
 | `src/latos/analysis/registry.py` | `AnalyzerRegistry.find_for(measurement)` |
 | `src/latos/analysis/service.py` | `AnalysisService.run(...)` — cache, persist, write derived Parquet |
 | `src/latos/analysis/uv_drs/tauc.py` | `UvDrsTaucAnalyzer` — Kubelka-Munk + Tauc-plot band gap |
+| `src/latos/analysis/xrd/peak_fit.py` | `XrdPeakFitAnalyzer` — SNIP baseline + Savgol smoothing + find_peaks + lmfit pseudo-Voigt composite fit (3D) |
 | `src/latos/analysis/__init__.py` | Public API re-exports (3C) |
-| `src/latos/ui/pages/analysis.py` | `AnalysisPage` — tree + analyzer picker + auto-generated param form + results list + plot (3C) |
+| `src/latos/ui/pages/analysis.py` | `AnalysisPage` — tree + analyzer picker + auto-generated param form + results list + plot (3C); peak-center vertical lines (3D) |
 | `src/latos/ui/main_window.py` | Stage 3 runtime binding on project open (3C) |
 
 Key invariants enforced:
@@ -272,21 +422,37 @@ Key invariants enforced:
 
 ## 6. Validation
 
-- **Tests so far:** 927 total (61 new for Stage 3B; 22 for 3A; 18 new
-  UI tests for the AnalysisPage in 3C).
+- **Tests so far:** 852 non-UI total (21 new for Stage 3D; 61 for 3B;
+  22 for 3A; 18 UI tests for the AnalysisPage in 3C).
 - **Coverage:** 100% on `core/models` AnalysisResult, 100% on
   `persistence/mappers` for the new conversions, ≥90% on
-  `analysis/service`, 100% on the Tauc analyzer's primary path, and
-  the AnalysisPage covers empty state, tree filtering, parameter-
-  widget dispatch (bool/int/float/str), run flow, force re-run,
-  derived-array plotting, and issue rendering.
+  `analysis/service`, 100% on the Tauc analyzer's primary path, 87%
+  on the XRD peak-fit analyzer (uncovered: a few defensive fallback
+  branches), and the AnalysisPage covers empty state, tree filtering,
+  parameter-widget dispatch (bool/int/float/str), run flow, force
+  re-run, derived-array plotting, and issue rendering.
 - **Numerical accuracy (synthetic Tauc spectra):**
   - Direct gap recovered to within **50 meV** across {1.7, 2.05, 2.5,
     3.1} eV
   - Indirect gap recovered to within **100 meV** across {1.1, 1.5,
     2.0} eV
   - R² > 0.99 on synthetic data (clean reference)
-- **Quality gates:** ruff + mypy strict clean.
+- **Numerical accuracy (synthetic XRD spectra, Stage 3D):**
+  - Peak position recovered to within **0.05° 2θ** on isolated peaks,
+    4-peak realistic patterns, and asymmetric 2:1 doublets at 0.40°
+    separation
+  - FWHM recovered to within **5%** on pure-Lorentzian peaks
+    (analyzer sweet spot)
+  - FWHM recovered to within **20%** on mixed pseudo-Voigt peaks
+    (η ≈ 0.3) — bounded by the well-known pseudo-Voigt G↔L parameter
+    ambiguity that real-world Rietveld pipelines mitigate with a
+    separate instrument-broadening calibration scan
+  - Pure-noise input (3500-point scan, 2-count RMS, no peaks) yields
+    ≤ 15 spurious peaks, consistent with the Gaussian-3σ false-
+    positive rate of ~0.27% per point (expected ~9 over 3500 points)
+  - R² > 0.95 on clean single-peak fits
+- **Quality gates:** ruff check + ruff format clean, mypy strict
+  clean, full pytest (`-m "not ui"`) green.
 
 ```mermaid
 sequenceDiagram
@@ -316,9 +482,29 @@ sequenceDiagram
 
 ## 7. Limitations
 
-- **Single analyzer covers one technique.** The protocol generality
-  is asserted by class shape but not yet validated against a second
-  technique. Stage 3D (XRD peak-fit or transport zT) is the proof.
+- **No Kα₂ stripping** (Stage 3D). Cu-Kα radiation produces a Kα₁/Kα₂
+  doublet split by ~0.001·tan(θ) in 2θ; the Rachinger correction
+  [\[rachinger1948\]](../references.md#rachinger1948) is the standard
+  preprocessing step for non-Rietveld workflows. The Stage 3D analyzer
+  currently treats the two as independent peaks. A "Strip Kα₂"
+  toggle on import is on the roadmap.
+
+- **No instrumental-broadening subtraction** (Stage 3D). The Caglioti
+  formula [\[caglioti1958\]](../references.md#caglioti1958) requires a
+  LaB6 or Si SRM 660c calibration scan to determine instrument-specific
+  U, V, W parameters. Without that, the reported FWHMs are total
+  (instrumental + sample) widths — fine for relative comparison
+  between samples on the same instrument, not for Scherrer
+  crystallite-size estimates. Cross-modal calibration is Stage 4
+  territory.
+
+- **Sub-FWHM doublets not resolved** (Stage 3D). When two peaks are
+  separated by less than 1 FWHM, the second appears as a shoulder
+  rather than a distinct local maximum, and `scipy.signal.find_peaks`
+  cannot see shoulders. Resolving these requires second-derivative
+  detection [\[savitzky1964\]](../references.md#savitzky1964) on a
+  more aggressively smoothed copy of the corrected curve — more
+  sensitive to noise, deferred to a future version.
 
 - **Fit window selection is heuristic.** The y-percentile window
   works for clean spectra; messy data may need a manual energy-range
@@ -360,11 +546,12 @@ sequenceDiagram
 | 5.3 Persistence of derived results | `AnalysisResult` schema, JSON columns rationale, sidecar Parquet |
 | 5.4 Caching strategy | `(measurement, analyzer, version, params)` key; the unified hash-and-version philosophy |
 | 5.5 Reference analyzer: UV-DRS Tauc | Methods section 4.2–4.5; synthetic validation (50 meV tolerance) |
-| 5.6 Future analyzers | Limitations section as the explicit roadmap (XRD peak-fit, transport zT) |
+| 5.6 Second analyzer: XRD peak-fit | Methods section 4.7–4.11; design decisions (3D); synthetic validation (0.05° 2θ position, 5% FWHM Lorentzian / 20% pseudo-Voigt) |
+| 5.7 Future analyzers | Limitations section as the explicit roadmap (Kα₂ stripping, instrumental broadening, transport zT) |
 
 ## See also
 
 - [`RESULTS_LOG.md`](../../RESULTS_LOG.md) — chronological detail for 3A and 3B (entries are mostly captured via the commit messages on `de8ebc1` and `df83422`; a formal log entry can be appended)
 - [`BENCHMARKS.json`](../../BENCHMARKS.json) — Stage 3 entry to be appended on closure
 - [`figures/architecture.md`](../figures/architecture.md) — analysis sequence + cache-key strategy diagrams
-- [`references.md`](../references.md) — `tauc1966`, `davis1970`, `kubelka1931`, `cullity2001` (XRD background)
+- [`references.md`](../references.md) — Tauc: `tauc1966`, `davis1970`, `kubelka1931`; XRD peak-fit: `ryan1988` (SNIP), `savitzky1964` (smoothing), `thompson1987` (pseudo-Voigt), `caglioti1958` & `rachinger1948` (future calibration), `newville2014` (lmfit), `daniels2020` (xrdfit prior art), `virtanen2020` (scipy), `toby2013` (GSAS-II), `cullity2001` (XRD background)
