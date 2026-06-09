@@ -174,12 +174,13 @@ class IngestionProgressDialog(QDialog):
         self._worker.failed.connect(self._on_failed)
         self._worker.cancelled.connect(self._on_cancelled)
 
-        # Tear down the thread after any terminal signal. We use queued
-        # connections here too so the worker has finished its slot before
-        # the thread quits.
-        self._worker.finished.connect(self._thread.quit)
-        self._worker.failed.connect(self._thread.quit)
-        self._worker.cancelled.connect(self._thread.quit)
+        # NOTE: thread teardown is NOT signal-connected. The terminal
+        # slots below call `_shutdown_thread()` synchronously before
+        # accept()/reject(). A queued `quit` was racy: it only ran once
+        # the *main* event loop spun again — after the caller's
+        # post-dialog work — by which time the dialog (and its child
+        # QThread) could already be garbage-collected, printing
+        # "QThread: Destroyed while thread is still running".
 
     def showEvent(self, event):  # type: ignore[no-untyped-def]  # noqa: N802 (Qt overrides)
         """Start the worker thread the moment the dialog is shown."""
@@ -193,17 +194,28 @@ class IngestionProgressDialog(QDialog):
     def closeEvent(self, event):  # type: ignore[no-untyped-def]  # noqa: N802 (Qt overrides)
         """Make sure the worker thread is stopped before we tear down."""
         # Triggered by user closing the dialog with the window-manager X
-        # button. Treat as cancel-equivalent so the thread can exit
-        # cleanly; the dialog rejection happens via the close itself.
+        # button. Treat as cancel-equivalent, then stop the thread
+        # synchronously — accept()/reject() don't route through here, so
+        # this only covers the X-button path.
         if self._thread.isRunning():
             self._worker.request_cancel()
-            # Give the thread a moment to exit on its own. If it doesn't,
-            # we still let the dialog close — the worker thread will
-            # finish in the background and emit signals nobody is
-            # listening to (harmless because the connections are scoped
-            # to this dialog).
-            self._thread.wait(2000)
+        self._shutdown_thread()
         super().closeEvent(event)
+
+    def _shutdown_thread(self) -> None:
+        """Stop the worker thread and block until it has fully exited.
+
+        Called on the GUI thread from every terminal path. `quit()`
+        takes effect once the worker's current slot returns (the worker
+        checks its cancel flag per file, so that's bounded by one file's
+        parse time); `wait()` then joins the OS thread. Doing this
+        *before* the dialog closes guarantees the QThread is never
+        destroyed while still running, regardless of when the caller
+        drops its last reference to the dialog.
+        """
+        if self._thread.isRunning():
+            self._thread.quit()
+            self._thread.wait()
 
     # ------------------------------------------------------------------
     # Slots — worker callbacks
@@ -229,16 +241,19 @@ class IngestionProgressDialog(QDialog):
         # Cast: the signal is typed `object` because Qt's meta-type
         # system can't carry a frozen dataclass across threads.
         self._result = result if isinstance(result, IngestionResult) else None
+        self._shutdown_thread()
         self.accept()
 
     def _on_failed(self, failure: object) -> None:
         """Worker raised — record the failure and reject."""
         self._failure = failure if isinstance(failure, IngestionFailure) else None
+        self._shutdown_thread()
         self.reject()
 
     def _on_cancelled(self) -> None:
         """Worker cancelled at our request — reject the dialog."""
         self._cancelled = True
+        self._shutdown_thread()
         self.reject()
 
     def _on_cancel_clicked(self) -> None:
