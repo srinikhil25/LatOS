@@ -96,6 +96,12 @@ NOTES.md
 TODO_PERSONAL.md
 .scratch/
 
+# ─── Slide / meeting-prep artifacts (not product) ────────────────────
+# Architecture diagrams + audit scripts generated for presentation decks
+scripts/architecture_diagram*.py
+scripts/dhivya_audit.py
+docs/figures/latos_architecture*
+
 # ─── Secrets ─────────────────────────────────────────────────────────
 secrets/
 *.key
