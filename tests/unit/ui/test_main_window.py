@@ -6,13 +6,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from PySide6.QtWidgets import QWidget
+from qfluentwidgets import PrimaryPushButton
 
 from latos.ui.main_window import LatosMainWindow
 from latos.ui.pages.cluster_review import ClusterReviewPage
-from latos.ui.pages.overview import OverviewPage
-from latos.ui.pages.project_picker import ProjectPickerPage
+from latos.ui.pages.project_hub import ProjectHubPage
 from latos.ui.pages.sample_review import SampleReviewPage
-from latos.ui.pages.welcome import WelcomePage
 
 if TYPE_CHECKING:
     from pytestqt.qtbot import QtBot
@@ -45,22 +45,20 @@ class TestWindowConstruction:
 
 
 class TestPagesRegistered:
-    def test_welcome_page_present_in_widget_tree(self, latos_window: LatosMainWindow):
-        # `addSubInterface` parents the page to the FluentWindow's
-        # stacked widget. A simple findChild verifies the registration
-        # succeeded.
-        welcome = latos_window.findChild(WelcomePage, "WelcomePage")
-        assert welcome is not None
+    def test_hub_page_present_in_widget_tree(self, latos_window: LatosMainWindow):
+        # The Project Hub is the home page (it replaced the old Welcome +
+        # Open pages). `addSubInterface` parents it to the FluentWindow's
+        # stacked widget; a findChild verifies the registration succeeded.
+        hub = latos_window.findChild(ProjectHubPage, "ProjectHubPage")
+        assert hub is not None
+        # Start view until a project is opened.
+        assert hub.project is None
 
-    def test_project_picker_page_present_in_widget_tree(self, latos_window: LatosMainWindow):
-        picker = latos_window.findChild(ProjectPickerPage, "ProjectPickerPage")
-        assert picker is not None
-
-    def test_overview_page_present_in_widget_tree(self, latos_window: LatosMainWindow):
-        overview = latos_window.findChild(OverviewPage, "OverviewPage")
-        assert overview is not None
-        # Empty state until a project is opened.
-        assert overview.project is None
+    def test_overview_page_is_retired(self, latos_window: LatosMainWindow):
+        # The Overview page merged into the hub (UR6): its stats and
+        # preview plot live on ProjectHubPage now. Guard against an
+        # accidental re-registration.
+        assert latos_window.findChild(QWidget, "OverviewPage") is None
 
     def test_sample_review_page_present_in_widget_tree(self, latos_window: LatosMainWindow):
         review = latos_window.findChild(SampleReviewPage, "SampleReviewPage")
@@ -79,7 +77,7 @@ class TestProjectOpenedSlot:
     def test_initial_current_project_is_none(self, latos_window: LatosMainWindow):
         assert latos_window.current_project_root is None
 
-    def test_picker_signal_updates_current_project_root(
+    def test_hub_open_updates_current_project_root(
         self,
         qtbot: QtBot,
         recent_service: RecentProjectsService,
@@ -87,27 +85,29 @@ class TestProjectOpenedSlot:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        # Drive the picker exactly the way a real user would: patch the
-        # dialog to return a chosen folder and click the open button.
-        # The `latos_window` fixture wires a stub orchestrator into the
-        # ingestion dialog so this completes synchronously without
-        # touching real SQLite / Parquet.
+        # Drive the hub exactly the way a real user would: patch the
+        # dialog to return a chosen folder and click the "Open Folder"
+        # button on the start view. The `latos_window` fixture wires a
+        # stub orchestrator into the ingestion dialog so this completes
+        # synchronously without touching real SQLite / Parquet.
         chosen = tmp_path / "ChosenProject"
         chosen.mkdir()
 
-        from latos.ui.pages import project_picker as picker_module
+        from latos.ui.pages import project_hub as hub_module
 
         monkeypatch.setattr(
-            picker_module.QFileDialog,
+            hub_module.QFileDialog,
             "getExistingDirectory",
             staticmethod(lambda *args, **kwargs: str(chosen)),
         )
 
-        picker = latos_window.findChild(ProjectPickerPage, "ProjectPickerPage")
-        assert picker is not None
+        hub = latos_window.findChild(ProjectHubPage, "ProjectHubPage")
+        assert hub is not None
+        open_button = hub.findChild(PrimaryPushButton, "OpenFolderButton")
+        assert open_button is not None
 
-        with qtbot.waitSignal(picker.projectOpened, timeout=2000):
-            picker._open_button.click()
+        with qtbot.waitSignal(hub.projectOpened, timeout=2000):
+            open_button.click()
 
         assert latos_window.current_project_root == chosen
         # The stub orchestrator returns an empty IngestionResult, which
@@ -116,13 +116,7 @@ class TestProjectOpenedSlot:
         assert latos_window.last_ingestion_result.project.root_path == chosen
         # And the folder shows up as a recent in the injected service.
         assert [e.path for e in recent_service.entries()] == [chosen.resolve()]
-        # Overview page got populated with the (empty) project.
-        overview = latos_window.findChild(OverviewPage, "OverviewPage")
-        assert overview is not None
-        assert overview.project is not None
-        assert overview.project.root_path == chosen
-        # Same for the sample review page — both are populated in
-        # `_on_project_opened`.
+        # The sample review page is populated in `_on_project_opened`.
         review = latos_window.findChild(SampleReviewPage, "SampleReviewPage")
         assert review is not None
         assert review.project is not None
@@ -133,3 +127,6 @@ class TestProjectOpenedSlot:
         cluster = latos_window.findChild(ClusterReviewPage, "ClusterReviewPage")
         assert cluster is not None
         assert cluster.project_root == chosen
+        # The hub itself switches to its populated state after open.
+        assert hub.project is not None
+        assert hub.project.root_path == chosen

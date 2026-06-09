@@ -38,10 +38,8 @@ from latos.persistence.repository import ProjectRepository
 from latos.ui.dialogs.ingestion_progress import IngestionProgressDialog
 from latos.ui.pages.analysis import AnalysisPage
 from latos.ui.pages.cluster_review import ClusterReviewPage
-from latos.ui.pages.overview import OverviewPage
-from latos.ui.pages.project_picker import ProjectPickerPage
+from latos.ui.pages.project_hub import ProjectHubPage
 from latos.ui.pages.sample_review import SampleReviewPage
-from latos.ui.pages.welcome import WelcomePage
 from latos.ui.services.ingestion_worker import OrchestratorFactory
 from latos.ui.services.recent_projects import RecentProjectsService
 
@@ -102,44 +100,49 @@ class LatosMainWindow(FluentWindow):  # type: ignore[misc]
     def _init_pages(self) -> None:
         """Construct every page and register it with the sidebar.
 
-        Order matters: the first page registered is the one shown on
-        startup. Stage 1E.5 will add Sample / Measurement detail pages
-        here.
+        The Project Hub is the home page and the first thing shown on
+        startup. A separator divides it from the workspace pages
+        (Overview / Clustering / Samples / Analysis), which the hub's
+        activity cards also link to.
         """
-        self._welcome = WelcomePage()
-        self.addSubInterface(self._welcome, FluentIcon.HOME, "Welcome")
+        # Home: the Project Hub. Pre-project it's the start screen
+        # (open folder + recent); post-ingestion it shows the project
+        # summary + activity launcher cards.
+        self._hub = ProjectHubPage(self._recent_service)
+        self._hub.projectOpened.connect(self._on_project_opened)
+        self._hub.activitySelected.connect(self._on_activity_selected)
+        self.addSubInterface(self._hub, FluentIcon.HOME, "Home")
 
-        self._project_picker = ProjectPickerPage(self._recent_service)
-        self._project_picker.projectOpened.connect(self._on_project_opened)
-        self.addSubInterface(self._project_picker, FluentIcon.FOLDER_ADD, "Open")
+        # Visually separate the home entry from the workspace section.
+        self.navigationInterface.addSeparator()
 
-        # Overview is registered up-front (showing the empty state) so
-        # the sidebar layout is stable across "no project" / "project
-        # open" states. After a successful ingestion we populate it and
-        # navigate to it.
-        self._overview = OverviewPage()
-        self.addSubInterface(self._overview, FluentIcon.PIE_SINGLE, "Overview")
+        # NOTE: the old Overview page is gone — its summary tiles and
+        # preview plot now live on the hub itself (UR6).
 
         # Cluster review page. Lets the user merge/rename auto-clustered
-        # samples produced by Stage 2C (or, for now, derived from the
-        # ingested project's `Sample` rows). Sits before "Review" in the
-        # rail because clustering decisions are upstream of the
-        # measurement-level drill-down.
+        # samples. Scheduled to fold into the Samples page (UR7); until
+        # then it keeps its sidebar slot.
         self._cluster_review = ClusterReviewPage()
         self.addSubInterface(self._cluster_review, FluentIcon.TILES, "Clustering")
 
         # Same pattern as Overview — register early, populate on
-        # ingestion-complete. The Review page lets the user drill into
-        # individual samples / measurements.
+        # ingestion-complete. Lets the user drill into individual
+        # samples / measurements.
         self._sample_review = SampleReviewPage()
-        self.addSubInterface(self._sample_review, FluentIcon.SEARCH, "Review")
+        self.addSubInterface(self._sample_review, FluentIcon.SEARCH, "Samples")
 
         # Analysis page (Stage 3C) — register empty; bind a runtime
         # AnalysisService + AnalyzerRegistry + ArrayStore after the
-        # project loads in `_on_project_opened`. Sits after Review
+        # project loads in `_on_project_opened`. Sits after Samples
         # because it operates on already-loaded measurements.
         self._analysis = AnalysisPage()
         self.addSubInterface(self._analysis, FluentIcon.IOT, "Analysis")
+
+        # Hub activity-card keys → the sub-interface each one opens.
+        self._activity_targets = {
+            "review": self._sample_review,
+            "analysis": self._analysis,
+        }
 
     def _on_project_opened(self, path: Path) -> None:
         """Slot fired when the user picks a folder.
@@ -154,7 +157,6 @@ class LatosMainWindow(FluentWindow):  # type: ignore[misc]
             result = dialog.ingestion_result()
             self._last_ingestion_result = result
             if result is not None:
-                self._overview.set_project(result.project)
                 self._sample_review.set_project(result.project)
                 self._cluster_review.set_clusters(
                     cluster_project(result.project),
@@ -162,10 +164,23 @@ class LatosMainWindow(FluentWindow):  # type: ignore[misc]
                 )
                 self._bind_analysis_runtime(result.project.root_path)
                 self._analysis.set_project(result.project)
-                self.switchTo(self._overview)
+                self._hub.set_project(
+                    result.project,
+                    array_store=ArrayStore(project_arrays_dir(result.project.root_path)),
+                    ingestion=result,
+                )
+                # Land on the hub: it now carries the project summary,
+                # ingestion outcome, preview plot, and activity cards.
+                self.switchTo(self._hub)
         # Cancel / failure paths leave `_last_ingestion_result` untouched
-        # — the user can re-pick the folder to retry. The project picker
-        # remains the active page so the user can correct course.
+        # — the user can re-pick the folder to retry. The hub remains the
+        # active page so the user can correct course.
+
+    def _on_activity_selected(self, key: str) -> None:
+        """Navigate to the workspace page a hub activity card points to."""
+        target = self._activity_targets.get(key)
+        if target is not None:
+            self.switchTo(target)
 
     # ------------------------------------------------------------------
     # Hook so tests can swap in a stub dialog.
