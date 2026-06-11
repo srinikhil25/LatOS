@@ -156,6 +156,7 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
             measurements=len(measurements),
             techniques=len({m.technique for m in measurements}),
             parsed=result.parsed_count,
+            cached=result.cached_count,
             failed=result.failed_count,
             unclassified=result.unclassified_count,
         )

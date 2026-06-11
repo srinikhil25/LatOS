@@ -49,6 +49,7 @@ class ProjectSummary(BaseModel):
     measurements: int
     techniques: int
     parsed: int
+    cached: int
     failed: int
     unclassified: int
 

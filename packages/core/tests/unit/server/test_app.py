@@ -97,6 +97,16 @@ def _tiny_result(root: Path) -> IngestionResult:
             measurement_id=None,
             error=None,
         ),
+        FileOutcome(
+            path=root / "CS-1.asc",
+            relative_path=Path("CS-1.asc"),
+            sha256="1" * 64,
+            outcome=Outcome.SKIPPED_CACHED,
+            sample_name="CS-1",
+            parser_name="rigaku-asc",
+            measurement_id=None,
+            error=None,
+        ),
     )
     return IngestionResult(project=project, outcomes=outcomes)
 
@@ -171,6 +181,7 @@ class TestProjectSummary:
         assert body["measurements"] == 1
         assert body["techniques"] == 1
         assert body["parsed"] == 1
+        assert body["cached"] == 1
         assert body["failed"] == 0
         assert body["unclassified"] == 1
 

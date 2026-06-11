@@ -84,8 +84,8 @@ export function Hub({ onBack }: { onBack: () => void }) {
       <header className="space-y-1">
         <h1 className="text-3xl font-semibold tracking-tight">{project.name}</h1>
         <p className="text-sm text-secondary">
-          {project.parsed} files parsed · {project.failed} failed ·{" "}
-          {project.unclassified} unclassified
+          {project.parsed} parsed · {project.cached} cached · {project.failed}{" "}
+          failed · {project.unclassified} unclassified
         </p>
       </header>
 
