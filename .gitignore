@@ -98,9 +98,14 @@ TODO_PERSONAL.md
 
 # ─── Slide / meeting-prep artifacts (not product) ────────────────────
 # Architecture diagrams + audit scripts generated for presentation decks
-scripts/architecture_diagram*.py
-scripts/dhivya_audit.py
+packages/core/scripts/architecture_diagram*.py
+packages/core/scripts/dhivya_audit.py
 docs/figures/latos_architecture*
+
+# ─── Desktop app (apps/desktop — Tauri + React) ──────────────────────
+node_modules/
+apps/desktop/dist/
+apps/desktop/src-tauri/target/
 
 # ─── Secrets ─────────────────────────────────────────────────────────
 secrets/
