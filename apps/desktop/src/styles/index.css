@@ -1,0 +1,50 @@
+@import "tailwindcss";
+@import "./tokens.css";
+
+/* Map Latos tokens into Tailwind v4 theme variables so utilities like
+   `bg-surface`, `text-secondary`, `border-edge`, `rounded-md-latos`
+   are available everywhere. */
+@theme {
+  --color-accent: var(--latos-accent);
+  --color-page: var(--latos-page-bg);
+  --color-surface: var(--latos-surface);
+  --color-muted: var(--latos-muted-surface);
+  --color-edge: var(--latos-border);
+  --color-primary: var(--latos-text-primary);
+  --color-secondary: var(--latos-text-secondary);
+
+  --color-severity-error: var(--latos-severity-error);
+  --color-severity-warning: var(--latos-severity-warning);
+  --color-severity-info: var(--latos-severity-info);
+
+  --radius-sm: var(--latos-radius-sm);
+  --radius-md: var(--latos-radius-md);
+  --radius-lg: var(--latos-radius-lg);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--latos-page-bg);
+  color: var(--latos-text-primary);
+  font-family:
+    "Segoe UI Variable Text",
+    "Segoe UI",
+    system-ui,
+    -apple-system,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  /* Desktop app feel: no text cursor on chrome, no rubber-band. */
+  overscroll-behavior: none;
+  user-select: none;
+}
+
+/* Re-enable selection where content is data, not chrome. */
+[data-selectable] {
+  user-select: text;
+}

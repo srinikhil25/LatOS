@@ -1,0 +1,53 @@
+/* Latos design tokens — ported from the Qt design system
+   (packages on qt-ui-fallback: latos/ui/design/tokens.py).
+
+   Same philosophy: minimal/airy, one accent, technique identity
+   colors that stay constant across themes. Tailwind v4 consumes
+   these via @theme in index.css. */
+
+:root {
+  /* Accent */
+  --latos-accent: #3b7dd8;
+
+  /* Light palette */
+  --latos-page-bg: #f7f8fa;
+  --latos-surface: #ffffff;
+  --latos-muted-surface: #f1f3f5;
+  --latos-border: #e5e7eb;
+  --latos-text-primary: #1f2328;
+  --latos-text-secondary: #6b7280;
+
+  /* Severity (theme-invariant) */
+  --latos-severity-error: #d13438;
+  --latos-severity-warning: #ca5010;
+  --latos-severity-info: #0f6cbd;
+
+  /* Technique identity colors (theme-invariant) */
+  --latos-tech-xrd: #4a8ce8;
+  --latos-tech-xps: #8764b8;
+  --latos-tech-uv-drs: #c98a1b;
+  --latos-tech-hall: #00808a;
+  --latos-tech-thermoelectric: #d2542c;
+  --latos-tech-eds: #3d8b40;
+  --latos-tech-tem: #c239b3;
+  --latos-tech-sem: #d24a6e;
+  --latos-tech-stem: #5e63d1;
+  --latos-tech-raman: #2aa0c4;
+  --latos-tech-unknown: #8a8f98;
+
+  /* Radii */
+  --latos-radius-sm: 6px;
+  --latos-radius-md: 10px;
+  --latos-radius-lg: 14px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --latos-page-bg: #1c1d1f;
+    --latos-surface: #26282b;
+    --latos-muted-surface: #2f3134;
+    --latos-border: #3a3c40;
+    --latos-text-primary: #e8eaed;
+    --latos-text-secondary: #9aa0a6;
+  }
+}
