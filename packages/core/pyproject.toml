@@ -61,11 +61,10 @@ dependencies = [
     "rapidfuzz>=3.6",
     "networkx>=3.2",
 
-    # Desktop UI
-    "PySide6>=6.6",
-    "PySide6-Fluent-Widgets>=1.5",
-    "pyqtgraph>=0.13",
-    "matplotlib>=3.8",
+    # NOTE: no UI dependencies — latos-core is headless. The desktop
+    # app (apps/desktop, Tauri + React) consumes this package through
+    # the `latos.server` sidecar. The retired Qt UI lives on the
+    # `qt-ui-fallback` branch.
 
     # Configuration
     "pydantic>=2.6",
@@ -92,7 +91,6 @@ ml = [
 dev = [
     # Test runners
     "pytest>=8.0",
-    "pytest-qt>=4.4",
     "pytest-cov>=4.1",
     "pytest-snapshot>=0.9",
     "pytest-benchmark>=4.0",
@@ -125,9 +123,6 @@ all = ["latos[ml,dev,docs,build]"]
 Homepage = "https://github.com/srinikhil25/LatOS"
 Repository = "https://github.com/srinikhil25/LatOS"
 Issues = "https://github.com/srinikhil25/LatOS/issues"
-
-[project.gui-scripts]
-latos-app = "latos.ui.app:main"
 
 # ----------------------------------------------------------------------------
 # Hatch packaging
@@ -210,8 +205,6 @@ namespace_packages = true
 
 [[tool.mypy.overrides]]
 module = [
-    "pyqtgraph.*",
-    "qfluentwidgets.*",
     "lmfit.*",
     "pymatgen.*",
     "mp_api.*",
@@ -252,14 +245,12 @@ addopts = [
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: integration tests requiring full pipeline",
-    "ui: UI tests requiring Qt event loop",
+    "ui: retired marker (Qt-era); kept so CI '-m \"not ui\"' expressions stay valid",
     "gpu: tests requiring GPU/CUDA",
     "ollama: tests requiring local Ollama server",
 ]
 filterwarnings = [
     "error",
-    "ignore::DeprecationWarning:pyqtgraph.*",
-    "ignore::DeprecationWarning:qfluentwidgets.*",
 ]
 
 # ----------------------------------------------------------------------------
@@ -269,7 +260,6 @@ filterwarnings = [
 source = ["src/latos"]
 branch = true
 omit = [
-    "src/latos/ui/resources/*",
     "*/__init__.py",
 ]
 
