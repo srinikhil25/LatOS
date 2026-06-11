@@ -17,11 +17,15 @@ export default function App() {
   const [core, setCore] = useState<CoreStatus>("connecting");
   const [screen, setScreen] = useState<Screen>("start");
 
-  useEffect(() => {
+  const connect = () => {
+    setCore("connecting");
     waitForCore()
       .then(() => setCore("ready"))
       .catch(() => setCore("down"));
-  }, []);
+  };
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(connect, []);
 
   if (core === "connecting") {
     return (
@@ -36,9 +40,15 @@ export default function App() {
       <div className="flex h-full flex-col items-center justify-center gap-2 px-10 text-center">
         <p className="font-medium">The Latos core is not running.</p>
         <p className="text-sm text-secondary" data-selectable>
-          Start it with: <code>python -m latos.server</code> (packages/core), then
-          restart the app.
+          Start it with: <code>python -m latos.server</code> (packages/core).
         </p>
+        <button
+          type="button"
+          onClick={connect}
+          className="mt-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white transition hover:brightness-110"
+        >
+          Retry
+        </button>
       </div>
     );
   }

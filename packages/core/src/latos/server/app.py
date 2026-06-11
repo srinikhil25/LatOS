@@ -23,6 +23,7 @@ from importlib import metadata
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from latos.server.schemas import (
@@ -69,6 +70,24 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
     app = FastAPI(title="latos-core", version=_version(), docs_url="/docs")
     # Stash for tests / introspection; FastAPI's `state` is meant for this.
     app.state.latos = state
+
+    # The desktop WebView is a different *origin* than this server
+    # (http://localhost:1420 in `tauri dev`, http://tauri.localhost /
+    # tauri://localhost when packaged), so without these headers the
+    # browser engine silently discards every response. The server still
+    # binds 127.0.0.1 only — CORS here is about which local UI may read
+    # the responses, not about network exposure.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:1420",
+            "http://tauri.localhost",
+            "https://tauri.localhost",
+            "tauri://localhost",
+        ],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/health")
     def health() -> HealthResponse:
