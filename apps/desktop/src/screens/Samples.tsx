@@ -9,11 +9,14 @@ import { useEffect, useMemo, useState } from "react";
 import {
   getMeasurementArrays,
   getSamples,
+  IMAGE_TECHNIQUES,
+  measurementImageUrl,
   type MeasurementArrays,
   type MeasurementSummary,
   type SampleSummary,
 } from "../lib/api";
 import { LinePlot } from "../components/LinePlot";
+import { ImageViewer } from "../components/ImageViewer";
 import { TechniqueChip, techniqueLabel } from "../components/TechniqueChip";
 
 interface TechniqueGroup {
@@ -38,13 +41,12 @@ function fileLabel(m: MeasurementSummary): string {
   return m.filename ?? m.instrument ?? m.id.slice(0, 8);
 }
 
-function DetailPane({ measurement }: { measurement: MeasurementSummary | null }) {
+function ArrayDetail({ measurement }: { measurement: MeasurementSummary }) {
   const [data, setData] = useState<MeasurementArrays | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!measurement) return;
     setData(null);
     setError(null);
     setLoading(true);
@@ -54,15 +56,7 @@ function DetailPane({ measurement }: { measurement: MeasurementSummary | null })
         setError(err instanceof Error ? err.message : String(err)),
       )
       .finally(() => setLoading(false));
-  }, [measurement]);
-
-  if (!measurement) {
-    return (
-      <div className="flex h-full items-center justify-center text-secondary">
-        Select a measurement to see its details.
-      </div>
-    );
-  }
+  }, [measurement.id]);
 
   // X/Y heuristic mirrors the core: first column vs second; lone column vs index.
   const plot = useMemo(() => {
@@ -75,6 +69,37 @@ function DetailPane({ measurement }: { measurement: MeasurementSummary | null })
     const y = data.arrays[yName];
     return { x: y.map((_, i) => i), y, xName: "index", yName };
   }, [data]);
+
+  if (loading) return <p className="text-secondary">Loading arrays…</p>;
+  if (error || !plot) {
+    return (
+      <div className="rounded-md border border-edge bg-muted p-4 text-sm text-secondary">
+        No plottable data for this measurement.
+        {error && (
+          <span className="mt-1 block text-xs opacity-70" data-selectable>
+            {error}
+          </span>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-lg border border-edge bg-surface p-4">
+      <LinePlot x={plot.x} y={plot.y} xLabel={plot.xName} yLabel={plot.yName} />
+    </div>
+  );
+}
+
+function DetailPane({ measurement }: { measurement: MeasurementSummary | null }) {
+  if (!measurement) {
+    return (
+      <div className="flex h-full items-center justify-center text-secondary">
+        Select a measurement to see its details.
+      </div>
+    );
+  }
+
+  const isImage = IMAGE_TECHNIQUES.has(measurement.technique);
 
   return (
     <div className="space-y-5 p-8">
@@ -92,26 +117,14 @@ function DetailPane({ measurement }: { measurement: MeasurementSummary | null })
         )}
       </header>
 
-      {loading && <p className="text-secondary">Loading arrays…</p>}
-      {error && (
-        <div className="rounded-md border border-edge bg-muted p-4 text-sm text-secondary">
-          {/* Image-only techniques (TEM/SEM) have no arrays yet — that's
-              the next screen, not an error to alarm the user with. */}
-          No plottable data for this measurement.
-          <span className="mt-1 block text-xs opacity-70" data-selectable>
-            {error}
-          </span>
-        </div>
-      )}
-      {plot && (
-        <div className="rounded-lg border border-edge bg-surface p-4">
-          <LinePlot
-            x={plot.x}
-            y={plot.y}
-            xLabel={plot.xName}
-            yLabel={plot.yName}
-          />
-        </div>
+      {isImage ? (
+        <ImageViewer
+          key={measurement.id}
+          src={measurementImageUrl(measurement.id)}
+          alt={fileLabel(measurement)}
+        />
+      ) : (
+        <ArrayDetail measurement={measurement} />
       )}
     </div>
   );

@@ -25,8 +25,12 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
+from latos.core.enums import Technique
+from latos.core.models import Measurement
+from latos.ingestion.orchestrator import IngestionResult
+from latos.server.imaging import render_to_png
 from latos.server.schemas import (
     HealthResponse,
     IngestStartedResponse,
@@ -43,6 +47,10 @@ from latos.server.state import (
     ServerState,
     TerminalEvent,
 )
+
+# Techniques whose measurements carry a renderable image rather than
+# plottable arrays.
+_IMAGE_TECHNIQUES = frozenset({Technique.TEM, Technique.SEM, Technique.STEM})
 
 __all__ = ["create_app"]
 
@@ -197,8 +205,7 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
         store = state.array_store()
         if result is None or store is None:
             raise HTTPException(status_code=404, detail="No project is open")
-        known = {m.id for s_ in result.project.samples for m in s_.measurements}
-        if measurement_id not in known:
+        if _find_measurement(result, measurement_id) is None:
             raise HTTPException(status_code=404, detail="Unknown measurement")
         arrays = store.load(measurement_id)
         if not arrays:
@@ -217,4 +224,42 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
             arrays=payload,
         )
 
+    @app.get("/measurements/{measurement_id}/image")
+    def measurement_image(measurement_id: str) -> Response:
+        png = _render_measurement_image(state, measurement_id)
+        return Response(content=png, media_type="image/png")
+
     return app
+
+
+def _find_measurement(result: IngestionResult, measurement_id: str) -> Measurement | None:
+    """Locate a measurement by id within a project, or None."""
+    for sample in result.project.samples:
+        for measurement in sample.measurements:
+            if measurement.id == measurement_id:
+                return measurement
+    return None
+
+
+def _render_measurement_image(state: ServerState, measurement_id: str) -> bytes:
+    """Resolve a measurement to PNG bytes, raising HTTP errors on the way."""
+    result = state.result
+    if result is None:
+        raise HTTPException(status_code=404, detail="No project is open")
+    measurement = _find_measurement(result, measurement_id)
+    if measurement is None:
+        raise HTTPException(status_code=404, detail="Unknown measurement")
+    if measurement.technique not in _IMAGE_TECHNIQUES:
+        raise HTTPException(status_code=404, detail="Not an image measurement")
+    if not measurement.files:
+        raise HTTPException(status_code=404, detail="No source file for this measurement")
+    path = measurement.files[0].path
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Source image file is missing")
+    try:
+        return render_to_png(path)
+    except Exception as exc:  # boundary: any decode failure → 422, not a 500
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not render image: {exc}",
+        ) from exc

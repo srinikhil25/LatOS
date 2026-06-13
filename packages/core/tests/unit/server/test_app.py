@@ -127,9 +127,80 @@ class StubOrchestrator:
         return _tiny_result(root)
 
 
+def _image_result(root: Path) -> IngestionResult:
+    """A result with one TEM measurement pointing at a real TIF on disk."""
+    import numpy as np
+    from PIL import Image
+
+    tif = root / "tem_image.tif"
+    Image.fromarray(
+        np.random.default_rng(1).integers(0, 255, size=(32, 32, 3), dtype=np.uint8),
+    ).save(tif, format="TIFF")
+
+    project_id = new_id()
+    sample_id = new_id()
+    measurement = Measurement(
+        id=new_id(),
+        sample_id=sample_id,
+        technique=Technique.TEM,
+        instrument="JEOL",
+        measured_at=None,
+        parsed_at=utc_now(),
+        parser_version="test-1",
+        files=(
+            FileRef(
+                path=tif,
+                sha256="a" * 64,
+                size_bytes=tif.stat().st_size,
+                role=FileRole.RAW,
+                scanned_at=utc_now(),
+            ),
+        ),
+        issues=(),
+        parsed_data_path=None,
+        analysis_results=(),
+    )
+    sample = Sample(
+        id=sample_id,
+        project_id=project_id,
+        canonical_name="CS",
+        aliases=(),
+        measurements=(measurement,),
+    )
+    project = Project(
+        id=project_id,
+        name=root.name,
+        root_path=root,
+        created_at=utc_now(),
+        schema_version=3,
+        samples=(sample,),
+        unassigned_files=(),
+    )
+    return IngestionResult(project=project, outcomes=())
+
+
+class ImageStubOrchestrator:
+    """Returns a project whose single TEM measurement has a real TIF."""
+
+    def ingest(
+        self,
+        root: Path,
+        *,
+        project_name: str | None = None,
+        on_progress: ProgressCallback | None = None,
+    ) -> IngestionResult:
+        return _image_result(root)
+
+
 @pytest.fixture()
 def client(tmp_path: Path) -> TestClient:
     app = create_app(orchestrator_factory=StubOrchestrator)  # type: ignore[arg-type]
+    return TestClient(app)
+
+
+@pytest.fixture()
+def image_client(tmp_path: Path) -> TestClient:
+    app = create_app(orchestrator_factory=ImageStubOrchestrator)  # type: ignore[arg-type]
     return TestClient(app)
 
 
@@ -247,6 +318,38 @@ class TestMeasurementArrays:
         assert body["arrays"]["two_theta"] == [10.0, 20.0, 30.0]
         # NaN must arrive as a JSON null (trace gap), not break the payload.
         assert body["arrays"]["intensity"] == [1.0, None, 3.0]
+
+
+class TestMeasurementImage:
+    def test_before_open_404(self, image_client: TestClient):
+        assert image_client.get("/measurements/abc/image").status_code == 404
+
+    def test_unknown_measurement_404(self, image_client: TestClient, tmp_path: Path):
+        _open_and_join(image_client, tmp_path)
+        assert image_client.get("/measurements/nope/image").status_code == 404
+
+    def test_non_image_technique_404(self, client: TestClient, tmp_path: Path):
+        # The plain stub's measurement is XRD — not an image technique.
+        _open_and_join(client, tmp_path)
+        mid = client.get("/samples").json()[0]["measurements"][0]["id"]
+        response = client.get(f"/measurements/{mid}/image")
+        assert response.status_code == 404
+        assert "image" in response.json()["detail"].lower()
+
+    def test_renders_png(self, image_client: TestClient, tmp_path: Path):
+        _open_and_join(image_client, tmp_path)
+        mid = image_client.get("/samples").json()[0]["measurements"][0]["id"]
+        response = image_client.get(f"/measurements/{mid}/image")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/png"
+        assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+    def test_missing_source_file_404(self, image_client: TestClient, tmp_path: Path):
+        _open_and_join(image_client, tmp_path)
+        mid = image_client.get("/samples").json()[0]["measurements"][0]["id"]
+        # Delete the TIF the stub wrote, then request it.
+        (tmp_path / "tem_image.tif").unlink()
+        assert image_client.get(f"/measurements/{mid}/image").status_code == 404
 
 
 class TestIngestEvents:
