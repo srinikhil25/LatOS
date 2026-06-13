@@ -70,3 +70,15 @@ class SampleSummary(BaseModel):
     name: str
     aliases: list[str]
     measurements: list[MeasurementSummary]
+
+
+class MeasurementArrays(BaseModel):
+    """GET /measurements/{id}/arrays — parsed columns for plotting.
+
+    `arrays` values use `None` for non-finite samples (NaN/inf are not
+    valid JSON); the UI treats them as gaps in the trace.
+    """
+
+    measurement_id: str
+    names: list[str]
+    arrays: dict[str, list[float | None]]

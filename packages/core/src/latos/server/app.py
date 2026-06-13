@@ -17,6 +17,7 @@ Endpoints (v0 skeleton):
 from __future__ import annotations
 
 import json
+import math
 import queue
 from collections.abc import Iterator
 from importlib import metadata
@@ -29,6 +30,7 @@ from fastapi.responses import StreamingResponse
 from latos.server.schemas import (
     HealthResponse,
     IngestStartedResponse,
+    MeasurementArrays,
     MeasurementSummary,
     OpenProjectRequest,
     ProjectSummary,
@@ -56,6 +58,40 @@ def _version() -> str:
 def _sse(event: str, data: dict[str, object]) -> str:
     """Format one Server-Sent Event frame."""
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _event_stream(state: ServerState) -> Iterator[str]:
+    """Yield SSE frames for the current ingestion until terminal.
+
+    Drains whatever the worker has already queued — a fast ingestion
+    may finish before the client subscribes, and its progress history
+    should not be lost. Only when the queue is empty AND the job is
+    over do we synthesize the terminal frame (true late re-subscriber).
+    """
+    events = state.drain_events()
+    while True:
+        try:
+            item = events.get_nowait()
+        except queue.Empty:
+            if state.status in (IngestStatus.DONE, IngestStatus.ERROR):
+                yield _sse(
+                    state.status.value,
+                    {"message": state.error} if state.error else {},
+                )
+                return
+            # Still running: block until the worker's next event.
+            item = events.get()
+        if isinstance(item, TerminalEvent):
+            payload: dict[str, object] = {}
+            if item.message:
+                payload["message"] = item.message
+            yield _sse(item.status.value, payload)
+            return
+        if isinstance(item, ProgressEvent):
+            yield _sse(
+                "progress",
+                {"index": item.index, "total": item.total, "name": item.name},
+            )
 
 
 def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> FastAPI:
@@ -107,39 +143,7 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
     def ingest_events() -> StreamingResponse:
         if state.status is IngestStatus.IDLE:
             raise HTTPException(status_code=409, detail="No ingestion has been started")
-
-        def stream() -> Iterator[str]:
-            # Drain whatever the worker has already queued — a fast
-            # ingestion may finish before the client subscribes, and its
-            # progress history should not be lost. Only when the queue
-            # is empty AND the job is over do we synthesize the terminal
-            # frame (true late re-subscriber).
-            events = state.drain_events()
-            while True:
-                try:
-                    item = events.get_nowait()
-                except queue.Empty:
-                    if state.status in (IngestStatus.DONE, IngestStatus.ERROR):
-                        yield _sse(
-                            state.status.value,
-                            {"message": state.error} if state.error else {},
-                        )
-                        return
-                    # Still running: block until the worker's next event.
-                    item = events.get()
-                if isinstance(item, TerminalEvent):
-                    payload: dict[str, object] = {}
-                    if item.message:
-                        payload["message"] = item.message
-                    yield _sse(item.status.value, payload)
-                    return
-                if isinstance(item, ProgressEvent):
-                    yield _sse(
-                        "progress",
-                        {"index": item.index, "total": item.total, "name": item.name},
-                    )
-
-        return StreamingResponse(stream(), media_type="text/event-stream")
+        return StreamingResponse(_event_stream(state), media_type="text/event-stream")
 
     @app.get("/project")
     def project() -> ProjectSummary:
@@ -186,5 +190,31 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
                 ),
             )
         return out
+
+    @app.get("/measurements/{measurement_id}/arrays")
+    def measurement_arrays(measurement_id: str) -> MeasurementArrays:
+        result = state.result
+        store = state.array_store()
+        if result is None or store is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        known = {m.id for s_ in result.project.samples for m in s_.measurements}
+        if measurement_id not in known:
+            raise HTTPException(status_code=404, detail="Unknown measurement")
+        arrays = store.load(measurement_id)
+        if not arrays:
+            raise HTTPException(
+                status_code=404,
+                detail="No arrays stored for this measurement",
+            )
+        # NaN/inf are not valid JSON — emit None so traces show gaps.
+        payload = {
+            name: [x if math.isfinite(x) else None for x in arr.tolist()]
+            for name, arr in arrays.items()
+        }
+        return MeasurementArrays(
+            measurement_id=measurement_id,
+            names=list(payload.keys()),
+            arrays=payload,
+        )
 
     return app

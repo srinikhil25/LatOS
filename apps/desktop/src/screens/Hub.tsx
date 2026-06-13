@@ -12,6 +12,7 @@ import {
   type ProjectSummary,
   type SampleSummary,
 } from "../lib/api";
+import { TechniqueChip } from "../components/TechniqueChip";
 
 function Stat({ label, value }: { label: string; value: number }) {
   return (
@@ -22,35 +23,13 @@ function Stat({ label, value }: { label: string; value: number }) {
   );
 }
 
-const TECH_VAR: Record<string, string> = {
-  xrd: "--latos-tech-xrd",
-  xps: "--latos-tech-xps",
-  uv_drs: "--latos-tech-uv-drs",
-  hall: "--latos-tech-hall",
-  thermoelectric: "--latos-tech-thermoelectric",
-  eds: "--latos-tech-eds",
-  tem: "--latos-tech-tem",
-  sem: "--latos-tech-sem",
-  stem: "--latos-tech-stem",
-  raman: "--latos-tech-raman",
-};
-
-function TechniqueChip({ technique }: { technique: string }) {
-  const cssVar = TECH_VAR[technique] ?? "--latos-tech-unknown";
-  return (
-    <span
-      className="rounded-sm px-2 py-0.5 text-[11px] font-semibold"
-      style={{
-        color: `var(${cssVar})`,
-        background: `color-mix(in srgb, var(${cssVar}) 18%, transparent)`,
-      }}
-    >
-      {technique === "uv_drs" ? "UV-DRS" : technique.toUpperCase()}
-    </span>
-  );
-}
-
-export function Hub({ onBack }: { onBack: () => void }) {
+export function Hub({
+  onBack,
+  onOpenSamples,
+}: {
+  onBack: () => void;
+  onOpenSamples: () => void;
+}) {
   const [project, setProject] = useState<ProjectSummary | null>(null);
   const [samples, setSamples] = useState<SampleSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -96,31 +75,43 @@ export function Hub({ onBack }: { onBack: () => void }) {
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-secondary">
-          Samples
-        </h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-secondary">
+            Samples
+          </h2>
+          <button
+            type="button"
+            onClick={onOpenSamples}
+            className="rounded-md border border-edge px-3 py-1.5 text-sm font-medium transition hover:border-accent"
+          >
+            Browse all →
+          </button>
+        </div>
         <ul className="space-y-2">
           {samples.map((sample) => (
-            <li
-              key={sample.id}
-              className="rounded-md border border-edge bg-surface px-4 py-3"
-            >
-              <div className="flex items-center justify-between">
-                <span className="font-medium" data-selectable>
-                  {sample.name}
-                </span>
-                <span className="text-xs text-secondary">
-                  {sample.measurements.length} measurement
-                  {sample.measurements.length === 1 ? "" : "s"}
-                </span>
-              </div>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {[...new Set(sample.measurements.map((m) => m.technique))].map(
-                  (technique) => (
-                    <TechniqueChip key={technique} technique={technique} />
-                  ),
-                )}
-              </div>
+            <li key={sample.id}>
+              <button
+                type="button"
+                onClick={onOpenSamples}
+                className="w-full rounded-md border border-edge bg-surface px-4 py-3 text-left transition hover:border-accent"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-medium" data-selectable>
+                    {sample.name}
+                  </span>
+                  <span className="text-xs text-secondary">
+                    {sample.measurements.length} measurement
+                    {sample.measurements.length === 1 ? "" : "s"}
+                  </span>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {[...new Set(sample.measurements.map((m) => m.technique))].map(
+                    (technique) => (
+                      <TechniqueChip key={technique} technique={technique} />
+                    ),
+                  )}
+                </div>
+              </button>
             </li>
           ))}
         </ul>

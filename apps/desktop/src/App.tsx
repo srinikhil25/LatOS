@@ -8,10 +8,11 @@
 import { useEffect, useState } from "react";
 import { waitForCore } from "./lib/api";
 import { Hub } from "./screens/Hub";
+import { Samples } from "./screens/Samples";
 import { Start } from "./screens/Start";
 
 type CoreStatus = "connecting" | "ready" | "down";
-type Screen = "start" | "hub";
+type Screen = "start" | "hub" | "samples";
 
 export default function App() {
   const [core, setCore] = useState<CoreStatus>("connecting");
@@ -53,9 +54,17 @@ export default function App() {
     );
   }
 
-  return screen === "start" ? (
-    <Start onProjectReady={() => setScreen("hub")} />
-  ) : (
-    <Hub onBack={() => setScreen("start")} />
-  );
+  switch (screen) {
+    case "start":
+      return <Start onProjectReady={() => setScreen("hub")} />;
+    case "samples":
+      return <Samples onBack={() => setScreen("hub")} />;
+    default:
+      return (
+        <Hub
+          onBack={() => setScreen("start")}
+          onOpenSamples={() => setScreen("samples")}
+        />
+      );
+  }
 }

@@ -201,6 +201,54 @@ class TestSamplesTree:
         assert m["filename"] == "CS-3.asc"
 
 
+class TestMeasurementArrays:
+    def test_before_open_404(self, client: TestClient):
+        assert client.get("/measurements/abc123/arrays").status_code == 404
+
+    def test_unknown_measurement_404(self, client: TestClient, tmp_path: Path):
+        _open_and_join(client, tmp_path)
+        assert client.get("/measurements/not-a-real-id/arrays").status_code == 404
+
+    def test_known_measurement_without_arrays_404(self, client: TestClient, tmp_path: Path):
+        _open_and_join(client, tmp_path)
+        mid = client.get("/samples").json()[0]["measurements"][0]["id"]
+        response = client.get(f"/measurements/{mid}/arrays")
+        assert response.status_code == 404
+        assert "No arrays" in response.json()["detail"]
+
+    def test_arrays_round_trip_with_nan_gap(self, client: TestClient, tmp_path: Path):
+        import numpy as np
+
+        from latos.ingestion.array_store import ArrayStore
+        from latos.ingestion.parsed_data import ParsedData
+
+        _open_and_join(client, tmp_path)
+        mid = client.get("/samples").json()[0]["measurements"][0]["id"]
+        store = ArrayStore(tmp_path / ".latos" / "arrays")
+        store.write(
+            mid,
+            ParsedData(
+                technique=Technique.XRD,
+                arrays={
+                    "two_theta": np.array([10.0, 20.0, 30.0]),
+                    "intensity": np.array([1.0, float("nan"), 3.0]),
+                },
+                metadata={},
+                instrument=None,
+                measured_at=None,
+                issues=(),
+                parser_name="test",
+                parser_version="1.0.0",
+            ),
+        )
+        body = client.get(f"/measurements/{mid}/arrays").json()
+        assert body["measurement_id"] == mid
+        assert body["names"] == ["two_theta", "intensity"]
+        assert body["arrays"]["two_theta"] == [10.0, 20.0, 30.0]
+        # NaN must arrive as a JSON null (trace gap), not break the payload.
+        assert body["arrays"]["intensity"] == [1.0, None, 3.0]
+
+
 class TestIngestEvents:
     def test_events_before_open_409(self, client: TestClient):
         assert client.get("/ingest/events").status_code == 409

@@ -15,8 +15,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from latos.ingestion.orchestrator import IngestionResult, Orchestrator
+
+if TYPE_CHECKING:
+    from latos.ingestion.array_store import ArrayStore
 
 __all__ = [
     "IngestStatus",
@@ -80,6 +84,7 @@ class ServerState:
     status: IngestStatus = IngestStatus.IDLE
     result: IngestionResult | None = None
     error: str | None = None
+    root: Path | None = None
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _queue: queue.Queue[QueueItem] = field(default_factory=queue.Queue, repr=False)
@@ -94,6 +99,7 @@ class ServerState:
             self.status = IngestStatus.RUNNING
             self.result = None
             self.error = None
+            self.root = root
             self._queue = queue.Queue()  # fresh stream per run
 
         def _run() -> None:
@@ -135,3 +141,11 @@ class ServerState:
         """Wait for the ingestion thread (tests use this to synchronize)."""
         if self._thread is not None:
             self._thread.join(timeout)
+
+    def array_store(self) -> ArrayStore | None:
+        """ArrayStore over the open project's arrays dir, or None pre-open."""
+        if self.root is None:
+            return None
+        from latos.ingestion.array_store import ArrayStore  # noqa: PLC0415
+
+        return ArrayStore(self.root / ".latos" / "arrays")
