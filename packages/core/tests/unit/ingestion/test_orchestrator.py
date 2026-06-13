@@ -14,7 +14,11 @@ from latos.core.models import (
     utc_now,
 )
 from latos.ingestion.base_parser import BaseParser
-from latos.ingestion.orchestrator import Orchestrator, Outcome
+from latos.ingestion.orchestrator import (
+    Orchestrator,
+    Outcome,
+    _refine_technique_from_folders,
+)
 from latos.ingestion.parsed_data import ParsedData
 from latos.ingestion.registry import ParserRegistry
 
@@ -420,3 +424,44 @@ class TestRealFixtures:
             for m in s.measurements:
                 if m.parsed_data_path is not None:
                     assert m.parsed_data_path.exists()
+
+
+class TestTechniqueRefinement:
+    """Folder-aware microscopy modality resolution.
+
+    Regression for the real Dhivya layout where STEM images live at
+    `TEM/STEM/<sample>/TEM/CS/*.tif` — the nearest folder is `TEM`, but
+    the path also says `STEM`, which is the correct (more specific)
+    modality.
+    """
+
+    def test_plain_tem_folder(self, tmp_path: Path):
+        f = tmp_path / "TEM" / "CS" / "img.tif"
+        assert _refine_technique_from_folders(f, tmp_path) is Technique.TEM
+
+    def test_plain_sem_folder(self, tmp_path: Path):
+        f = tmp_path / "SEM" / "CS" / "img.tif"
+        assert _refine_technique_from_folders(f, tmp_path) is Technique.SEM
+
+    def test_fe_sem_folder(self, tmp_path: Path):
+        f = tmp_path / "HR-FE-SEM" / "img.tif"
+        assert _refine_technique_from_folders(f, tmp_path) is Technique.SEM
+
+    def test_plain_stem_folder(self, tmp_path: Path):
+        f = tmp_path / "STEM" / "CS" / "img.tif"
+        assert _refine_technique_from_folders(f, tmp_path) is Technique.STEM
+
+    def test_stem_wins_over_nearer_tem(self, tmp_path: Path):
+        # The actual Dhivya pathology: STEM outer, TEM inner+nearer.
+        f = tmp_path / "TEM" / "STEM" / "Cs3Bi2I9" / "TEM" / "CS" / "img.tif"
+        assert _refine_technique_from_folders(f, tmp_path) is Technique.STEM
+
+    def test_no_microscopy_folder_returns_none(self, tmp_path: Path):
+        f = tmp_path / "XRD" / "scan.tif"
+        assert _refine_technique_from_folders(f, tmp_path) is None
+
+    def test_stops_at_root(self, tmp_path: Path):
+        # A `TEM` folder *above* the project root must not leak in.
+        root = tmp_path / "TEM" / "project"
+        f = root / "CS" / "img.tif"
+        assert _refine_technique_from_folders(f, root) is None

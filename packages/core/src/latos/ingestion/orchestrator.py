@@ -582,6 +582,17 @@ _MICROSCOPY_FOLDER_TECHNIQUES: dict[str, Technique] = {
     "stem": Technique.STEM,
 }
 
+# When a path contains more than one microscopy keyword (real datasets
+# nest, e.g. `TEM/STEM/<sample>/TEM/CS/img.tif`), the most *specific*
+# modality wins rather than the nearest folder. STEM ⊂ TEM-family, so a
+# `STEM` anywhere in the path means STEM even if a `TEM` folder sits
+# closer to the file; SEM is the least specific fallback.
+_TECHNIQUE_SPECIFICITY: tuple[Technique, ...] = (
+    Technique.STEM,
+    Technique.TEM,
+    Technique.SEM,
+)
+
 
 def _refine_technique_from_folders(path: Path, root: Path) -> Technique | None:
     """Return a more specific microscopy technique from parent folder names.
@@ -589,20 +600,29 @@ def _refine_technique_from_folders(path: Path, root: Path) -> Technique | None:
     The microscopy TIFF parser defaults to `Technique.SEM` because TIFF
     metadata rarely identifies the modality (SEM vs TEM vs STEM). Most
     researchers organise images into folders like `TEM/`, `HR-FE-SEM/`,
-    or `STEM/`, so we walk parents and pick the first match.
+    or `STEM/`.
+
+    We collect *every* microscopy folder between the file and the project
+    root (not just the nearest), then resolve by specificity — so a
+    `STEM` image filed under a top-level `TEM/` umbrella with a nested
+    `.../TEM/CS/` leaf still classifies as STEM, not TEM. Walking to the
+    root (rather than a fixed depth) is what lets us see the outer
+    keyword; it's bounded and only runs for already-claimed microscopy
+    files.
 
     Returns `None` when no parent folder matches our microscopy
-    keywords — the caller leaves the parser's default in place. Stops
-    at the project root so we never look at user-system folders.
+    keywords — the caller leaves the parser's default in place.
     """
+    matches: set[Technique] = set()
     p = path.parent
-    for _ in range(_MAX_PARENT_LOOKUP_DEPTH):
-        if p in (root, p.parent):
-            break
+    while p not in (root, p.parent):
         match = _MICROSCOPY_FOLDER_TECHNIQUES.get(_normalize_folder(p.name))
         if match is not None:
-            return match
+            matches.add(match)
         p = p.parent
+    for technique in _TECHNIQUE_SPECIFICITY:
+        if technique in matches:
+            return technique
     return None
 
 
