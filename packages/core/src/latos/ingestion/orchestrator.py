@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from latos.core.enums import FileRole, Severity, Technique
+from latos.core.enums import FileRole, ReviewStatus, Severity, Technique
 from latos.core.models import (
     FileRef,
     Measurement,
@@ -308,6 +308,15 @@ class Orchestrator:
             # this run (multi-sheet workbook → one per sheet) all stay.
             _dedupe_measurements_by_sha256(samples_by_name, current_run_ids=current_run_ids)
 
+            # Preserve a prior confirmation across re-ingest: re-opening a
+            # confirmed project shouldn't silently demote it. The edit
+            # endpoints are what flip a project back to NEEDS_REVIEW when
+            # the user actually changes its categorization.
+            review_status = (
+                existing.review_status if existing is not None else ReviewStatus.NEEDS_REVIEW
+            )
+            confirmed_at = existing.confirmed_at if existing is not None else None
+
             project = Project(
                 id=project_id,
                 name=display_name,
@@ -316,6 +325,8 @@ class Orchestrator:
                 schema_version=LATEST_SCHEMA_VERSION,
                 samples=tuple(acc.build(project_id) for acc in samples_by_name.values()),
                 unassigned_files=tuple(unassigned),
+                review_status=review_status,
+                confirmed_at=confirmed_at,
             )
 
             repo.save(project)

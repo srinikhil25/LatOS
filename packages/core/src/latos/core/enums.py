@@ -74,3 +74,18 @@ _SEVERITY_ORDER: dict[Severity, int] = {
     Severity.WARNING: 1,
     Severity.ERROR: 2,
 }
+
+
+class ReviewStatus(StrEnum):
+    """Whether a project's auto-categorization has been human-verified.
+
+    After ingestion a project is `NEEDS_REVIEW`: Latos has guessed the
+    sample identity and technique of every file, but those guesses can
+    be wrong (messy folder names, doped-sample over-merging, …). The
+    downstream pipeline — analysis, correlation, optimization — requires
+    `CONFIRMED`, because property predictions are only trustworthy when
+    a person has signed off on which file is which sample.
+    """
+
+    NEEDS_REVIEW = "needs_review"
+    CONFIRMED = "confirmed"

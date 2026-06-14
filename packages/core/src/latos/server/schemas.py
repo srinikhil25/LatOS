@@ -52,6 +52,33 @@ class ProjectSummary(BaseModel):
     cached: int
     failed: int
     unclassified: int
+    review_status: str  # "needs_review" | "confirmed"
+
+
+class RenameSampleRequest(BaseModel):
+    """POST /samples/{id}/rename."""
+
+    name: str
+
+
+class SetTechniqueRequest(BaseModel):
+    """POST /measurements/{id}/technique."""
+
+    technique: str
+
+
+class MergeSamplesRequest(BaseModel):
+    """POST /samples/merge — fold `source_ids` into `target_id`."""
+
+    source_ids: list[str]
+    target_id: str
+
+
+class SplitMeasurementsRequest(BaseModel):
+    """POST /samples/split — pull measurements into a new named sample."""
+
+    measurement_ids: list[str]
+    new_name: str
 
 
 class MeasurementSummary(BaseModel):

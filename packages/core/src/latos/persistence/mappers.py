@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from latos.core.enums import FileRole, Severity, Technique
+from latos.core.enums import FileRole, ReviewStatus, Severity, Technique
 from latos.core.models import (
     AnalysisResult,
     FileRef,
@@ -41,6 +41,8 @@ def project_to_row(project: Project) -> ProjectRow:
         root_path=str(project.root_path),
         created_at=project.created_at,
         schema_version=project.schema_version,
+        review_status=project.review_status.value,
+        confirmed_at=project.confirmed_at,
     )
 
 
@@ -256,4 +258,6 @@ def row_to_project(row: ProjectRow) -> Project:
         schema_version=row.schema_version,
         samples=tuple(row_to_sample(s) for s in row.samples),
         unassigned_files=tuple(row_to_file_ref(f) for f in row.unassigned_files),
+        review_status=ReviewStatus(row.review_status),
+        confirmed_at=row.confirmed_at,
     )

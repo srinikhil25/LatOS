@@ -12,11 +12,12 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from latos.core.models import Project
 from latos.ingestion.orchestrator import IngestionResult, Orchestrator
 
 if TYPE_CHECKING:
@@ -149,3 +150,39 @@ class ServerState:
         from latos.ingestion.array_store import ArrayStore  # noqa: PLC0415
 
         return ArrayStore(self.root / ".latos" / "arrays")
+
+    def apply_edit(self, transform: Callable[[Project], Project]) -> Project:
+        """Apply `transform` to the persisted project and refresh state.
+
+        Loads the project fresh from its SQLite store (the source of
+        truth), applies the pure transform, saves it back, and updates
+        the in-memory `result.project`. The engine is disposed in a
+        `finally` so SQLite file handles don't linger on Windows.
+
+        Raises `LookupError` if no project is open.
+        """
+        if self.result is None or self.root is None:
+            raise LookupError("No project is open")
+
+        # Local imports keep SQLAlchemy out of the module import path.
+        from latos.persistence.db import (  # noqa: PLC0415
+            create_project_engine,
+            init_schema,
+            make_session_factory,
+        )
+        from latos.persistence.repository import ProjectRepository  # noqa: PLC0415
+
+        engine = create_project_engine(self.root)
+        try:
+            init_schema(engine)
+            repo = ProjectRepository(make_session_factory(engine))
+            current = repo.load_first()
+            if current is None:
+                raise LookupError("No project in the database")
+            updated = transform(current)
+            repo.save(updated)
+        finally:
+            engine.dispose()
+
+        self.result = replace(self.result, project=updated)
+        return updated

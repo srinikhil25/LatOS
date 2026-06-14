@@ -179,6 +179,51 @@ def _image_result(root: Path) -> IngestionResult:
     return IngestionResult(project=project, outcomes=())
 
 
+def _two_sample_project(root: Path) -> Project:
+    """A persistable two-sample project (CS: 2 measurements, CS-3: 1)."""
+    pid = new_id()
+    s1_id, s2_id = new_id(), new_id()
+
+    def meas(sample_id: str, tech: Technique) -> Measurement:
+        return Measurement(
+            id=new_id(),
+            sample_id=sample_id,
+            technique=tech,
+            instrument=None,
+            measured_at=None,
+            parsed_at=utc_now(),
+            parser_version="t-1",
+            files=(),
+            issues=(),
+            parsed_data_path=None,
+            analysis_results=(),
+        )
+
+    s1 = Sample(
+        id=s1_id,
+        project_id=pid,
+        canonical_name="CS",
+        aliases=(),
+        measurements=(meas(s1_id, Technique.TEM), meas(s1_id, Technique.XRD)),
+    )
+    s2 = Sample(
+        id=s2_id,
+        project_id=pid,
+        canonical_name="CS-3",
+        aliases=(),
+        measurements=(meas(s2_id, Technique.TEM),),
+    )
+    return Project(
+        id=pid,
+        name=root.name,
+        root_path=root,
+        created_at=utc_now(),
+        schema_version=4,
+        samples=(s1, s2),
+        unassigned_files=(),
+    )
+
+
 class ImageStubOrchestrator:
     """Returns a project whose single TEM measurement has a real TIF."""
 
@@ -350,6 +395,116 @@ class TestMeasurementImage:
         # Delete the TIF the stub wrote, then request it.
         (tmp_path / "tem_image.tif").unlink()
         assert image_client.get(f"/measurements/{mid}/image").status_code == 404
+
+
+class TestProjectReview:
+    """End-to-end edit + confirm flow through the API.
+
+    Unlike the other tests, these need the project actually persisted to
+    SQLite (the edit endpoints reload from the DB), so we save a real
+    two-sample project and point the server state at it.
+    """
+
+    @pytest.fixture()
+    def review_client(self, tmp_path: Path) -> TestClient:
+        from latos.ingestion.orchestrator import IngestionResult
+        from latos.persistence.db import (
+            create_project_engine,
+            init_schema,
+            make_session_factory,
+        )
+        from latos.persistence.repository import ProjectRepository
+
+        project = _two_sample_project(tmp_path)
+        engine = create_project_engine(tmp_path)
+        init_schema(engine)
+        ProjectRepository(make_session_factory(engine)).save(project)
+        engine.dispose()
+
+        app = create_app()
+        state: ServerState = app.state.latos  # type: ignore[union-attr]
+        state.root = tmp_path
+        state.result = IngestionResult(project=project, outcomes=())
+        return TestClient(app)
+
+    def test_starts_needs_review(self, review_client: TestClient):
+        assert review_client.get("/project").json()["review_status"] == "needs_review"
+
+    def test_confirm_then_reopen(self, review_client: TestClient):
+        assert review_client.post("/project/confirm").json()["review_status"] == "confirmed"
+        # Persisted: a fresh GET still reads confirmed.
+        assert review_client.get("/project").json()["review_status"] == "confirmed"
+        assert review_client.post("/project/reopen").json()["review_status"] == "needs_review"
+
+    def test_rename_resets_to_needs_review(self, review_client: TestClient):
+        review_client.post("/project/confirm")
+        sid = review_client.get("/samples").json()[0]["id"]
+        body = review_client.post(f"/samples/{sid}/rename", json={"name": "CuSe"})
+        assert body.status_code == 200
+        assert body.json()["review_status"] == "needs_review"
+        names = {s["name"] for s in review_client.get("/samples").json()}
+        assert "CuSe" in names
+
+    def test_set_technique(self, review_client: TestClient):
+        samples = review_client.get("/samples").json()
+        mid = samples[0]["measurements"][0]["id"]
+        resp = review_client.post(
+            f"/measurements/{mid}/technique",
+            json={"technique": "stem"},
+        )
+        assert resp.status_code == 200
+        techniques = {
+            m["id"]: m["technique"]
+            for s in review_client.get("/samples").json()
+            for m in s["measurements"]
+        }
+        assert techniques[mid] == "stem"
+
+    def test_set_unknown_technique_400(self, review_client: TestClient):
+        mid = review_client.get("/samples").json()[0]["measurements"][0]["id"]
+        resp = review_client.post(
+            f"/measurements/{mid}/technique",
+            json={"technique": "not-a-technique"},
+        )
+        assert resp.status_code == 400
+
+    def test_merge_samples(self, review_client: TestClient):
+        samples = review_client.get("/samples").json()
+        target, source = samples[0]["id"], samples[1]["id"]
+        resp = review_client.post(
+            "/samples/merge",
+            json={"source_ids": [source], "target_id": target},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["samples"] == 1
+
+    def test_split_into_new_sample(self, review_client: TestClient):
+        samples = review_client.get("/samples").json()
+        mid = samples[0]["measurements"][0]["id"]
+        resp = review_client.post(
+            "/samples/split",
+            json={"measurement_ids": [mid], "new_name": "CS-pure"},
+        )
+        assert resp.status_code == 200
+        names = {s["name"] for s in review_client.get("/samples").json()}
+        assert "CS-pure" in names
+
+    def test_rename_unknown_sample_400(self, review_client: TestClient):
+        assert review_client.post("/samples/nope/rename", json={"name": "X"}).status_code == 400
+
+    def test_hard_gate_blocks_until_confirmed(self, review_client: TestClient):
+        from fastapi import HTTPException
+
+        from latos.server.app import _require_confirmed
+
+        state: ServerState = review_client.app.state.latos  # type: ignore[union-attr]
+        # NEEDS_REVIEW → gate raises 409.
+        with pytest.raises(HTTPException) as exc:
+            _require_confirmed(state)
+        assert exc.value.status_code == 409
+        # After confirm → gate passes.
+        review_client.post("/project/confirm")
+        _require_confirmed(state)  # no raise
 
 
 class TestIngestEvents:

@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from latos.core.enums import FileRole, Severity, Technique
+from latos.core.enums import FileRole, ReviewStatus, Severity, Technique
 from latos.core.exceptions import ValidationError
 
 __all__ = [
@@ -362,6 +362,8 @@ class Project:
     schema_version: int
     samples: tuple[Sample, ...] = field(default_factory=tuple)
     unassigned_files: tuple[FileRef, ...] = field(default_factory=tuple)
+    review_status: ReviewStatus = ReviewStatus.NEEDS_REVIEW
+    confirmed_at: datetime | None = None
 
     def __post_init__(self) -> None:
         _check_id(self.id, "Project.id")
@@ -381,6 +383,14 @@ class Project:
             raise ValidationError("Project.samples must be a tuple (immutable)")
         if not isinstance(self.unassigned_files, tuple):
             raise ValidationError("Project.unassigned_files must be a tuple (immutable)")
+        if not isinstance(self.review_status, ReviewStatus):
+            raise ValidationError(
+                f"Project.review_status must be a ReviewStatus, got {self.review_status!r}"
+            )
+        if self.confirmed_at is not None and self.confirmed_at.tzinfo is None:
+            raise ValidationError("Project.confirmed_at must be timezone-aware when set")
+        if self.review_status is ReviewStatus.CONFIRMED and self.confirmed_at is None:
+            raise ValidationError("A CONFIRMED project must have confirmed_at set")
         # Every sample must point to this project
         for s in self.samples:
             if s.project_id != self.id:

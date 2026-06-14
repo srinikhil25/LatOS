@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import math
 import queue
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from importlib import metadata
 from pathlib import Path
 
@@ -27,18 +27,24 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 
-from latos.core.enums import Technique
-from latos.core.models import Measurement
+from latos.core.enums import ReviewStatus, Technique
+from latos.core.models import Measurement, Project
 from latos.ingestion.orchestrator import IngestionResult
+from latos.server import edits
+from latos.server.edits import EditError
 from latos.server.imaging import render_to_png
 from latos.server.schemas import (
     HealthResponse,
     IngestStartedResponse,
     MeasurementArrays,
     MeasurementSummary,
+    MergeSamplesRequest,
     OpenProjectRequest,
     ProjectSummary,
+    RenameSampleRequest,
     SampleSummary,
+    SetTechniqueRequest,
+    SplitMeasurementsRequest,
 )
 from latos.server.state import (
     IngestStatus,
@@ -158,19 +164,46 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
         result = state.result
         if result is None:
             raise HTTPException(status_code=404, detail="No project is open")
-        proj = result.project
-        measurements = [m for s in proj.samples for m in s.measurements]
-        return ProjectSummary(
-            id=proj.id,
-            name=proj.name,
-            root_path=str(proj.root_path),
-            samples=len(proj.samples),
-            measurements=len(measurements),
-            techniques=len({m.technique for m in measurements}),
-            parsed=result.parsed_count,
-            cached=result.cached_count,
-            failed=result.failed_count,
-            unclassified=result.unclassified_count,
+        return _project_summary(result)
+
+    @app.post("/project/confirm")
+    def confirm_project() -> ProjectSummary:
+        return _apply(state, edits.confirm)
+
+    @app.post("/project/reopen")
+    def reopen_project() -> ProjectSummary:
+        return _apply(state, edits.reopen)
+
+    @app.post("/samples/{sample_id}/rename")
+    def rename_sample(sample_id: str, body: RenameSampleRequest) -> ProjectSummary:
+        return _apply(state, lambda p: edits.rename_sample(p, sample_id, body.name))
+
+    @app.post("/measurements/{measurement_id}/technique")
+    def set_technique(measurement_id: str, body: SetTechniqueRequest) -> ProjectSummary:
+        try:
+            technique = Technique(body.technique)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown technique: {body.technique}",
+            ) from exc
+        return _apply(
+            state,
+            lambda p: edits.set_measurement_technique(p, measurement_id, technique),
+        )
+
+    @app.post("/samples/merge")
+    def merge_samples(body: MergeSamplesRequest) -> ProjectSummary:
+        return _apply(
+            state,
+            lambda p: edits.merge_samples(p, body.source_ids, body.target_id),
+        )
+
+    @app.post("/samples/split")
+    def split_measurements(body: SplitMeasurementsRequest) -> ProjectSummary:
+        return _apply(
+            state,
+            lambda p: edits.move_measurements_to_new_sample(p, body.measurement_ids, body.new_name),
         )
 
     @app.get("/samples")
@@ -239,6 +272,60 @@ def _find_measurement(result: IngestionResult, measurement_id: str) -> Measureme
             if measurement.id == measurement_id:
                 return measurement
     return None
+
+
+def _project_summary(result: IngestionResult) -> ProjectSummary:
+    """Build the hub summary from an IngestionResult."""
+    proj = result.project
+    measurements = [m for s in proj.samples for m in s.measurements]
+    return ProjectSummary(
+        id=proj.id,
+        name=proj.name,
+        root_path=str(proj.root_path),
+        samples=len(proj.samples),
+        measurements=len(measurements),
+        techniques=len({m.technique for m in measurements}),
+        parsed=result.parsed_count,
+        cached=result.cached_count,
+        failed=result.failed_count,
+        unclassified=result.unclassified_count,
+        review_status=proj.review_status.value,
+    )
+
+
+def _apply(
+    state: ServerState,
+    transform: Callable[[Project], Project],
+) -> ProjectSummary:
+    """Apply an edit transform, persist it, and return the new summary.
+
+    Maps domain failures to HTTP: no project open → 404, a bad edit
+    (unknown id, empty name) → 400.
+    """
+    try:
+        state.apply_edit(transform)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except EditError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    assert state.result is not None  # apply_edit refreshed it
+    return _project_summary(state.result)
+
+
+def _require_confirmed(state: ServerState) -> None:
+    """Hard gate: raise 409 unless the open project is CONFIRMED.
+
+    Downstream phases (analysis, correlation, optimization) call this
+    first — property predictions are only valid on human-verified
+    sample/technique identity.
+    """
+    if state.result is None:
+        raise HTTPException(status_code=404, detail="No project is open")
+    if state.result.project.review_status is not ReviewStatus.CONFIRMED:
+        raise HTTPException(
+            status_code=409,
+            detail="Project must be confirmed before analysis. Review and confirm it first.",
+        )
 
 
 def _render_measurement_image(state: ServerState, measurement_id: str) -> bytes:

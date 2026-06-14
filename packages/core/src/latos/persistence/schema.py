@@ -28,7 +28,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # Bumped on any schema change. Stored on every Project row so migrations
 # can detect mismatches between code and on-disk data.
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 
 
 class UtcDateTime(TypeDecorator[datetime]):
@@ -89,6 +89,14 @@ class ProjectRow(Base):
     root_path: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Human-verification gate (schema v4). server_default keeps rows
+    # created before this column defaulting to needs_review.
+    review_status: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default="needs_review",
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
     samples: Mapped[list[SampleRow]] = relationship(
         back_populates="project",
