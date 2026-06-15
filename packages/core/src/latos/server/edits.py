@@ -23,6 +23,8 @@ __all__ = [
     "confirm",
     "merge_samples",
     "move_measurements_to_new_sample",
+    "move_measurements_to_sample",
+    "remove_measurements",
     "rename_sample",
     "reopen",
     "set_measurement_technique",
@@ -179,4 +181,71 @@ def move_measurements_to_new_sample(
             measurements=tuple(moved),
         ),
     )
+    return _needs_review(project, tuple(new_samples))
+
+
+def move_measurements_to_sample(
+    project: Project,
+    measurement_ids: list[str],
+    target_sample_id: str,
+) -> Project:
+    """Reassign the given measurements to an existing sample.
+
+    The right-click "Move to…" action. Source samples emptied by the
+    move are dropped.
+    """
+    if not measurement_ids:
+        raise EditError("No measurements selected")
+    _find_sample(project, target_sample_id)  # existence check
+
+    wanted = set(measurement_ids)
+    moved: list[Measurement] = []
+    remaining: dict[str, list[Measurement]] = {}
+
+    for sample in project.samples:
+        kept = []
+        for m in sample.measurements:
+            if m.id in wanted:
+                moved.append(replace(m, sample_id=target_sample_id))
+            else:
+                kept.append(m)
+        remaining[sample.id] = kept
+
+    if len(moved) != len(wanted):
+        missing = wanted - {m.id for m in moved}
+        raise EditError(f"Unknown measurement(s): {sorted(missing)}")
+
+    new_samples: list[Sample] = []
+    for sample in project.samples:
+        kept = remaining[sample.id]
+        if sample.id == target_sample_id:
+            new_samples.append(replace(sample, measurements=(*kept, *moved)))
+        elif kept:
+            new_samples.append(replace(sample, measurements=tuple(kept)))
+        # else: a non-target sample emptied by the move → dropped
+    return _needs_review(project, tuple(new_samples))
+
+
+def remove_measurements(project: Project, measurement_ids: list[str]) -> Project:
+    """Drop measurements from the project (soft delete).
+
+    The raw files on disk are NOT touched — this only excludes them from
+    the Latos project and downstream analysis. A re-ingest restores them.
+    Samples emptied by the removal are dropped.
+    """
+    if not measurement_ids:
+        raise EditError("No measurements selected")
+    wanted = set(measurement_ids)
+    removed = 0
+    new_samples: list[Sample] = []
+
+    for sample in project.samples:
+        kept = [m for m in sample.measurements if m.id not in wanted]
+        removed += len(sample.measurements) - len(kept)
+        if kept:
+            new_samples.append(replace(sample, measurements=tuple(kept)))
+        # else: sample fully removed → dropped
+
+    if removed != len(wanted):
+        raise EditError("One or more measurements not found")
     return _needs_review(project, tuple(new_samples))

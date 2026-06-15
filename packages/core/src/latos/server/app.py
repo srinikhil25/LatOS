@@ -39,8 +39,10 @@ from latos.server.schemas import (
     MeasurementArrays,
     MeasurementSummary,
     MergeSamplesRequest,
+    MoveMeasurementsRequest,
     OpenProjectRequest,
     ProjectSummary,
+    RemoveMeasurementsRequest,
     RenameSampleRequest,
     SampleSummary,
     SetTechniqueRequest,
@@ -166,51 +168,14 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
             raise HTTPException(status_code=404, detail="No project is open")
         return _project_summary(result)
 
-    @app.post("/project/confirm")
-    def confirm_project() -> ProjectSummary:
-        return _apply(state, edits.confirm)
-
-    @app.post("/project/reopen")
-    def reopen_project() -> ProjectSummary:
-        return _apply(state, edits.reopen)
-
-    @app.post("/samples/{sample_id}/rename")
-    def rename_sample(sample_id: str, body: RenameSampleRequest) -> ProjectSummary:
-        return _apply(state, lambda p: edits.rename_sample(p, sample_id, body.name))
-
-    @app.post("/measurements/{measurement_id}/technique")
-    def set_technique(measurement_id: str, body: SetTechniqueRequest) -> ProjectSummary:
-        try:
-            technique = Technique(body.technique)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown technique: {body.technique}",
-            ) from exc
-        return _apply(
-            state,
-            lambda p: edits.set_measurement_technique(p, measurement_id, technique),
-        )
-
-    @app.post("/samples/merge")
-    def merge_samples(body: MergeSamplesRequest) -> ProjectSummary:
-        return _apply(
-            state,
-            lambda p: edits.merge_samples(p, body.source_ids, body.target_id),
-        )
-
-    @app.post("/samples/split")
-    def split_measurements(body: SplitMeasurementsRequest) -> ProjectSummary:
-        return _apply(
-            state,
-            lambda p: edits.move_measurements_to_new_sample(p, body.measurement_ids, body.new_name),
-        )
+    _register_review_routes(app, state)
 
     @app.get("/samples")
     def samples() -> list[SampleSummary]:
         result = state.result
         if result is None:
             raise HTTPException(status_code=404, detail="No project is open")
+        root = result.project.root_path
         out: list[SampleSummary] = []
         for sample in result.project.samples:
             rows = [
@@ -219,6 +184,7 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
                     technique=m.technique.value,
                     instrument=m.instrument,
                     filename=m.files[0].path.name if m.files else None,
+                    folder=_folder_of(m, root),
                 )
                 for m in sample.measurements
             ]
@@ -265,6 +231,65 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
     return app
 
 
+def _register_review_routes(app: FastAPI, state: ServerState) -> None:
+    """Register the Review & Confirm edit endpoints on `app`.
+
+    Kept out of `create_app` so that function stays small; these all
+    funnel through `_apply`, which persists the edit and returns the
+    refreshed project summary.
+    """
+
+    @app.post("/project/confirm")
+    def confirm_project() -> ProjectSummary:
+        return _apply(state, edits.confirm)
+
+    @app.post("/project/reopen")
+    def reopen_project() -> ProjectSummary:
+        return _apply(state, edits.reopen)
+
+    @app.post("/samples/{sample_id}/rename")
+    def rename_sample(sample_id: str, body: RenameSampleRequest) -> ProjectSummary:
+        return _apply(state, lambda p: edits.rename_sample(p, sample_id, body.name))
+
+    @app.post("/measurements/{measurement_id}/technique")
+    def set_technique(measurement_id: str, body: SetTechniqueRequest) -> ProjectSummary:
+        try:
+            technique = Technique(body.technique)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown technique: {body.technique}",
+            ) from exc
+        return _apply(
+            state,
+            lambda p: edits.set_measurement_technique(p, measurement_id, technique),
+        )
+
+    @app.post("/samples/merge")
+    def merge_samples(body: MergeSamplesRequest) -> ProjectSummary:
+        return _apply(state, lambda p: edits.merge_samples(p, body.source_ids, body.target_id))
+
+    @app.post("/samples/split")
+    def split_measurements(body: SplitMeasurementsRequest) -> ProjectSummary:
+        return _apply(
+            state,
+            lambda p: edits.move_measurements_to_new_sample(p, body.measurement_ids, body.new_name),
+        )
+
+    @app.post("/measurements/move")
+    def move_measurements(body: MoveMeasurementsRequest) -> ProjectSummary:
+        return _apply(
+            state,
+            lambda p: edits.move_measurements_to_sample(
+                p, body.measurement_ids, body.target_sample_id
+            ),
+        )
+
+    @app.post("/measurements/remove")
+    def remove_measurements(body: RemoveMeasurementsRequest) -> ProjectSummary:
+        return _apply(state, lambda p: edits.remove_measurements(p, body.measurement_ids))
+
+
 def _find_measurement(result: IngestionResult, measurement_id: str) -> Measurement | None:
     """Locate a measurement by id within a project, or None."""
     for sample in result.project.samples:
@@ -272,6 +297,23 @@ def _find_measurement(result: IngestionResult, measurement_id: str) -> Measureme
             if measurement.id == measurement_id:
                 return measurement
     return None
+
+
+def _folder_of(measurement: Measurement, root: Path) -> str | None:
+    """Source file's directory relative to the project root, posix-style.
+
+    `""` means the file sits directly in the project root; `None` means
+    the measurement has no file (or lives outside the root, which
+    shouldn't happen). Drives the folder tree in the review UI.
+    """
+    if not measurement.files:
+        return None
+    try:
+        rel = measurement.files[0].path.parent.relative_to(root)
+    except ValueError:
+        return None
+    posix = rel.as_posix()
+    return "" if posix == "." else posix
 
 
 def _project_summary(result: IngestionResult) -> ProjectSummary:

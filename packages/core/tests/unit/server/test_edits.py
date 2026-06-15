@@ -157,3 +157,62 @@ class TestSplit:
         mid = proj.samples[0].measurements[0].id
         with pytest.raises(EditError):
             edits.move_measurements_to_new_sample(proj, [mid], "  ")
+
+
+class TestMoveToExisting:
+    def test_moves_into_target_sample(self):
+        proj = _project()
+        target = proj.samples[0].id  # CS
+        moved_id = proj.samples[1].measurements[0].id  # CS-3's only measurement
+        out = edits.move_measurements_to_sample(proj, [moved_id], target)
+        # CS-3 emptied → dropped; CS now has 3.
+        assert {s.canonical_name for s in out.samples} == {"CS"}
+        cs = out.samples[0]
+        assert len(cs.measurements) == 3
+        assert any(m.id == moved_id and m.sample_id == target for m in cs.measurements)
+
+    def test_unknown_target_raises(self):
+        proj = _project()
+        mid = proj.samples[0].measurements[0].id
+        with pytest.raises(EditError):
+            edits.move_measurements_to_sample(proj, [mid], "nope")
+
+    def test_unknown_measurement_raises(self):
+        proj = _project()
+        with pytest.raises(EditError):
+            edits.move_measurements_to_sample(proj, ["nope"], proj.samples[0].id)
+
+    def test_resets_confirmation(self):
+        proj = _project(confirmed=True)
+        mid = proj.samples[1].measurements[0].id
+        out = edits.move_measurements_to_sample(proj, [mid], proj.samples[0].id)
+        assert out.review_status is ReviewStatus.NEEDS_REVIEW
+
+
+class TestRemove:
+    def test_removes_measurement(self):
+        proj = _project()
+        cs = proj.samples[0]
+        remove_id = cs.measurements[0].id
+        out = edits.remove_measurements(proj, [remove_id])
+        all_ids = {m.id for s in out.samples for m in s.measurements}
+        assert remove_id not in all_ids
+
+    def test_removing_last_measurement_drops_sample(self):
+        proj = _project()
+        cs3 = proj.samples[1]  # one measurement
+        out = edits.remove_measurements(proj, [cs3.measurements[0].id])
+        assert "CS-3" not in {s.canonical_name for s in out.samples}
+
+    def test_unknown_measurement_raises(self):
+        with pytest.raises(EditError):
+            edits.remove_measurements(_project(), ["nope"])
+
+    def test_resets_confirmation(self):
+        proj = _project(confirmed=True)
+        out = edits.remove_measurements(proj, [proj.samples[0].measurements[0].id])
+        assert out.review_status is ReviewStatus.NEEDS_REVIEW
+
+    def test_empty_list_raises(self):
+        with pytest.raises(EditError):
+            edits.remove_measurements(_project(), [])

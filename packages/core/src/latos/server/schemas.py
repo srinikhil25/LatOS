@@ -81,6 +81,19 @@ class SplitMeasurementsRequest(BaseModel):
     new_name: str
 
 
+class MoveMeasurementsRequest(BaseModel):
+    """POST /measurements/move — reassign to an existing sample."""
+
+    measurement_ids: list[str]
+    target_sample_id: str
+
+
+class RemoveMeasurementsRequest(BaseModel):
+    """POST /measurements/remove — drop from the project (soft delete)."""
+
+    measurement_ids: list[str]
+
+
 class MeasurementSummary(BaseModel):
     """One measurement row in the samples tree."""
 
@@ -88,6 +101,7 @@ class MeasurementSummary(BaseModel):
     technique: str
     instrument: str | None
     filename: str | None
+    folder: str | None  # source file's dir, relative to project root (posix)
 
 
 class SampleSummary(BaseModel):

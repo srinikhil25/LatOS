@@ -492,6 +492,35 @@ class TestProjectReview:
     def test_rename_unknown_sample_400(self, review_client: TestClient):
         assert review_client.post("/samples/nope/rename", json={"name": "X"}).status_code == 400
 
+    def test_move_to_existing_sample(self, review_client: TestClient):
+        samples = review_client.get("/samples").json()
+        target = samples[0]["id"]
+        moved = samples[1]["measurements"][0]["id"]
+        resp = review_client.post(
+            "/measurements/move",
+            json={"measurement_ids": [moved], "target_sample_id": target},
+        )
+        assert resp.status_code == 200
+        # Moved measurement now lives under the target sample.
+        after = {
+            s["id"]: [m["id"] for m in s["measurements"]]
+            for s in review_client.get("/samples").json()
+        }
+        assert moved in after[target]
+
+    def test_remove_measurement(self, review_client: TestClient):
+        samples = review_client.get("/samples").json()
+        before = sum(len(s["measurements"]) for s in samples)
+        mid = samples[0]["measurements"][0]["id"]
+        resp = review_client.post("/measurements/remove", json={"measurement_ids": [mid]})
+        assert resp.status_code == 200
+        after = sum(len(s["measurements"]) for s in review_client.get("/samples").json())
+        assert after == before - 1
+
+    def test_remove_unknown_400(self, review_client: TestClient):
+        resp = review_client.post("/measurements/remove", json={"measurement_ids": ["nope"]})
+        assert resp.status_code == 400
+
     def test_hard_gate_blocks_until_confirmed(self, review_client: TestClient):
         from fastapi import HTTPException
 
