@@ -23,6 +23,7 @@ from collections.abc import Callable, Iterator
 from importlib import metadata
 from pathlib import Path
 
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
@@ -30,6 +31,7 @@ from fastapi.responses import Response, StreamingResponse
 from latos.core.enums import ReviewStatus, Technique
 from latos.core.models import Measurement, Project
 from latos.ingestion.orchestrator import IngestionResult
+from latos.optimization import OptimizationError, OptimizationResult, optimize
 from latos.server import edits, optimization_data, synthesis_store
 from latos.server.edits import EditError
 from latos.server.imaging import render_to_png
@@ -43,7 +45,10 @@ from latos.server.schemas import (
     MoveMeasurementsRequest,
     OpenProjectRequest,
     OptimizationDataset,
+    OptimizeResult,
+    OptimizeRunRequest,
     ProjectSummary,
+    RecommendationOut,
     RemoveMeasurementsRequest,
     RenameSampleRequest,
     SampleParametersRequest,
@@ -63,6 +68,9 @@ from latos.server.state import (
 # Techniques whose measurements carry a renderable image rather than
 # plottable arrays.
 _IMAGE_TECHNIQUES = frozenset({Technique.TEM, Technique.SEM, Technique.STEM})
+
+# Minimum confirmed (param, target) points before a GP is worth fitting.
+_MIN_OPTIMIZE_POINTS = 3
 
 __all__ = ["create_app"]
 
@@ -341,6 +349,86 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             ],
             skipped=[SkippedPoint(sample_name=s.sample_name, reason=s.reason) for s in skipped],
         )
+
+    @app.post("/optimize/run")
+    def optimize_run(body: OptimizeRunRequest) -> OptimizeResult:
+        # Hard gate: optimization only runs on human-confirmed identity.
+        _require_confirmed(state)
+        result = state.result
+        store = state.array_store()
+        if result is None or store is None or state.root is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+
+        params = synthesis_store.load_params(state.root)
+        rows, _skipped = optimization_data.build_dataset(
+            result.project, store, params, body.input_variable, body.target_property
+        )
+        if len(rows) < _MIN_OPTIMIZE_POINTS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Need at least {_MIN_OPTIMIZE_POINTS} samples with both a "
+                    f"'{body.input_variable}' value and '{body.target_property}' data; "
+                    f"only {len(rows)} qualify."
+                ),
+            )
+
+        xs = np.array([r.x for r in rows])
+        ys = np.array([r.y for r in rows])
+        bounds = body.bounds or (float(xs.min()), float(xs.max()))
+        try:
+            res = optimize(
+                xs,
+                ys,
+                bounds=bounds,
+                input_name=body.input_variable,
+                target_name=body.target_property,
+            )
+        except OptimizationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return OptimizeResult(
+            input_variable=res.input_name,
+            target_property=res.target_name,
+            grid_x=list(res.grid_x),
+            grid_mean=list(res.grid_mean),
+            grid_ci95=list(res.grid_ci95),
+            grid_ei=list(res.grid_ei),
+            points=[
+                DatasetPoint(sample_id=r.sample_id, sample_name=r.sample_name, x=r.x, y=r.y)
+                for r in rows
+            ],
+            best_x=res.best_x,
+            best_y=res.best_y,
+            recommendation=RecommendationOut(
+                x=res.recommendation.x,
+                predicted_mean=res.recommendation.predicted_mean,
+                ci95=res.recommendation.ci95,
+            ),
+            max_ei=res.max_ei,
+            noise_threshold=res.noise_threshold,
+            converged=res.converged,
+            verdict=_verdict(res),
+        )
+
+
+def _verdict(res: OptimizationResult) -> str:
+    """Plain-language summary of an optimization result for the UI.
+
+    No jargon — this is read by materials scientists, not CS people.
+    """
+    rec = res.recommendation
+    if res.converged:
+        return (
+            f"Optimum reached within measurement precision. "
+            f"Best so far: {res.best_y:.3f} at {res.input_name} = {res.best_x:g}. "
+            f"A confirmatory run at {rec.x:.1f} is optional but unlikely to improve."
+        )
+    return (
+        f"Recommended next experiment: {res.input_name} = {rec.x:.1f} "
+        f"(predicted {res.target_name} {rec.predicted_mean:.2f} +/- {rec.ci95:.2f}). "
+        f"A meaningful improvement over the current best ({res.best_y:.3f}) is still expected."
+    )
 
 
 def _find_measurement(result: IngestionResult, measurement_id: str) -> Measurement | None:

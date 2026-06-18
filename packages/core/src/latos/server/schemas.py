@@ -126,6 +126,43 @@ class OptimizationDataset(BaseModel):
     skipped: list[SkippedPoint]
 
 
+class OptimizeRunRequest(BaseModel):
+    """POST /optimize/run — run one BO round over a chosen variable/target."""
+
+    input_variable: str
+    target_property: str
+    bounds: tuple[float, float] | None = None  # default: observed data range
+
+
+class RecommendationOut(BaseModel):
+    """The single recommended next experiment."""
+
+    x: float
+    predicted_mean: float
+    ci95: float
+
+
+class OptimizeResult(BaseModel):
+    """POST /optimize/run — posterior curve + recommendation + verdict."""
+
+    input_variable: str
+    target_property: str
+    # Posterior over the search range, for the curve.
+    grid_x: list[float]
+    grid_mean: list[float]
+    grid_ci95: list[float]
+    grid_ei: list[float]
+    # Observed points, with sample names for labelling.
+    points: list[DatasetPoint]
+    best_x: float
+    best_y: float
+    recommendation: RecommendationOut
+    max_ei: float
+    noise_threshold: float
+    converged: bool
+    verdict: str  # plain-language summary for the UI
+
+
 class MeasurementSummary(BaseModel):
     """One measurement row in the samples tree."""
 
