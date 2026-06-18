@@ -61,6 +61,12 @@ dependencies = [
     "rapidfuzz>=3.6",
     "networkx>=3.2",
 
+    # Bayesian optimization (GP surrogate + acquisition). scikit-learn's
+    # GaussianProcessRegressor is light and runs on a memory-tight box;
+    # GPyTorch/BoTorch (the `ml` extra) are the GPU-scale production
+    # target for the PhD, same GP method.
+    "scikit-learn>=1.4",
+
     # NOTE: no UI dependencies — latos-core is headless. The desktop
     # app (apps/desktop, Tauri + React) consumes this package through
     # the `latos.server` sidecar. The retired Qt UI lives on the
@@ -216,6 +222,7 @@ module = [
     "pymatgen.*",
     "mp_api.*",
     "scipy.*",
+    "sklearn.*",
     "matplotlib.*",
     "xlrd.*",
     "openpyxl.*",

@@ -125,3 +125,4 @@ test_output/
 *~
 .cache/
 .claude/
+proposal/
