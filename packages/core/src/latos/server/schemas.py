@@ -94,6 +94,38 @@ class RemoveMeasurementsRequest(BaseModel):
     measurement_ids: list[str]
 
 
+# ─── Optimization (BO) ───────────────────────────────────────────────
+class SampleParametersRequest(BaseModel):
+    """POST /samples/{id}/parameters — set a sample's synthesis inputs."""
+
+    parameters: dict[str, float]
+
+
+class DatasetPoint(BaseModel):
+    """One usable (input, target) optimization point."""
+
+    sample_id: str
+    sample_name: str
+    x: float
+    y: float
+
+
+class SkippedPoint(BaseModel):
+    """A sample left out of the optimization dataset, with why."""
+
+    sample_name: str
+    reason: str
+
+
+class OptimizationDataset(BaseModel):
+    """GET /optimize/dataset — the (x, y) table + what was skipped."""
+
+    input_variable: str
+    target_property: str
+    points: list[DatasetPoint]
+    skipped: list[SkippedPoint]
+
+
 class MeasurementSummary(BaseModel):
     """One measurement row in the samples tree."""
 

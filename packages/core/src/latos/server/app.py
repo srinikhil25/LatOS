@@ -30,10 +30,11 @@ from fastapi.responses import Response, StreamingResponse
 from latos.core.enums import ReviewStatus, Technique
 from latos.core.models import Measurement, Project
 from latos.ingestion.orchestrator import IngestionResult
-from latos.server import edits
+from latos.server import edits, optimization_data, synthesis_store
 from latos.server.edits import EditError
 from latos.server.imaging import render_to_png
 from latos.server.schemas import (
+    DatasetPoint,
     HealthResponse,
     IngestStartedResponse,
     MeasurementArrays,
@@ -41,11 +42,14 @@ from latos.server.schemas import (
     MergeSamplesRequest,
     MoveMeasurementsRequest,
     OpenProjectRequest,
+    OptimizationDataset,
     ProjectSummary,
     RemoveMeasurementsRequest,
     RenameSampleRequest,
+    SampleParametersRequest,
     SampleSummary,
     SetTechniqueRequest,
+    SkippedPoint,
     SplitMeasurementsRequest,
 )
 from latos.server.state import (
@@ -169,6 +173,7 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
         return _project_summary(result)
 
     _register_review_routes(app, state)
+    _register_optimization_data_routes(app, state)
 
     @app.get("/samples")
     def samples() -> list[SampleSummary]:
@@ -288,6 +293,54 @@ def _register_review_routes(app: FastAPI, state: ServerState) -> None:
     @app.post("/measurements/remove")
     def remove_measurements(body: RemoveMeasurementsRequest) -> ProjectSummary:
         return _apply(state, lambda p: edits.remove_measurements(p, body.measurement_ids))
+
+
+def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None:
+    """Synthesis-parameter storage + the (x, y) dataset assembly (BO2)."""
+
+    @app.post("/samples/{sample_id}/parameters")
+    def set_parameters(sample_id: str, body: SampleParametersRequest) -> dict[str, str]:
+        if state.result is None or state.root is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        known = {s.id for s in state.result.project.samples}
+        if sample_id not in known:
+            raise HTTPException(status_code=404, detail="Unknown sample")
+        synthesis_store.set_sample_params(state.root, sample_id, body.parameters)
+        return {"status": "ok"}
+
+    @app.get("/parameters")
+    def get_parameters() -> dict[str, dict[str, float]]:
+        if state.root is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        return synthesis_store.load_params(state.root)
+
+    @app.get("/optimize/targets")
+    def optimize_targets() -> dict[str, list[str]]:
+        result = state.result
+        store = state.array_store()
+        if result is None or store is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        return {"properties": optimization_data.list_target_properties(result.project, store)}
+
+    @app.get("/optimize/dataset")
+    def optimize_dataset(input_variable: str, target_property: str) -> OptimizationDataset:
+        result = state.result
+        store = state.array_store()
+        if result is None or store is None or state.root is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        params = synthesis_store.load_params(state.root)
+        rows, skipped = optimization_data.build_dataset(
+            result.project, store, params, input_variable, target_property
+        )
+        return OptimizationDataset(
+            input_variable=input_variable,
+            target_property=target_property,
+            points=[
+                DatasetPoint(sample_id=r.sample_id, sample_name=r.sample_name, x=r.x, y=r.y)
+                for r in rows
+            ],
+            skipped=[SkippedPoint(sample_name=s.sample_name, reason=s.reason) for s in skipped],
+        )
 
 
 def _find_measurement(result: IngestionResult, measurement_id: str) -> Measurement | None:
