@@ -8,12 +8,13 @@
 import { useEffect, useState } from "react";
 import { waitForCore } from "./lib/api";
 import { Hub } from "./screens/Hub";
+import { Optimize } from "./screens/Optimize";
 import { Review } from "./screens/Review";
 import { Samples } from "./screens/Samples";
 import { Start } from "./screens/Start";
 
 type CoreStatus = "connecting" | "ready" | "down";
-type Screen = "start" | "hub" | "samples" | "review";
+type Screen = "start" | "hub" | "samples" | "review" | "optimize";
 
 export default function App() {
   const [core, setCore] = useState<CoreStatus>("connecting");
@@ -62,12 +63,15 @@ export default function App() {
       return <Samples onBack={() => setScreen("hub")} />;
     case "review":
       return <Review onBack={() => setScreen("hub")} />;
+    case "optimize":
+      return <Optimize onBack={() => setScreen("hub")} />;
     default:
       return (
         <Hub
           onBack={() => setScreen("start")}
           onOpenSamples={() => setScreen("samples")}
           onOpenReview={() => setScreen("review")}
+          onOpenOptimize={() => setScreen("optimize")}
         />
       );
   }

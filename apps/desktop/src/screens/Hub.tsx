@@ -52,10 +52,12 @@ export function Hub({
   onBack,
   onOpenSamples,
   onOpenReview,
+  onOpenOptimize,
 }: {
   onBack: () => void;
   onOpenSamples: () => void;
   onOpenReview: () => void;
+  onOpenOptimize: () => void;
 }) {
   const [project, setProject] = useState<ProjectSummary | null>(null);
   const [samples, setSamples] = useState<SampleSummary[]>([]);
@@ -146,12 +148,13 @@ export function Hub({
           onClick={onOpenSamples}
         />
         <WorkspaceCard
-          title="Analysis"
+          title="Optimize"
           subtitle={
             project.review_status === "confirmed"
-              ? "Band gap, peak fit"
+              ? "Suggest the next experiment"
               : "🔒 Confirm project first"
           }
+          onClick={onOpenOptimize}
           locked={project.review_status !== "confirmed"}
         />
       </section>
