@@ -63,8 +63,14 @@ __all__ = [
 # the second call, breaking idempotency. The outer `+` lets us strip
 # any number of `sample`/`specimen`-style words back-to-back, with
 # optional separators between them.
+# Leading separators (`-sample`, `_specimen`) are consumed before the
+# prefix word so they don't block the strip on the first pass — without
+# this, normalize("-sample") returns "sample" (prefix not yet at the
+# anchor) while normalize("sample") returns "", breaking idempotency.
+# The optional run only matches when a real prefix word follows it, so
+# legitimate names like "(MX-1)" are untouched.
 _SAMPLE_PREFIX_RE = re.compile(
-    r"^(?:(?:sample|specimen|spec|sampleid|specimenid)[\s\-_:.]*)+",
+    r"^[\s\-_()./:\[\]\\]*(?:(?:sample|specimen|spec|sampleid|specimenid)[\s\-_:.]*)+",
     re.IGNORECASE,
 )
 

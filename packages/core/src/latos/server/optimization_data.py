@@ -14,18 +14,49 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from latos.analysis.transport import TransportError
+from latos.server.transport_data import sample_zt
+
 if TYPE_CHECKING:
     from latos.core.models import Project, Sample
     from latos.ingestion.array_store import ArrayStore
     from latos.server.synthesis_store import SynthesisParams
 
 __all__ = [
+    "DERIVED_ZT",
     "DatasetRow",
     "SkippedSample",
     "build_dataset",
     "list_target_properties",
     "peak_target",
 ]
+
+# Special target option: zT that Latos derives in-app from a sample's
+# Resistivity/Seebeck + LFA measurements (provenance-tracked), as opposed
+# to a pre-computed `zt` column read from a file. Preferred when available.
+DERIVED_ZT = "zT (derived)"
+
+# Columns that are genuine optimization *objectives* (things you maximize),
+# as opposed to independent axes (temperature, 2θ, wavelength) or raw /
+# intermediate quantities (resistivity, diffusivity, intensity). Only these
+# populate the target dropdown, so the user never sees "maximize wavelength".
+_OBJECTIVE_PROPERTIES: frozenset[str] = frozenset(
+    {
+        "zt",
+        "power_factor",
+        "seebeck_uv_k",
+        "seebeck_uvk",
+        "band_gap_ev",
+    }
+)
+
+
+def derived_zt_peak(sample: Sample, store: ArrayStore) -> float | None:
+    """Peak of the Latos-derived zT(T), or None if the sample can't derive it."""
+    try:
+        return sample_zt(sample, store.load).peak_zt
+    except TransportError:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,10 +100,18 @@ def list_target_properties(project: Project, store: ArrayStore) -> list[str]:
     one-time cost when the Optimize screen opens.
     """
     names: set[str] = set()
+    can_derive = False
     for sample in project.samples:
         for measurement in sample.measurements:
             names.update(store.load(measurement.id).keys())
-    return sorted(names)
+        if not can_derive and derived_zt_peak(sample, store) is not None:
+            can_derive = True
+    # Keep only real objectives, so the dropdown never offers an axis or
+    # a raw component ("maximize wavelength" / "maximize resistivity").
+    ordered = sorted(n for n in names if n in _OBJECTIVE_PROPERTIES)
+    # Surface the provenance-tracked derived zT first when any sample
+    # has the R&S + LFA pair to compute it.
+    return [DERIVED_ZT, *ordered] if can_derive else ordered
 
 
 def build_dataset(
@@ -87,11 +126,16 @@ def build_dataset(
     skipped: list[SkippedSample] = []
     for sample in project.samples:
         x = params.get(sample.id, {}).get(input_variable)
-        y = peak_target(sample, store, target_property)
+        if target_property == DERIVED_ZT:
+            y = derived_zt_peak(sample, store)
+            missing_reason = "no Resistivity/Seebeck + LFA pair to derive zT"
+        else:
+            y = peak_target(sample, store, target_property)
+            missing_reason = f"no '{target_property}' data"
         if x is None:
             skipped.append(SkippedSample(sample.canonical_name, f"no '{input_variable}' value"))
         elif y is None:
-            skipped.append(SkippedSample(sample.canonical_name, f"no '{target_property}' data"))
+            skipped.append(SkippedSample(sample.canonical_name, missing_reason))
         else:
             rows.append(
                 DatasetRow(

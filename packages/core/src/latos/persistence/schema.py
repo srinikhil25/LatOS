@@ -28,7 +28,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # Bumped on any schema change. Stored on every Project row so migrations
 # can detect mismatches between code and on-disk data.
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 5
 
 
 class UtcDateTime(TypeDecorator[datetime]):
@@ -156,6 +156,7 @@ class MeasurementRow(Base):
     parsed_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
     parser_version: Mapped[str] = mapped_column(String, nullable=False)
     parsed_data_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    features: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
     sample: Mapped[SampleRow] = relationship(back_populates="measurements")
     files: Mapped[list[FileRow]] = relationship(

@@ -248,14 +248,22 @@ class TestParamHandling:
             AnalyzerInputs(
                 measurement=_measurement(),
                 arrays={"wavelength": wavelength, "reflectance": refl},
-                params={"fit_window_y_min_frac": 0.30, "fit_window_y_max_frac": 0.50},
+                params={
+                    "fit_window": "percentile",
+                    "fit_window_y_min_frac": 0.30,
+                    "fit_window_y_max_frac": 0.50,
+                },
             ),
         )
         wide = analyzer.analyze(
             AnalyzerInputs(
                 measurement=_measurement(),
                 arrays={"wavelength": wavelength, "reflectance": refl},
-                params={"fit_window_y_min_frac": 0.10, "fit_window_y_max_frac": 0.80},
+                params={
+                    "fit_window": "percentile",
+                    "fit_window_y_min_frac": 0.10,
+                    "fit_window_y_max_frac": 0.80,
+                },
             ),
         )
         assert narrow.outputs["n_points_fit"] < wide.outputs["n_points_fit"]

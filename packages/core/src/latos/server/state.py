@@ -126,6 +126,19 @@ class ServerState:
         self._thread.start()
         return True
 
+    def reset(self) -> None:
+        """Forget the open project — after its `.latos/` store is deleted.
+
+        Leaves the server idle so a stale `result`/`root` can't be read back
+        (which would 500 once the store is gone). A no-op if nothing is open.
+        """
+        with self._lock:
+            self.status = IngestStatus.IDLE
+            self.result = None
+            self.error = None
+            self.root = None
+            self._queue = queue.Queue()
+
     def _on_progress(self, index: int, total: int, path: Path) -> None:
         """Crawler callback (worker thread) → progress queue."""
         self._queue.put(ProgressEvent(index=index, total=total, name=path.name))

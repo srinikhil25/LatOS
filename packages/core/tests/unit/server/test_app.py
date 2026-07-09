@@ -556,3 +556,50 @@ class TestIngestEvents:
         with client.stream("GET", "/ingest/events") as stream:
             text = "".join(stream.iter_text())
         assert "event: done" in text
+
+
+class TestMergeSuggestions:
+    """GET /samples/merge-suggestions wiring (algorithm covered by unit tests)."""
+
+    def test_404_when_no_project(self, client: TestClient):
+        assert client.get("/samples/merge-suggestions").status_code == 404
+
+    def test_returns_list_when_open(self, client: TestClient, tmp_path: Path):
+        _open_and_join(client, tmp_path)
+        response = client.get("/samples/merge-suggestions")
+        assert response.status_code == 200
+        # The one-sample stub project yields no suggestions, but the
+        # endpoint must serialize a list either way.
+        assert isinstance(response.json(), list)
+
+
+class TestSampleAnomalies:
+    """GET /samples/anomalies wiring (algorithm covered by unit tests)."""
+
+    def test_404_when_no_project(self, client: TestClient):
+        assert client.get("/samples/anomalies").status_code == 404
+
+    def test_returns_list_when_open(self, client: TestClient, tmp_path: Path):
+        _open_and_join(client, tmp_path)
+        response = client.get("/samples/anomalies")
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)
+
+
+class TestMeasurementAnalysis:
+    """GET /measurements/{id}/analysis wiring (analyzers covered by their own tests)."""
+
+    def test_404_when_no_project(self, client: TestClient):
+        assert client.get("/measurements/x/analysis").status_code == 404
+
+    def test_404_unknown_measurement(self, client: TestClient, tmp_path: Path):
+        _open_and_join(client, tmp_path)
+        assert client.get("/measurements/nope/analysis").status_code == 404
+
+    def test_returns_list_for_known_measurement(self, client: TestClient, tmp_path: Path):
+        _open_and_join(client, tmp_path)
+        samples = client.get("/samples").json()
+        mid = samples[0]["measurements"][0]["id"]
+        response = client.get(f"/measurements/{mid}/analysis")
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)

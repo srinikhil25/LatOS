@@ -155,3 +155,33 @@ class TestRun:
             json={"input_variable": "doping_pct", "target_property": "nonexistent"},
         )
         assert resp.status_code == 400
+
+    def test_run_returns_predictive_interval(self, tmp_path: Path):
+        rec = _run(_client(tmp_path))["recommendation"]
+        assert "ci95_predictive" in rec
+        lo, hi = rec["predictive_interval_95"]
+        assert lo <= rec["predicted_mean"] <= hi
+
+
+class TestFreeze:
+    def test_freeze_writes_prereg_record(self, tmp_path: Path):
+        client = _client(tmp_path)
+        resp = client.post(
+            "/optimize/freeze",
+            json={"input_variable": "doping_pct", "target_property": "zt"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert Path(body["path"]).exists()
+        assert Path(body["path"]).with_suffix(".md").exists()
+        assert "predictive_interval_95" in body["recommendation"]
+        assert isinstance(body["robustness_stable"], bool)
+        assert body["prior_best"] == 0.967
+
+    def test_freeze_blocked_until_confirmed(self, tmp_path: Path):
+        client = _client(tmp_path, confirmed=False)
+        resp = client.post(
+            "/optimize/freeze",
+            json={"input_variable": "doping_pct", "target_property": "zt"},
+        )
+        assert resp.status_code == 409

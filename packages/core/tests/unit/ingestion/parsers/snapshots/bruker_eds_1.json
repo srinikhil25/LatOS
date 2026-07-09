@@ -39,6 +39,7 @@
       ]
     }
   },
+  "features": {},
   "instrument": "Bruker EDS (.spx)",
   "issues": [
     {

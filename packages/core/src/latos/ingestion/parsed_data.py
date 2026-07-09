@@ -15,7 +15,7 @@ decides what to do with files that produced errors vs. warnings.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -85,6 +85,10 @@ class ParsedData:
     issues: tuple[ValidationIssue, ...]
     parser_name: str
     parser_version: str
+    # Curated scalar features the parser wants surfaced (carrier
+    # concentration, mobility, band gap inputs, …). Persisted on the
+    # Measurement; empty for parsers that only emit arrays/metadata.
+    features: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Validate every invariant; raise `ValidationError` on any violation."""
@@ -95,6 +99,16 @@ class ParsedData:
         self._check_measured_at()
         self._check_issues()
         self._check_parser_identity()
+        self._check_features()
+
+    def _check_features(self) -> None:
+        if not isinstance(self.features, dict):
+            raise ValidationError("ParsedData.features must be a dict")
+        for key, value in self.features.items():
+            if not isinstance(key, str) or not isinstance(value, int | float):
+                raise ValidationError(
+                    f"ParsedData.features[{key!r}] must map str → number, got {value!r}"
+                )
 
     # ─── Field-level validators ──────────────────────────────────────
     def _check_technique(self) -> None:

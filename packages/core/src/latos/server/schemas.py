@@ -7,9 +7,13 @@ generates its TypeScript types from this shape via the OpenAPI schema.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel
 
 __all__ = [
+    "DeleteProjectRequest",
+    "DeleteProjectResult",
     "HealthResponse",
     "IngestStartedResponse",
     "MeasurementSummary",
@@ -37,6 +41,27 @@ class IngestStartedResponse(BaseModel):
     """202 body acknowledging the ingestion thread has started."""
 
     status: str
+
+
+class DeleteProjectRequest(BaseModel):
+    """POST /project/delete — recycle a project's derived ``.latos/`` store."""
+
+    root: str
+
+
+class DeleteProjectResult(BaseModel):
+    """Outcome of a project delete. Raw files are never touched.
+
+    Attributes:
+        root: The project folder acted on.
+        removed: True if a ``.latos/`` store existed and was removed.
+        recycled: True if it went to the Recycle Bin (recoverable), False if it
+            had to be permanently deleted.
+    """
+
+    root: str
+    removed: bool
+    recycled: bool
 
 
 class ProjectSummary(BaseModel):
@@ -139,7 +164,9 @@ class RecommendationOut(BaseModel):
 
     x: float
     predicted_mean: float
-    ci95: float
+    ci95: float  # model (epistemic) 95% half-width
+    ci95_predictive: float  # 95% half-width a new measurement should fall within
+    predictive_interval_95: tuple[float, float]  # [low, high] — for calibration checks
 
 
 class OptimizeResult(BaseModel):
@@ -163,6 +190,23 @@ class OptimizeResult(BaseModel):
     verdict: str  # plain-language summary for the UI
 
 
+class FreezeResult(BaseModel):
+    """POST /optimize/freeze — the committed pre-registration record.
+
+    Writes a timestamped JSON (+ Markdown sibling) that pins the frozen model
+    config and the predicted value with its predictive interval, *before* the
+    recommended sample is made — so the later measurement can be checked for
+    calibration and improvement against a prediction that could not have been
+    retuned after the fact.
+    """
+
+    path: str  # where the JSON record was written (a .md sibling sits beside it)
+    recommendation: RecommendationOut
+    prior_best: float
+    robustness_stable: bool
+    converged: bool
+
+
 class MeasurementSummary(BaseModel):
     """One measurement row in the samples tree."""
 
@@ -171,6 +215,7 @@ class MeasurementSummary(BaseModel):
     instrument: str | None
     filename: str | None
     folder: str | None  # source file's dir, relative to project root (posix)
+    features: dict[str, float] = {}  # curated scalar features (Hall, EDS, …)
 
 
 class SampleSummary(BaseModel):
@@ -180,6 +225,66 @@ class SampleSummary(BaseModel):
     name: str
     aliases: list[str]
     measurements: list[MeasurementSummary]
+
+
+class MergeSuggestionOut(BaseModel):
+    """GET /samples/merge-suggestions — one proposed (suggest-only) merge.
+
+    `target` is the cleaner spelling to keep; `source` would fold into it.
+    Confirming calls POST /samples/merge with these ids.
+    """
+
+    target_id: str
+    target_name: str
+    source_id: str
+    source_name: str
+    score: float
+    confidence: str  # "high" | "medium"
+    reason: str
+
+
+class AnalyzerResultOut(BaseModel):
+    """One analyzer's result for GET /measurements/{id}/analysis.
+
+    `outputs` is the analyzer's JSON-safe scalar payload (band gap, peak
+    positions, …). `issues` are human-readable "severity: message" lines.
+    Computed on demand — not persisted (re-running these fits is cheap).
+    """
+
+    analyzer: str
+    outputs: dict[str, Any]
+    issues: list[str]
+
+
+class ThermoelectricResult(BaseModel):
+    """GET /samples/{id}/thermoelectric — zT(T) derived from R&S + LFA.
+
+    Arrays are aligned to `temperature_k`. `provenance` lists the
+    derivation steps; `warnings` carries plausibility flags.
+    """
+
+    temperature_k: list[float]
+    zt: list[float]
+    power_factor_uw_mk2: list[float]
+    peak_zt: float
+    peak_zt_temperature_k: float
+    provenance: list[str]
+    warnings: list[str]
+
+
+class SampleAnomalyOut(BaseModel):
+    """GET /samples/anomalies — one sample flagged for human attention.
+
+    `kind` is "mixed_samples" (files belong to other samples) or
+    "non_sample_name" (the name looks like a folder/date). `related`
+    lists the other sample names for the mixed case.
+    """
+
+    sample_id: str
+    sample_name: str
+    kind: str
+    message: str
+    related: list[str]
 
 
 class MeasurementArrays(BaseModel):

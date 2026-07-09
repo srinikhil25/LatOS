@@ -17,6 +17,7 @@ import {
 } from "../lib/api";
 import { LinePlot } from "../components/LinePlot";
 import { ImageViewer } from "../components/ImageViewer";
+import { AnalysisPanel } from "../components/AnalysisPanel";
 import { TechniqueChip, techniqueLabel } from "../components/TechniqueChip";
 
 interface TechniqueGroup {
@@ -90,6 +91,33 @@ function ArrayDetail({ measurement }: { measurement: MeasurementSummary }) {
   );
 }
 
+function formatFeature(value: number): string {
+  const abs = Math.abs(value);
+  if (abs !== 0 && (abs >= 1e4 || abs < 1e-3)) return value.toExponential(3);
+  return value.toPrecision(4);
+}
+
+function MeasuredProperties({ features }: { features?: Record<string, number> }) {
+  if (!features || Object.keys(features).length === 0) return null;
+  return (
+    <section className="space-y-2">
+      <h3 className="text-sm font-semibold uppercase tracking-wide text-secondary">
+        Measured properties
+      </h3>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 rounded-lg border border-edge bg-surface p-4 text-sm">
+        {Object.entries(features).map(([key, value]) => (
+          <div key={key} className="contents">
+            <dt className="text-secondary">{key.replace(/_/g, " ")}</dt>
+            <dd className="font-medium" data-selectable>
+              {formatFeature(value)}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
 function DetailPane({ measurement }: { measurement: MeasurementSummary | null }) {
   if (!measurement) {
     return (
@@ -117,6 +145,8 @@ function DetailPane({ measurement }: { measurement: MeasurementSummary | null })
         )}
       </header>
 
+      <MeasuredProperties features={measurement.features} />
+
       {isImage ? (
         <ImageViewer
           key={measurement.id}
@@ -126,6 +156,8 @@ function DetailPane({ measurement }: { measurement: MeasurementSummary | null })
       ) : (
         <ArrayDetail measurement={measurement} />
       )}
+
+      <AnalysisPanel measurementId={measurement.id} />
     </div>
   );
 }

@@ -41,7 +41,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -62,6 +62,7 @@ from latos.ingestion.crawler import (
     ProgressCallback,
     crawl,
 )
+from latos.ingestion.labeling.normalize import normalize
 from latos.ingestion.parsed_data import ParsedData
 from latos.ingestion.registry import ParserRegistry
 from latos.persistence.db import (
@@ -273,13 +274,27 @@ class Orchestrator:
             if existing is not None:
                 # Seed accumulators with prior samples so re-ingesting preserves them.
                 for s in existing.samples:
-                    acc = _SampleAccumulator(
-                        id=s.id,
-                        canonical_name=s.canonical_name,
-                        aliases=set(s.aliases),
-                        measurements=list(s.measurements),
-                    )
-                    samples_by_name[s.canonical_name] = acc
+                    key = _canonical_key(s.canonical_name)
+                    target = samples_by_name.get(key)
+                    if target is None:
+                        samples_by_name[key] = _SampleAccumulator(
+                            id=s.id,
+                            canonical_name=s.canonical_name,
+                            aliases=set(s.aliases),
+                            measurements=list(s.measurements),
+                        )
+                    else:
+                        # Two samples from a prior, pre-canonicalization
+                        # ingest collide on the canonical key (e.g.
+                        # "CS Pure" and "CS (Pure)"). Heal the split by
+                        # folding this one into the first; rewrite the
+                        # moved measurements' sample_id so the rebuilt
+                        # Sample stays internally consistent.
+                        target.aliases.add(s.canonical_name)
+                        target.aliases.update(s.aliases)
+                        target.measurements.extend(
+                            replace(m, sample_id=target.id) for m in s.measurements
+                        )
                 unassigned = list(existing.unassigned_files)
 
             current_run_ids: set[str] = set()
@@ -510,8 +525,18 @@ class Orchestrator:
         # tells us each sheet is a distinct sample. Stage 2's labeling
         # pipeline still gets to merge cosmetically-different names
         # across files.
-        sheet_name = parsed.metadata.get("sheet_name") if parsed.metadata else None
-        if isinstance(sheet_name, str) and sheet_name.strip():
+        meta = parsed.metadata or {}
+        # A parser may know the sample name better than the folder does —
+        # e.g. files grouped in technique folders (`LFA/CS LFA.xlsx`) where
+        # the sample is in the filename, not the parent folder. An explicit
+        # `sample_name` wins; then a worksheet name (multi-sample workbook);
+        # then the path-based fallback.
+        explicit_name = meta.get("sample_name")
+        sheet_name = meta.get("sheet_name")
+        if isinstance(explicit_name, str) and explicit_name.strip():
+            sample_name = explicit_name.strip()
+            generic_warning = None
+        elif isinstance(sheet_name, str) and sheet_name.strip():
             sample_name = sheet_name.strip()
             generic_warning = None  # sheet name isn't a fallback
         else:
@@ -534,9 +559,10 @@ class Orchestrator:
             else parsed.technique
         )
 
+        accumulator = _get_or_create_accumulator(samples_by_name, sample_name)
         measurement = Measurement(
             id=measurement_id,
-            sample_id=_get_or_create_sample_id(samples_by_name, sample_name, project_id),
+            sample_id=accumulator.id,
             technique=technique,
             instrument=parsed.instrument,
             measured_at=parsed.measured_at,
@@ -545,9 +571,10 @@ class Orchestrator:
             files=(file_ref,),
             issues=tuple(issues),
             parsed_data_path=parsed_data_path,
+            features=dict(parsed.features),
         )
 
-        samples_by_name[sample_name].measurements.append(measurement)
+        accumulator.measurements.append(measurement)
 
         outcome_kind = (
             Outcome.PARSED_WITH_ISSUES
@@ -575,6 +602,27 @@ def _normalize_folder(name: str) -> str:
 def _is_generic(name: str) -> bool:
     """True if `name` is a generic technique/data folder label."""
     return _normalize_folder(name) in _GENERIC_FOLDER_NAMES
+
+
+def _canonical_key(name: str) -> str:
+    """Identity key for sample grouping: collapse cosmetic spelling variants.
+
+    Two names that differ only in case, separators, or a leading
+    "Sample:"/"Specimen" prefix — e.g. ``CS (Pure)`` vs ``CS Pure`` vs
+    ``cs_pure`` — share one key and therefore one `Sample`. Digits are
+    preserved, so a doping series (``CS-1`` vs ``CS-3``) stays distinct:
+    this merges the cosmetic duplicates *without* the aggressive
+    fuzzy merging that over-grouped doped samples (BUG #16).
+
+    The researcher confirms or overrides every grouping in the review
+    gate, so this is the safe "identical-after-cleaning" tier only —
+    anything requiring a similarity judgement is left to the human.
+
+    Falls back to a stripped-lowercased form when normalization empties
+    the string (a name that is all separators) so every sample still
+    gets a stable, non-empty key.
+    """
+    return normalize(name) or name.strip().lower()
 
 
 # Folder-name → technique map for microscopy. Keys are case-insensitive
@@ -698,21 +746,30 @@ class _SampleAccumulator:
         )
 
 
-def _get_or_create_sample_id(
+def _get_or_create_accumulator(
     samples_by_name: dict[str, _SampleAccumulator],
-    canonical_name: str,
-    project_id: str,
-) -> str:
-    """Look up or create a `_SampleAccumulator` for `canonical_name`.
+    sample_name: str,
+) -> _SampleAccumulator:
+    """Look up or create the `_SampleAccumulator` for a raw sample name.
 
-    The dict key is the canonical name (post-normalization). Same name
-    twice → same accumulator → measurements aggregate under one Sample.
+    The dict key is `_canonical_key(sample_name)`, so cosmetically
+    different spellings of the same sample (``CS Pure`` and
+    ``CS (Pure)``) resolve to one accumulator and their measurements
+    aggregate under a single `Sample`.
+
+    The first spelling seen becomes the display `canonical_name` (the
+    user can rename it in review); every other spelling that maps to
+    the same key is recorded as an alias so the original wording is
+    never lost.
     """
-    acc = samples_by_name.get(canonical_name)
+    key = _canonical_key(sample_name)
+    acc = samples_by_name.get(key)
     if acc is None:
-        acc = _SampleAccumulator(id=new_id(), canonical_name=canonical_name)
-        samples_by_name[canonical_name] = acc
-    return acc.id
+        acc = _SampleAccumulator(id=new_id(), canonical_name=sample_name)
+        samples_by_name[key] = acc
+    elif sample_name != acc.canonical_name:
+        acc.aliases.add(sample_name)
+    return acc
 
 
 def _dedupe_measurements_by_sha256(

@@ -69,6 +69,7 @@ def measurement_to_row(measurement: Measurement) -> MeasurementRow:
         parsed_data_path=(
             str(measurement.parsed_data_path) if measurement.parsed_data_path else None
         ),
+        features=dict(measurement.features),
     )
 
 
@@ -234,6 +235,7 @@ def row_to_measurement(row: MeasurementRow) -> Measurement:
         issues=tuple(row_to_issue(i) for i in row.issues),
         parsed_data_path=Path(row.parsed_data_path) if row.parsed_data_path else None,
         analysis_results=tuple(row_to_analysis_result(r) for r in row.analysis_results),
+        features=dict(row.features or {}),
     )
 
 

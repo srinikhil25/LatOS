@@ -42,6 +42,30 @@ from latos.ingestion.parsed_data import ParsedData
 
 __all__ = ["HallXlsParser"]
 
+# The handful of Hall metrics worth surfacing as *features* (the file
+# also carries dozens of raw per-contact voltages, which are noise here).
+# Maps the parser's normalized metadata key → a clean, unit-tagged
+# feature name. Only keys present with a numeric value are emitted.
+_HALL_FEATURE_KEYS: dict[str, str] = {
+    "ccc_bulk_1_cm": "carrier_concentration_cm3",
+    "mobility_cm_v_s": "mobility_cm2_vs",
+    "resistivity_cm": "resistivity_ohm_cm",
+    "conductivity_1_cm": "conductivity_s_cm",
+    "avg_hall_coefficient_cm_c": "hall_coefficient_cm3_c",
+    "sheet_resistance": "sheet_resistance_ohm_sq",
+}
+
+
+def _hall_features(metadata: dict[str, Any]) -> dict[str, float]:
+    """Pick the key Hall metrics from parsed metadata as numeric features."""
+    features: dict[str, float] = {}
+    for raw_key, feature_name in _HALL_FEATURE_KEYS.items():
+        value = metadata.get(raw_key)
+        if isinstance(value, int | float):
+            features[feature_name] = float(value)
+    return features
+
+
 # Words/phrases in the header row that indicate a Hall-effect file.
 # Any one is sufficient — these are very specific to Hall measurements.
 _HALL_HEADER_KEYWORDS = (
@@ -60,7 +84,7 @@ class HallXlsParser(BaseParser):
     """Parser for Hall-effect `.xls` workbooks (single-temperature export)."""
 
     name: ClassVar[str] = "hall-xls"
-    version: ClassVar[str] = "1.0.1"
+    version: ClassVar[str] = "1.1.0"
     technique: ClassVar[Technique] = Technique.HALL
     supported_extensions: ClassVar[tuple[str, ...]] = (".xls",)
 
@@ -132,6 +156,7 @@ class HallXlsParser(BaseParser):
             issues=tuple(issues),
             parser_name=self.name,
             parser_version=self.version,
+            features=_hall_features(metadata),
         )
 
     def _empty_result(self, issues: list[ValidationIssue]) -> ParsedData:

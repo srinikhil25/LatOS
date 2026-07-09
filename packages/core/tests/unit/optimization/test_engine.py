@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from latos.optimization import OptimizationError, optimize
+from latos.optimization import OptimizationError, length_scale_robustness, optimize
 
 
 def _real_te_data() -> tuple[np.ndarray, np.ndarray]:
@@ -101,3 +101,80 @@ class TestConvergence:
         y = np.array([0.2, 0.5, 0.9])
         result = optimize(x, y, bounds=(0, 4), input_name="x", target_name="y", rel_noise=0.02)
         assert result.converged is False
+
+
+class TestPredictiveCiAndConfig:
+    @pytest.fixture(scope="class")
+    def result(self):
+        x, y = _real_te_data()
+        return optimize(
+            x, y, bounds=(0.0, 5.0), input_name="doping_pct", target_name="peak_zt", seed=0
+        )
+
+    def test_predictive_ci_includes_measurement_noise(self, result):
+        # The predictive interval adds measurement noise on top of the model
+        # uncertainty, so it is never narrower than the model CI.
+        rec = result.recommendation
+        assert rec.predictive_sd > 0
+        assert rec.ci95_predictive >= rec.ci95
+
+    def test_config_freezes_the_setup(self, result):
+        cfg = result.config
+        assert cfg.objective == "peak_zt"
+        assert cfg.input_name == "doping_pct"
+        assert cfg.bounds == (0.0, 5.0)
+        assert cfg.length_scale_fitted is True
+        assert cfg.seed == 0
+        assert cfg.n_observations == 4
+        assert cfg.noise_std > 0
+
+    def test_fixed_length_scale_is_recorded_as_such(self):
+        x, y = _real_te_data()
+        r = optimize(
+            x, y, bounds=(0.0, 5.0), input_name="d", target_name="z", length_scale=2.0
+        )
+        assert r.config.length_scale == 2.0
+        assert r.config.length_scale_fitted is False
+
+    def test_same_seed_is_reproducible(self):
+        x, y = _real_te_data()
+        a = optimize(x, y, bounds=(0.0, 5.0), input_name="d", target_name="z", seed=7)
+        b = optimize(x, y, bounds=(0.0, 5.0), input_name="d", target_name="z", seed=7)
+        assert a.recommendation.x == b.recommendation.x
+        assert a.recommendation.predicted_mean == b.recommendation.predicted_mean
+
+
+class TestRobustness:
+    def test_report_is_wellformed(self):
+        x, y = _real_te_data()
+        report = length_scale_robustness(
+            x,
+            y,
+            bounds=(0.0, 5.0),
+            input_name="doping_pct",
+            target_name="peak_zt",
+            length_scales=(1.0, 2.0, 3.0, 4.0, 5.0),
+        )
+        assert len(report.entries) == 5
+        assert report.search_span == 5.0
+        assert report.tolerance == pytest.approx(0.5)
+        assert report.recommended_x_spread >= 0.0
+        assert isinstance(report.stable, bool)
+        for entry in report.entries:
+            assert 0.0 <= entry.recommended_x <= 5.0
+            assert entry.ci95_predictive >= 0.0
+
+    def test_stable_flag_tracks_spread(self):
+        # A smooth, densely-sampled single peak: the recommendation should not
+        # depend much on the length-scale, so spread <= tolerance -> stable.
+        x = np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        y = np.array([0.1, 0.3, 0.7, 1.0, 0.7, 0.3, 0.1])
+        report = length_scale_robustness(
+            x,
+            y,
+            bounds=(0.0, 6.0),
+            input_name="d",
+            target_name="z",
+            length_scales=(2.0, 2.5, 3.0),
+        )
+        assert report.stable == (report.recommended_x_spread <= report.tolerance)

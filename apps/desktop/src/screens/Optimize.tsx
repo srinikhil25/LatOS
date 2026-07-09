@@ -10,11 +10,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  freezeRecommendation,
   getOptimizeTargets,
   getParameters,
   getSamples,
   runOptimize,
   setSampleParameters,
+  type FreezeResult,
   type OptimizeResult,
   type SampleSummary,
 } from "../lib/api";
@@ -30,6 +32,8 @@ export function Optimize({ onBack }: { onBack: () => void }) {
   const [result, setResult] = useState<OptimizeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  const [frozen, setFrozen] = useState<FreezeResult | null>(null);
+  const [freezing, setFreezing] = useState(false);
 
   useEffect(() => {
     Promise.all([getSamples(), getParameters(), getOptimizeTargets()])
@@ -42,8 +46,11 @@ export function Optimize({ onBack }: { onBack: () => void }) {
         }
         setDoping(init);
         setTargets(props);
-        // Prefer a thermoelectric figure of merit if present.
-        setTarget(props.includes("zt") ? "zt" : (props[0] ?? ""));
+        // Prefer the provenance-tracked derived zT, then a raw zt column.
+        const preferred =
+          props.find((p) => p === "zT (derived)") ??
+          (props.includes("zt") ? "zt" : props[0]);
+        setTarget(preferred ?? "");
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
@@ -61,12 +68,25 @@ export function Optimize({ onBack }: { onBack: () => void }) {
     setRunning(true);
     setError(null);
     setResult(null);
+    setFrozen(null);
     try {
       setResult(await runOptimize(INPUT_VAR, target));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setRunning(false);
+    }
+  }, [target]);
+
+  const freeze = useCallback(async () => {
+    setFreezing(true);
+    setError(null);
+    try {
+      setFrozen(await freezeRecommendation(INPUT_VAR, target));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFreezing(false);
     }
   }, [target]);
 
@@ -115,6 +135,56 @@ export function Optimize({ onBack }: { onBack: () => void }) {
               <div className="rounded-lg border border-edge bg-surface p-3">
                 <OptimizeChart result={result} />
               </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  disabled={freezing}
+                  onClick={() => void freeze()}
+                  className="rounded-md border border-accent px-4 py-2 text-sm font-medium text-accent transition enabled:hover:bg-[color-mix(in_srgb,var(--latos-accent)_10%,transparent)] disabled:opacity-40"
+                >
+                  {freezing ? "Freezing…" : "Freeze recommendation (pre-register)"}
+                </button>
+                <span className="text-xs text-secondary">
+                  Commits the frozen model config + predicted interval before you make the
+                  sample — so the recommendation is prospective.
+                </span>
+              </div>
+
+              {frozen && (
+                <div className="rounded-lg border border-[color:var(--latos-tech-eds)] bg-[color-mix(in_srgb,var(--latos-tech-eds)_10%,transparent)] px-5 py-4 text-sm">
+                  <div className="font-medium">✓ Pre-registration recorded</div>
+                  <ul className="mt-2 space-y-1 text-secondary">
+                    <li>
+                      Recommended {INPUT_VAR.replace("_", " ")}:{" "}
+                      <span className="font-medium text-primary">
+                        {frozen.recommendation.x.toFixed(3)}
+                      </span>
+                    </li>
+                    <li>
+                      Predicted {target}:{" "}
+                      <span className="font-medium text-primary">
+                        {frozen.recommendation.predicted_mean.toFixed(3)}
+                      </span>{" "}
+                      (95% predictive [
+                      {frozen.recommendation.predictive_interval_95[0].toFixed(3)},{" "}
+                      {frozen.recommendation.predictive_interval_95[1].toFixed(3)}])
+                    </li>
+                    <li>Prior best: {frozen.prior_best.toFixed(3)}</li>
+                    <li>
+                      Kernel robustness:{" "}
+                      <span className="font-medium text-primary">
+                        {frozen.robustness_stable
+                          ? "stable"
+                          : "UNSTABLE — data may be too sparse"}
+                      </span>
+                    </li>
+                    <li className="text-xs" data-selectable>
+                      Saved to {frozen.path}
+                    </li>
+                  </ul>
+                </div>
+              )}
             </section>
           )}
 

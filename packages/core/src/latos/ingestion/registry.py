@@ -191,12 +191,16 @@ def default_registry() -> ParserRegistry:
     from latos.ingestion.parsers import (  # noqa: PLC0415 — see comment above
         BrukerSpxParser,
         CasaXpsCsvParser,
+        EdsEmsaParser,
         HallXlsParser,
+        LfaXlsxParser,
         MicroscopyTifParser,
         PanalyticalXrdmlParser,
+        ResistivitySeebeckXlsxParser,
         RigakuXrdAscParser,
         RigakuXrdTxtParser,
         ThermoelectricXlsxParser,
+        UvDrsTxtParser,
         UvDrsXlsxParser,
     )
 
@@ -205,11 +209,15 @@ def default_registry() -> ParserRegistry:
             # Specific signatures first — these never produce false positives.
             PanalyticalXrdmlParser(),
             BrukerSpxParser(),
+            EdsEmsaParser(),
             MicroscopyTifParser(),
             HallXlsParser(),
             # Extension-keyed but with content sniffs — moderately specific.
+            LfaXlsxParser(),
+            ResistivitySeebeckXlsxParser(),
             ThermoelectricXlsxParser(),
             UvDrsXlsxParser(),
+            UvDrsTxtParser(),
             RigakuXrdTxtParser(),
             RigakuXrdAscParser(),
             # CasaXPS is keyed only on .csv extension + structure; least

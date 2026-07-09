@@ -36,6 +36,7 @@ def parsed_to_snapshot(parsed: ParsedData) -> dict[str, Any]:
         "parser_name": parsed.parser_name,
         "parser_version": parsed.parser_version,
         "metadata": parsed.metadata,
+        "features": parsed.features,
         "arrays": {
             name: {
                 "length": int(arr.shape[0]),

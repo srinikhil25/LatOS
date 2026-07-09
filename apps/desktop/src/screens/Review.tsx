@@ -11,6 +11,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   confirmProject,
+  getAnomalies,
+  getMergeSuggestions,
   getProject,
   getSamples,
   mergeSamples,
@@ -19,6 +21,8 @@ import {
   setMeasurementTechnique,
   splitMeasurements,
   TECHNIQUES,
+  type MergeSuggestion,
+  type SampleAnomaly,
   type SampleSummary,
 } from "../lib/api";
 import { TechniqueChip, techniqueLabel } from "../components/TechniqueChip";
@@ -31,6 +35,17 @@ export function Review({ onBack }: { onBack: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // Suggested merges (suggest-only) + the ones the user has dismissed
+  // this session (keyed by `${target}|${source}`).
+  const [suggestions, setSuggestions] = useState<MergeSuggestion[]>([]);
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+
+  // Flagged samples (date/generic names, session buckets) + dismissed ids.
+  const [anomalies, setAnomalies] = useState<SampleAnomaly[]>([]);
+  const [dismissedAnomalies, setDismissedAnomalies] = useState<Set<string>>(
+    new Set(),
+  );
+
   // Selection state (two independent sets).
   const [selSamples, setSelSamples] = useState<Set<string>>(new Set());
   const [selMeas, setSelMeas] = useState<Set<string>>(new Set());
@@ -41,13 +56,22 @@ export function Review({ onBack }: { onBack: () => void }) {
   const [splitName, setSplitName] = useState("");
 
   const reload = useCallback(async () => {
-    const [project, tree] = await Promise.all([getProject(), getSamples()]);
+    const [project, tree, sugg, anoms] = await Promise.all([
+      getProject(),
+      getSamples(),
+      getMergeSuggestions(),
+      getAnomalies(),
+    ]);
     setStatus(project.review_status);
     setSamples(tree);
+    setSuggestions(sugg);
+    setAnomalies(anoms);
     setSelSamples(new Set());
     setSelMeas(new Set());
     setSplitName("");
   }, []);
+
+  const suggestionKey = (s: MergeSuggestion) => `${s.target_id}|${s.source_id}`;
 
   useEffect(() => {
     reload().catch((e: unknown) =>
@@ -77,6 +101,16 @@ export function Review({ onBack }: { onBack: () => void }) {
     [samples, selSamples],
   );
 
+  const visibleSuggestions = useMemo(
+    () => suggestions.filter((s) => !dismissed.has(suggestionKey(s))),
+    [suggestions, dismissed],
+  );
+
+  const visibleAnomalies = useMemo(
+    () => anomalies.filter((a) => !dismissedAnomalies.has(a.sample_id)),
+    [anomalies, dismissedAnomalies],
+  );
+
   const toggle = (set: Set<string>, id: string): Set<string> => {
     const next = new Set(set);
     if (next.has(id)) next.delete(id);
@@ -94,6 +128,19 @@ export function Review({ onBack }: { onBack: () => void }) {
   const doMerge = () => {
     const [target, ...sources] = orderedSelectedSamples;
     void run(() => mergeSamples(sources.map((s) => s.id), target.id));
+  };
+
+  const acceptSuggestion = (s: MergeSuggestion) => {
+    // Fold the noisier `source` spelling into the cleaner `target`.
+    void run(() => mergeSamples([s.source_id], s.target_id));
+  };
+
+  const dismissSuggestion = (s: MergeSuggestion) => {
+    setDismissed((prev) => new Set(prev).add(suggestionKey(s)));
+  };
+
+  const dismissAnomaly = (a: SampleAnomaly) => {
+    setDismissedAnomalies((prev) => new Set(prev).add(a.sample_id));
   };
 
   const doSplit = () => {
@@ -180,6 +227,92 @@ export function Review({ onBack }: { onBack: () => void }) {
           </button>
         </div>
       </div>
+
+      {/* Suggested merges (suggest-only — Latos never merges these on its own) */}
+      {status === "needs_review" && visibleSuggestions.length > 0 && (
+        <div className="border-b border-edge bg-[color-mix(in_srgb,var(--latos-accent)_6%,transparent)] px-6 py-3">
+          <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-secondary">
+            Possible duplicate samples — {visibleSuggestions.length} to review
+          </h2>
+          <ul className="space-y-1.5">
+            {visibleSuggestions.map((s) => (
+              <li
+                key={suggestionKey(s)}
+                className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-edge bg-surface px-3 py-2 text-sm"
+              >
+                <span className="font-medium" data-selectable>
+                  {s.source_name}
+                </span>
+                <span className="text-secondary">→</span>
+                <span className="font-medium" data-selectable>
+                  {s.target_name}
+                </span>
+                <span
+                  className={`rounded px-1.5 py-0.5 text-xs ${
+                    s.confidence === "high"
+                      ? "bg-[color-mix(in_srgb,var(--latos-tech-eds)_18%,transparent)] text-[color:var(--latos-tech-eds)]"
+                      : "bg-[color-mix(in_srgb,var(--latos-severity-warning)_18%,transparent)] text-severity-warning"
+                  }`}
+                >
+                  {Math.round(s.score)}% · {s.confidence}
+                </span>
+                <span className="text-xs text-secondary">{s.reason}</span>
+                <span className="ml-auto flex gap-2">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => acceptSuggestion(s)}
+                    className="rounded-md bg-accent px-3 py-1 text-xs font-medium text-white transition enabled:hover:brightness-110 disabled:opacity-40"
+                  >
+                    Merge
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => dismissSuggestion(s)}
+                    className="rounded-md border border-edge px-3 py-1 text-xs hover:border-accent"
+                  >
+                    Dismiss
+                  </button>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Flagged samples (date/generic names, session buckets) */}
+      {status === "needs_review" && visibleAnomalies.length > 0 && (
+        <div className="border-b border-edge bg-[color-mix(in_srgb,var(--latos-severity-warning)_8%,transparent)] px-6 py-3">
+          <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-secondary">
+            Needs attention — {visibleAnomalies.length} sample
+            {visibleAnomalies.length === 1 ? "" : "s"} may be mislabeled
+          </h2>
+          <ul className="space-y-1.5">
+            {visibleAnomalies.map((a) => (
+              <li
+                key={a.sample_id}
+                className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-edge bg-surface px-3 py-2 text-sm"
+              >
+                <span className="text-severity-warning">⚠</span>
+                <span className="font-medium" data-selectable>
+                  {a.sample_name}
+                </span>
+                <span className="rounded bg-[color-mix(in_srgb,var(--latos-severity-warning)_18%,transparent)] px-1.5 py-0.5 text-xs text-severity-warning">
+                  {a.kind === "mixed_samples" ? "session folder?" : "not a sample?"}
+                </span>
+                <span className="text-xs text-secondary">{a.message}</span>
+                <button
+                  type="button"
+                  onClick={() => dismissAnomaly(a)}
+                  className="ml-auto rounded-md border border-edge px-3 py-1 text-xs hover:border-accent"
+                >
+                  Dismiss
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Tree */}
       <div className="min-h-0 flex-1 overflow-y-auto p-4">

@@ -127,6 +127,7 @@ def default_registry() -> AnalyzerRegistry:
     """
     # Local imports keep the module light when only the registry types
     # are needed (e.g. by tests that build their own one-analyzer registry).
+    from latos.analysis.eds.composition import EdsCompositionAnalyzer  # noqa: PLC0415
     from latos.analysis.uv_drs.tauc import UvDrsTaucAnalyzer  # noqa: PLC0415
     from latos.analysis.xrd.peak_fit import XrdPeakFitAnalyzer  # noqa: PLC0415
 
@@ -134,5 +135,6 @@ def default_registry() -> AnalyzerRegistry:
         [
             UvDrsTaucAnalyzer(),
             XrdPeakFitAnalyzer(),
+            EdsCompositionAnalyzer(),
         ],
     )

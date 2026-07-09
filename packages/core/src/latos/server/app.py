@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import queue
 from collections.abc import Callable, Iterator
 from importlib import metadata
@@ -28,20 +29,37 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 
+from latos.analysis.base_analyzer import AnalyzerInputs
+from latos.analysis.registry import default_registry as analyzer_registry
+from latos.analysis.transport import TransportError
 from latos.core.enums import ReviewStatus, Technique
 from latos.core.models import Measurement, Project
+from latos.ingestion.labeling.anomalies import flag_anomalies
+from latos.ingestion.labeling.suggestions import suggest_merges
 from latos.ingestion.orchestrator import IngestionResult
-from latos.optimization import OptimizationError, OptimizationResult, optimize
-from latos.server import edits, optimization_data, synthesis_store
+from latos.optimization import (
+    OptimizationError,
+    OptimizationResult,
+    Recommendation,
+    freeze,
+    length_scale_robustness,
+    optimize,
+)
+from latos.server import edits, optimization_data, synthesis_store, transport_data
 from latos.server.edits import EditError
 from latos.server.imaging import render_to_png
 from latos.server.schemas import (
+    AnalyzerResultOut,
     DatasetPoint,
+    DeleteProjectRequest,
+    DeleteProjectResult,
+    FreezeResult,
     HealthResponse,
     IngestStartedResponse,
     MeasurementArrays,
     MeasurementSummary,
     MergeSamplesRequest,
+    MergeSuggestionOut,
     MoveMeasurementsRequest,
     OpenProjectRequest,
     OptimizationDataset,
@@ -51,11 +69,13 @@ from latos.server.schemas import (
     RecommendationOut,
     RemoveMeasurementsRequest,
     RenameSampleRequest,
+    SampleAnomalyOut,
     SampleParametersRequest,
     SampleSummary,
     SetTechniqueRequest,
     SkippedPoint,
     SplitMeasurementsRequest,
+    ThermoelectricResult,
 )
 from latos.server.state import (
     IngestStatus,
@@ -64,6 +84,7 @@ from latos.server.state import (
     ServerState,
     TerminalEvent,
 )
+from latos.server.trash import trash_path
 
 # Techniques whose measurements carry a renderable image rather than
 # plottable arrays.
@@ -167,6 +188,17 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
             raise HTTPException(status_code=409, detail="An ingestion is already running")
         return IngestStartedResponse(status="started")
 
+    @app.post("/project/delete")
+    def delete_project(body: DeleteProjectRequest) -> DeleteProjectResult:
+        """Recycle a project's derived ``.latos/`` store — raw files untouched.
+
+        Idempotent: succeeds even if the store is already gone (e.g. the folder
+        was renamed). Only ever removes the ``.latos/`` child, never the project
+        folder. If the deleted project is the one currently open, the server
+        forgets it so later reads don't 500 on a vanished store.
+        """
+        return _delete_project_store(state, Path(body.root))
+
     @app.get("/ingest/events")
     def ingest_events() -> StreamingResponse:
         if state.status is IngestStatus.IDLE:
@@ -183,33 +215,7 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
     _register_review_routes(app, state)
     _register_optimization_data_routes(app, state)
 
-    @app.get("/samples")
-    def samples() -> list[SampleSummary]:
-        result = state.result
-        if result is None:
-            raise HTTPException(status_code=404, detail="No project is open")
-        root = result.project.root_path
-        out: list[SampleSummary] = []
-        for sample in result.project.samples:
-            rows = [
-                MeasurementSummary(
-                    id=m.id,
-                    technique=m.technique.value,
-                    instrument=m.instrument,
-                    filename=m.files[0].path.name if m.files else None,
-                    folder=_folder_of(m, root),
-                )
-                for m in sample.measurements
-            ]
-            out.append(
-                SampleSummary(
-                    id=sample.id,
-                    name=sample.canonical_name,
-                    aliases=list(sample.aliases),
-                    measurements=rows,
-                ),
-            )
-        return out
+    _register_sample_read_routes(app, state)
 
     @app.get("/measurements/{measurement_id}/arrays")
     def measurement_arrays(measurement_id: str) -> MeasurementArrays:
@@ -242,6 +248,183 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
         return Response(content=png, media_type="image/png")
 
     return app
+
+
+def _delete_project_store(state: ServerState, root: Path) -> DeleteProjectResult:
+    """Recycle a project's ``.latos/`` store; forget it if it was the open one.
+
+    Never touches the raw files. Idempotent when the store is already gone.
+    """
+    if root == Path(root.anchor):
+        raise HTTPException(status_code=400, detail="Refusing to act on a filesystem root")
+    store = root / ".latos"
+    existed = store.is_dir()
+    recycled = True
+    if existed:
+        try:
+            recycled = trash_path(store)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Could not delete the store: {exc}"
+            ) from exc
+    if state.root is not None and os.path.normcase(str(state.root)) == os.path.normcase(str(root)):
+        state.reset()
+    return DeleteProjectResult(root=str(root), removed=existed, recycled=recycled)
+
+
+def _json_safe(value: object) -> object:
+    """Replace non-finite floats with None so the payload is valid JSON."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+def _run_analysis(
+    measurement: Measurement, arrays: dict[str, np.ndarray]
+) -> list[AnalyzerResultOut]:
+    """Run every applicable analyzer on a measurement and serialize results."""
+    out: list[AnalyzerResultOut] = []
+    for analyzer in analyzer_registry().find_for(measurement):
+        result = analyzer.analyze(
+            AnalyzerInputs(
+                measurement=measurement,
+                arrays=arrays,
+                params=analyzer.merge_params(None),
+            )
+        )
+        out.append(
+            AnalyzerResultOut(
+                analyzer=analyzer.name,
+                outputs={k: _json_safe(v) for k, v in result.outputs.items()},
+                issues=[f"{i.severity.value}: {i.message}" for i in result.issues],
+            )
+        )
+    return out
+
+
+def _register_sample_read_routes(app: FastAPI, state: ServerState) -> None:
+    """Register the read-only samples tree + review-insight endpoints.
+
+    Kept out of `create_app` to keep that factory small. All three are
+    pure reads over the current project; none mutate state.
+    """
+
+    @app.get("/samples")
+    def samples() -> list[SampleSummary]:
+        result = state.result
+        if result is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        root = result.project.root_path
+        out: list[SampleSummary] = []
+        for sample in result.project.samples:
+            rows = [
+                MeasurementSummary(
+                    id=m.id,
+                    technique=m.technique.value,
+                    instrument=m.instrument,
+                    filename=m.files[0].path.name if m.files else None,
+                    folder=_folder_of(m, root),
+                    features=dict(m.features),
+                )
+                for m in sample.measurements
+            ]
+            out.append(
+                SampleSummary(
+                    id=sample.id,
+                    name=sample.canonical_name,
+                    aliases=list(sample.aliases),
+                    measurements=rows,
+                ),
+            )
+        return out
+
+    @app.get("/samples/merge-suggestions")
+    def merge_suggestions() -> list[MergeSuggestionOut]:
+        """Suggest-only near-duplicate sample pairs for the review gate.
+
+        Pure read: computes candidates from the current samples and
+        returns them ranked. Nothing is merged — the user confirms each
+        one via POST /samples/merge.
+        """
+        result = state.result
+        if result is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        return [
+            MergeSuggestionOut(
+                target_id=s.target_id,
+                target_name=s.target_name,
+                source_id=s.source_id,
+                source_name=s.source_name,
+                score=s.score,
+                confidence=s.confidence,
+                reason=s.reason,
+            )
+            for s in suggest_merges(result.project.samples)
+        ]
+
+    @app.get("/samples/anomalies")
+    def sample_anomalies() -> list[SampleAnomalyOut]:
+        """Flag samples that probably aren't real samples (read-only)."""
+        result = state.result
+        if result is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        return [
+            SampleAnomalyOut(
+                sample_id=a.sample_id,
+                sample_name=a.sample_name,
+                kind=a.kind,
+                message=a.message,
+                related=list(a.related),
+            )
+            for a in flag_anomalies(result.project.samples)
+        ]
+
+    @app.get("/samples/{sample_id}/thermoelectric")
+    def sample_thermoelectric(sample_id: str) -> ThermoelectricResult:
+        """Derive zT(T) for a sample from its R&S + LFA measurements.
+
+        422 when the sample lacks one of the two required measurements.
+        """
+        result = state.result
+        store = state.array_store()
+        if result is None or store is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        sample = next((s for s in result.project.samples if s.id == sample_id), None)
+        if sample is None:
+            raise HTTPException(status_code=404, detail="Unknown sample")
+        try:
+            zt = transport_data.sample_zt(sample, store.load)
+        except TransportError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return ThermoelectricResult(
+            temperature_k=zt.temperature_k.tolist(),
+            zt=zt.zt.tolist(),
+            power_factor_uw_mk2=zt.power_factor_uw_mk2.tolist(),
+            peak_zt=zt.peak_zt,
+            peak_zt_temperature_k=zt.peak_zt_temperature_k,
+            provenance=zt.provenance,
+            warnings=zt.warnings,
+        )
+
+    @app.get("/measurements/{measurement_id}/analysis")
+    def measurement_analysis(measurement_id: str) -> list[AnalyzerResultOut]:
+        """Run the applicable analyzers on a measurement (stateless, on demand).
+
+        Returns one entry per analyzer that accepts the measurement —
+        e.g. a band gap for UV-DRS, fitted peaks for XRD. Empty list when
+        no analyzer applies. Re-running these fits is cheap, so nothing
+        is cached or persisted.
+        """
+        result = state.result
+        store = state.array_store()
+        if result is None or store is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        measurement = _find_measurement(result, measurement_id)
+        if measurement is None:
+            raise HTTPException(status_code=404, detail="Unknown measurement")
+        return _run_analysis(measurement, store.load(measurement_id))
 
 
 def _register_review_routes(app: FastAPI, state: ServerState) -> None:
@@ -400,16 +583,94 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             ],
             best_x=res.best_x,
             best_y=res.best_y,
-            recommendation=RecommendationOut(
-                x=res.recommendation.x,
-                predicted_mean=res.recommendation.predicted_mean,
-                ci95=res.recommendation.ci95,
-            ),
+            recommendation=_rec_out(res.recommendation),
             max_ei=res.max_ei,
             noise_threshold=res.noise_threshold,
             converged=res.converged,
             verdict=_verdict(res),
         )
+
+
+    @app.post("/optimize/freeze")
+    def optimize_freeze(body: OptimizeRunRequest) -> FreezeResult:
+        """Freeze the current recommendation into an auditable pre-registration record.
+
+        Runs the optimizer + a kernel length-scale robustness sweep and writes a
+        timestamped JSON (+ Markdown) under `<root>/.latos/prereg/` pinning the
+        frozen config and the predicted value with its predictive interval — before
+        the recommended sample is made, so it cannot be retuned afterwards.
+        """
+        return _freeze_recommendation(state, body)
+
+
+def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> FreezeResult:
+    """Optimize, sweep kernel robustness, and write the pre-registration record."""
+    _require_confirmed(state)
+    result = state.result
+    store = state.array_store()
+    if result is None or store is None or state.root is None:
+        raise HTTPException(status_code=404, detail="No project is open")
+
+    params = synthesis_store.load_params(state.root)
+    rows, _skipped = optimization_data.build_dataset(
+        result.project, store, params, body.input_variable, body.target_property
+    )
+    if len(rows) < _MIN_OPTIMIZE_POINTS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Need at least {_MIN_OPTIMIZE_POINTS} samples with both a "
+                f"'{body.input_variable}' value and '{body.target_property}' data; "
+                f"only {len(rows)} qualify."
+            ),
+        )
+
+    xs = np.array([r.x for r in rows])
+    ys = np.array([r.y for r in rows])
+    bounds = body.bounds or (float(xs.min()), float(xs.max()))
+    try:
+        res = optimize(
+            xs,
+            ys,
+            bounds=bounds,
+            input_name=body.input_variable,
+            target_name=body.target_property,
+        )
+        robustness = length_scale_robustness(
+            xs,
+            ys,
+            bounds=bounds,
+            input_name=body.input_variable,
+            target_name=body.target_property,
+            length_scales=(1.0, 2.0, 3.0, 4.0, 5.0),
+        )
+    except OptimizationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    stamp = res.config.created_at.strftime("%Y%m%dT%H%M%SZ")
+    out_path = state.root / ".latos" / "prereg" / f"prereg_{stamp}.json"
+    freeze(res, out_path, prior_best=res.best_y, robustness=robustness)
+    return FreezeResult(
+        path=str(out_path),
+        recommendation=_rec_out(res.recommendation),
+        prior_best=res.best_y,
+        robustness_stable=robustness.stable,
+        converged=res.converged,
+    )
+
+
+def _rec_out(rec: Recommendation) -> RecommendationOut:
+    """Map an engine `Recommendation` to the API shape (both CIs + interval)."""
+    return RecommendationOut(
+        x=rec.x,
+        predicted_mean=rec.predicted_mean,
+        ci95=rec.ci95,
+        ci95_predictive=rec.ci95_predictive,
+        predictive_interval_95=(
+            rec.predicted_mean - rec.ci95_predictive,
+            rec.predicted_mean + rec.ci95_predictive,
+        ),
+    )
 
 
 def _verdict(res: OptimizationResult) -> str:
@@ -426,7 +687,8 @@ def _verdict(res: OptimizationResult) -> str:
         )
     return (
         f"Recommended next experiment: {res.input_name} = {rec.x:.1f} "
-        f"(predicted {res.target_name} {rec.predicted_mean:.2f} +/- {rec.ci95:.2f}). "
+        f"(predicted {res.target_name} {rec.predicted_mean:.2f} "
+        f"+/- {rec.ci95_predictive:.2f}, 95% predictive). "
         f"A meaningful improvement over the current best ({res.best_y:.3f}) is still expected."
     )
 

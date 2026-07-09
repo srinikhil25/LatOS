@@ -39,6 +39,7 @@
       ]
     }
   },
+  "features": {},
   "instrument": "Rigaku XRD (.ASC)",
   "issues": [
     {

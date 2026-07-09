@@ -39,6 +39,7 @@
       ]
     }
   },
+  "features": {},
   "instrument": "UV-DRS (xlsx export)",
   "issues": [],
   "measured_at": null,

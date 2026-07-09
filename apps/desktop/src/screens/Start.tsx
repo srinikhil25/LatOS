@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import {
+  deleteProject,
   openProject,
   subscribeIngestEvents,
   type IngestProgress,
@@ -46,6 +47,8 @@ export function Start({ onProjectReady }: { onProjectReady: () => void }) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState<IngestProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  const [deletingPath, setDeletingPath] = useState<string | null>(null);
   const disposeRef = useRef<(() => void) | null>(null);
 
   useEffect(() => () => disposeRef.current?.(), []);
@@ -79,6 +82,34 @@ export function Start({ onProjectReady }: { onProjectReady: () => void }) {
     const chosen = await openFolderDialog({ directory: true, multiple: false });
     if (typeof chosen === "string") void ingest(chosen);
   }, [ingest]);
+
+  // Drop a project from the recent list. This only forgets it here — the
+  // project's own `.latos/` store and raw files on disk are left untouched.
+  const removeRecent = useCallback((path: string) => {
+    const next = loadRecents().filter((entry) => entry.path !== path);
+    localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
+    setRecents(next);
+  }, []);
+
+  // Full reset: recycle the project's `.latos/` store (raw files are never
+  // touched), then forget it here. Only clears the list entry on success, so a
+  // real failure (e.g. the store is locked) stays visible and can be retried.
+  const deleteAndForget = useCallback(
+    async (path: string) => {
+      setDeletingPath(path);
+      setError(null);
+      try {
+        await deleteProject(path);
+        removeRecent(path);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setConfirmingDelete(null);
+        setDeletingPath(null);
+      }
+    },
+    [removeRecent],
+  );
 
   return (
     <div className="mx-auto flex h-full max-w-4xl flex-col justify-center gap-10 px-10">
@@ -134,20 +165,57 @@ export function Start({ onProjectReady }: { onProjectReady: () => void }) {
             {recents.length === 0 ? (
               <p className="text-sm text-secondary">No recent projects yet.</p>
             ) : (
-              <ul className="space-y-1.5">
-                {recents.map((entry) => (
-                  <li key={entry.path}>
-                    <button
-                      type="button"
-                      onClick={() => void ingest(entry.path)}
-                      className="w-full rounded-md border border-edge bg-surface px-4 py-3 text-left transition hover:border-accent"
-                    >
-                      <span className="block font-medium">{entry.name}</span>
-                      <span className="block text-xs text-secondary">{entry.path}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <>
+                <ul className="space-y-1.5">
+                  {recents.map((entry) => (
+                    <li key={entry.path} className="flex items-stretch gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void ingest(entry.path)}
+                        className="min-w-0 flex-1 rounded-md border border-edge bg-surface px-4 py-3 text-left transition hover:border-accent"
+                      >
+                        <span className="block font-medium">{entry.name}</span>
+                        <span className="block truncate text-xs text-secondary">
+                          {entry.path}
+                        </span>
+                      </button>
+                      {confirmingDelete === entry.path ? (
+                        <div className="flex shrink-0 items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={deletingPath === entry.path}
+                            onClick={() => void deleteAndForget(entry.path)}
+                            className="rounded-md border border-severity-error px-3 text-sm font-medium text-severity-error transition hover:bg-severity-error hover:text-white disabled:opacity-50"
+                          >
+                            {deletingPath === entry.path ? "Resetting…" : "Delete store"}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={deletingPath === entry.path}
+                            onClick={() => setConfirmingDelete(null)}
+                            className="rounded-md border border-edge px-3 text-sm text-secondary transition hover:border-accent disabled:opacity-50"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmingDelete(entry.path)}
+                          title="Reset this project — deletes Latos's data, keeps your raw files"
+                          aria-label={`Delete ${entry.name}`}
+                          className="shrink-0 rounded-md border border-edge px-3 text-sm text-secondary transition hover:border-severity-error hover:text-severity-error"
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+                <p className="pt-1 text-xs text-secondary">
+                  Delete resets a project — recycles Latos&apos;s data, keeps your raw files.
+                </p>
+              </>
             )}
           </div>
         </section>

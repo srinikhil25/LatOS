@@ -61,16 +61,25 @@ desktop.ini
 logs/
 *.log.*
 
-# ─── User data (Latos-specific) ──────────────────────────────────────
-# User project databases and arrays should never be committed
-data/projects/
-data/arrays/
+# ─── Materials & user data — NEVER commit ────────────────────────────
+# No measurement or project data leaves the machine: the app's data dir,
+# every project store (.latos, incl. its DB / arrays / synthesis params /
+# pre-registration records), and raw instrument files. Unpublished
+# materials data must never reach the remote.
+data/
+**/.latos/
 ~/.latos/
+# generated stores
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
 *.parquet
+# raw instrument / measurement exports
+*.xrdml
+*.emsa
+*.spx
+*.rasx
 
 # ─── Models & caches (Stage 5) ───────────────────────────────────────
 .ollama/

@@ -248,6 +248,9 @@ class Measurement:
     issues: tuple[ValidationIssue, ...] = field(default_factory=tuple)
     parsed_data_path: Path | None = None
     analysis_results: tuple[AnalysisResult, ...] = field(default_factory=tuple)
+    # Curated scalar features (e.g. Hall carrier concentration, mobility),
+    # surfaced to the UI and the optimizer. JSON-persisted.
+    features: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _check_id(self.id, "Measurement.id")

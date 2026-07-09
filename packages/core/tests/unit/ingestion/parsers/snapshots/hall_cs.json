@@ -1,5 +1,13 @@
 {
   "arrays": {},
+  "features": {
+    "carrier_concentration_cm3": 1.9297199753689162e+21,
+    "conductivity_s_cm": 5083.045543356732,
+    "hall_coefficient_cm3_c": 0.003234411834644574,
+    "mobility_cm2_vs": 16.44066266147038,
+    "resistivity_ohm_cm": 0.000196732449369246,
+    "sheet_resistance_ohm_sq": 0.0009643747518100295
+  },
   "instrument": "Hall effect (xls export)",
   "issues": [],
   "measured_at": null,
@@ -98,6 +106,6 @@
     "v72_mv__label": "V72 (mV)"
   },
   "parser_name": "hall-xls",
-  "parser_version": "1.0.1",
+  "parser_version": "1.1.0",
   "technique": "hall"
 }

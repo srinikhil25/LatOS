@@ -208,18 +208,21 @@ class TestParse:
 
 # ─── default_registry ──────────────────────────────────────────────
 class TestDefaultRegistry:
-    def test_contains_all_nine_parsers(self):
+    def test_contains_all_parsers(self):
         r = default_registry()
-        # Stage 1C ships 9 parsers.
         expected_names = {
             "rigaku-xrd-txt",
             "rigaku-xrd-asc",
             "panalytical-xrdml",
             "casaxps-csv",
             "uvdrs-xlsx",
+            "uvdrs-txt",
             "hall-xls",
             "thermoelectric-xlsx",
+            "lfa-xlsx",
+            "resistivity-seebeck-xlsx",
             "bruker-eds-spx",
+            "eds-emsa",
             "microscopy-tif",
         }
         actual_names = {p.name for p in r.parsers}

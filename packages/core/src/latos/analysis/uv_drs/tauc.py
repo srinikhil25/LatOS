@@ -116,9 +116,15 @@ class UvDrsTaucAnalyzer(BaseAnalyzer):
     default_params: ClassVar[dict[str, Any]] = {
         # "direct" → exponent 2; "indirect" → exponent 1/2.
         "band_gap_type": "direct",
-        # Window on the rising edge expressed as fractions of the max
-        # Tauc-y value. Picks the region most likely to be linear; the
-        # user can override either bound to inspect a different segment.
+        # Fit-window strategy. "edge" (default) auto-detects the steepest
+        # absorption edge via the Tauc-y gradient — robust on real spectra
+        # that have a strong high-energy plateau the percentile method
+        # wrongly includes. "percentile" uses the y-fraction band below.
+        "fit_window": "edge",
+        # For "edge": include the contiguous edge where the gradient stays
+        # at or above this fraction of its peak (the steep part of the rise).
+        "edge_grad_frac": 0.3,
+        # For "percentile": window expressed as fractions of the max Tauc-y.
         "fit_window_y_min_frac": 0.20,
         "fit_window_y_max_frac": 0.60,
     }
@@ -141,7 +147,7 @@ class UvDrsTaucAnalyzer(BaseAnalyzer):
         return len(measurement.files) > 0
 
     # ─── analyze ─────────────────────────────────────────────────────
-    def analyze(  # noqa: PLR0911, PLR0915
+    def analyze(  # noqa: PLR0911, PLR0915, PLR0912
         self, inputs: AnalyzerInputs
     ) -> AnalyzerOutput:
         """Run the Tauc-plot extraction. Never raises.
@@ -237,17 +243,26 @@ class UvDrsTaucAnalyzer(BaseAnalyzer):
                 f"need ≥ {_MIN_POINTS_FOR_FIT}.",
             )
 
-        # 4. Pick the fit window. Default uses y-percentile cuts so
-        # the linear region of the rising edge is selected
-        # automatically; user overrides flow through `params`.
-        y_min_frac = float(params.get("fit_window_y_min_frac", 0.20))
-        y_max_frac = float(params.get("fit_window_y_max_frac", 0.60))
+        # 4. Pick the fit window. "edge" (default) auto-detects the
+        # steepest absorption edge from the Tauc-y gradient; "percentile"
+        # uses a y-fraction band. User overrides flow through `params`.
         y_max = float(np.max(Y))
         if y_max <= 0:
             return _error_output(
                 "All Tauc values are non-positive — no rising edge to fit.",
             )
-        mask = (y_min_frac * y_max <= Y) & (y_max_frac * y_max >= Y)
+        y_min_frac = float(params.get("fit_window_y_min_frac", 0.20))
+        y_max_frac = float(params.get("fit_window_y_max_frac", 0.60))
+        percentile_mask = (y_min_frac * y_max <= Y) & (y_max_frac * y_max >= Y)
+        if str(params.get("fit_window", "edge")).lower() == "edge":
+            edge = _edge_window(E, Y, float(params.get("edge_grad_frac", 0.3)))
+            # Fall back to the percentile band if the edge is ill-defined.
+            if edge is not None and int(edge.sum()) >= _MIN_FIT_POINTS:
+                mask = edge
+            else:
+                mask = percentile_mask
+        else:
+            mask = percentile_mask
         if int(mask.sum()) < _MIN_POINTS_FOR_FIT:
             issues.append(
                 ValidationIssue(
@@ -347,6 +362,46 @@ class UvDrsTaucAnalyzer(BaseAnalyzer):
 
 
 # ─── Module helpers ─────────────────────────────────────────────────
+# A gradient peak must reach this fraction of the global-max gradient to
+# count as a real absorption edge (vs. noise). The *first* (lowest-energy)
+# such edge is the band gap — later, steeper rises are higher transitions.
+_EDGE_PROMINENCE_FRAC = 0.5
+
+
+def _edge_window(E: np.ndarray, Y: np.ndarray, grad_frac: float) -> np.ndarray | None:  # noqa: N803
+    """Boolean mask of the *first* absorption edge in a Tauc curve.
+
+    The band gap is the x-intercept of the lowest-energy absorption edge —
+    the rise out of the baseline. Real spectra often have a *steeper*
+    high-energy transition, so taking the globally steepest point picks
+    the wrong edge. Instead we take the first gradient peak that reaches
+    `_EDGE_PROMINENCE_FRAC` of the maximum gradient, then grow a
+    contiguous window while the gradient stays at or above `grad_frac`
+    of that peak. Returns None when no positive gradient exists.
+    """
+    if E.size < _MIN_FIT_POINTS:
+        return None
+    grad = np.gradient(Y, E)
+    g_max = float(np.max(grad))
+    if g_max <= 0:
+        return None
+    prominence = _EDGE_PROMINENCE_FRAC * g_max
+    peak = int(np.argmax(grad))  # fallback: globally steepest
+    for k in range(1, grad.size - 1):
+        if grad[k] >= prominence and grad[k] >= grad[k - 1] and grad[k] >= grad[k + 1]:
+            peak = k  # first significant rising edge
+            break
+    threshold = grad_frac * grad[peak]
+    lo = hi = peak
+    while lo - 1 >= 0 and grad[lo - 1] >= threshold:
+        lo -= 1
+    while hi + 1 < grad.size and grad[hi + 1] >= threshold:
+        hi += 1
+    mask = np.zeros(E.size, dtype=bool)
+    mask[lo : hi + 1] = True
+    return mask
+
+
 def _error_output(message: str) -> AnalyzerOutput:
     """Build an AnalyzerOutput carrying a single error-level issue.
 

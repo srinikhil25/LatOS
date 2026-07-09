@@ -225,6 +225,48 @@ class TestSampleInference:
         assert names == ["S1", "S2"]
 
 
+# ─── Canonical sample grouping ──────────────────────────────────────
+class TestCanonicalGrouping:
+    """Cosmetic spelling variants of one sample collapse into one Sample."""
+
+    def test_cosmetic_variants_merge_with_alias(self, tmp_path: Path):
+        # Same physical sample, two folder spellings (punctuation/space).
+        (tmp_path / "CS (Pure)").mkdir()
+        (tmp_path / "CS (Pure)" / "a.fake").write_text("aa")
+        (tmp_path / "CS Pure").mkdir()
+        (tmp_path / "CS Pure" / "b.fake").write_text("bb")
+
+        result = _orchestrator(_registry_with(_FakeParser())).ingest(tmp_path)
+
+        assert len(result.project.samples) == 1
+        sample = result.project.samples[0]
+        assert len(sample.measurements) == 2
+        # Whichever spelling was seen first is the display name; the other
+        # is preserved as an alias so nothing is lost.
+        spellings = {sample.canonical_name, *sample.aliases}
+        assert spellings == {"CS (Pure)", "CS Pure"}
+
+    def test_doping_series_stays_distinct(self, tmp_path: Path):
+        # Digits carry meaning — a doping series must NOT collapse.
+        for name in ("CS-1", "CS-3", "CS-5"):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "m.fake").write_text(name)
+
+        result = _orchestrator(_registry_with(_FakeParser())).ingest(tmp_path)
+        names = sorted(s.canonical_name for s in result.project.samples)
+        assert names == ["CS-1", "CS-3", "CS-5"]
+
+    def test_separator_and_case_variants_merge(self, tmp_path: Path):
+        # "cs_pure" vs "CS-Pure" vs "CS Pure" all normalize to one key.
+        for name in ("cs_pure", "CS-Pure", "CS Pure"):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / f"{name}.fake").write_text(name)
+
+        result = _orchestrator(_registry_with(_FakeParser())).ingest(tmp_path)
+        assert len(result.project.samples) == 1
+        assert len(result.project.samples[0].measurements) == 3
+
+
 # ─── Outcomes ───────────────────────────────────────────────────────
 class TestOutcomes:
     def test_unclassified_file_is_skipped(self, tmp_path: Path):
