@@ -3,105 +3,138 @@
 > **An operating system for materials characterization.**
 > *Lat* (lattice) + *OS* (operating system).
 
-Latos is an open-source desktop application that automates multi-modal materials characterization. Drop a folder of raw instrument data — XRD, XPS, UV-DRS, Hall, TEM, EDS — and Latos detects techniques, identifies samples, parses files, fits peaks with publication-quality reports, and (eventually) suggests your next experiment via Bayesian Optimization.
+Latos is a local, open-source desktop app that turns a messy folder of raw
+instrument data into traceable, analysed material properties — and then points to
+the next experiment worth running.
 
-**Status:** Stage 1 — Foundation (in progress)
+Drop a folder of XRD, XPS, UV-DRS, Hall, thermoelectric, EDS, and TEM/SEM files.
+Latos fingerprints each file, identifies its sample and technique, parses it,
+flags data-quality issues for you to confirm, computes the properties (band gap,
+composition, zT, fitted XRD peaks, …), and — once you confirm — runs Bayesian
+optimization to recommend the next composition, with a **pre-registered
+prediction** and a 95% interval.
+
+Every number traces back to its raw file. Everything runs on your machine — **no
+cloud, no LLM, fully reproducible.**
+
+**Status:** pre-alpha. The core loop — **ingest → analyse → review → optimize** —
+works end-to-end on real data; not yet packaged for distribution.
 
 ## Why Latos?
 
-Researchers spend hours on tasks that should be automatic:
+Researchers spend hours on work that should be automatic — and mistakes slip
+through:
 
-| Task | Manual time | With Latos |
-|------|-------------|------------|
-| Organizing raw instrument files | 30 min | 0 (auto-detected) |
-| Fitting an XPS spectrum in Origin | ~85 min | ~2 min |
-| Bandgap from UV-DRS Tauc plot | 10 min | instant |
-| Cross-checking XRD vs TEM particle size | 20 min | one click |
-| Suggesting next composition to synthesize | guesswork | predicted ZT ± 95% CI |
+| Task | By hand | With Latos |
+|------|---------|------------|
+| Organizing raw instrument files | ~30 min | auto-detected |
+| Band gap from a UV-DRS Tauc plot | ~10 min | instant |
+| Deriving zT(T) from resistivity/Seebeck + LFA runs | spreadsheet juggling | instant, with a plausibility check |
+| Catching a unit slip before it reaches a paper | easy to miss | flagged at ingest |
+| Choosing the next composition to synthesize | guesswork | recommended, with a 95% interval |
 
-Latos is built to **replace Origin** for daily fitting work and to **enable closed-loop autonomous discovery** for research labs.
+## What works today
 
-## Features (by Stage)
+**Ingest & organise**
+- Drop a folder → per-file fingerprinting, technique detection, sample identification
+- Parsers: XRD (Rigaku, PANalytical), XPS (CasaXPS), UV-DRS, Hall, thermoelectric
+  (LFA + resistivity/Seebeck), EDS (Bruker, EMSA), TEM/SEM/STEM images
+- SQLite + Parquet store; instant project reload
 
-- **Stage 1** — Desktop app, SQLite persistence, instant project reload
-- **Stage 2** — Smart sample identification across inconsistent file naming
-- **Stage 3** — Auto-validation: catches researcher errors before they reach papers
-- **Stage 4** — Universal fit engine: XRD, XPS, Raman, EDS with publication-ready reports
-- **Stage 5** — Local Vision-AI: reads scale bars and metadata directly from microscopy images
-- **Stage 6** — Cross-technique correlation + one-click paper figures
-- **Stage 7** — Bayesian Optimization: closed-loop experimental design
-- **Stage 8** — Production polish, installer, paper submission
+**Data quality — provenance first**
+- Flags implausible values, unreadable rows, missing timestamps,
+  background-subtracted curves, and duplicate/mislabeled samples
+- A **Review & Confirm** gate: nothing is analysed until a human confirms, and
+  nothing is ever auto-merged
 
-## Tech Stack
+**Analysis (per technique)**
+- XRD peak fitting · UV-DRS Tauc band gap · EDS composition · thermoelectric
+  **zT(T)** derived from R&S + LFA with a physical-plausibility check
+- Every derived value links back to its source file
 
-- Python 3.11+
-- **UI:** PySide6 + QFluentWidgets
-- **Plotting:** pyqtgraph + matplotlib
-- **Database:** SQLite + Parquet
-- **Fitting:** lmfit
-- **ML/AI** *(all open-source, all local, all free):*
-  - Qwen3-VL via Ollama (vision)
-  - GPyTorch + BoTorch (Bayesian Optimization)
-- **Tests:** pytest + pytest-qt + hypothesis
+**Bayesian optimization**
+- Gaussian-process surrogate + Expected Improvement over your synthesis knob
+  (e.g. doping %), maximizing a chosen property (e.g. derived zT)
+- Reports the recommended next experiment with a 95% predictive interval and a
+  plain-language verdict — no equations on screen
+- **Pre-registration:** freeze the prediction (with a kernel-robustness check) to
+  disk *before* you make the sample, so the recommendation is prospective, not
+  hindsight
 
-## Installation
+## Architecture
 
-> Note: Latos is in early development. Pre-built binaries will be available starting Stage 8.
+A monorepo: a headless Python core + a thin desktop shell.
 
-### From source (developers)
+- **`packages/core`** — Python. Parsing, analysis, persistence, and Bayesian
+  optimization, exposed over a local FastAPI sidecar bound to `127.0.0.1` only.
+- **`apps/desktop`** — a Tauri 2 + React 19 desktop app that spawns the sidecar
+  and drives it over HTTP.
+
+## Tech stack
+
+- **Core:** Python 3.11+, FastAPI + Uvicorn, NumPy / SciPy, lmfit (fitting),
+  scikit-learn (Gaussian-process BO), SQLAlchemy + SQLite + Parquet (pyarrow)
+- **Desktop:** Tauri 2, React 19, TypeScript, Vite, Tailwind CSS, uPlot
+- **Tests:** pytest (+ Hypothesis)
+- **Local by design:** no cloud services, no LLM — every result is inspectable
+  and reproducible. (GPU-scale GP via GPyTorch/BoTorch is an optional `ml` extra.)
+
+## Getting started (developers)
+
+Latos runs as two processes: the Python **sidecar** and the **desktop app**.
+
+**1. Core / sidecar**
 
 ```bash
 git clone https://github.com/srinikhil25/LatOS.git
-cd latos
+cd LatOS
 python -m venv venv
-
-# Windows
-venv\Scripts\activate
-
-# macOS / Linux
-source venv/bin/activate
-
-pip install -e ".[all]"
-pre-commit install
+# Windows:  venv\Scripts\activate
+# macOS/Linux:  source venv/bin/activate
+pip install -e "packages/core[server]"
+python -m latos.server            # serves http://127.0.0.1:8765
 ```
 
-### Run the app
+**2. Desktop app** (in a second terminal)
 
 ```bash
-latos-app
+cd apps/desktop
+npm install
+npm run tauri dev                 # opens the desktop window (waits for the sidecar)
 ```
 
-### Run tests
+**Tests**
 
 ```bash
-pytest                              # all tests
-pytest -m "not slow"                # fast subset
-pytest --cov-report=html            # coverage HTML report
+cd packages/core
+pytest                            # all tests
+pytest -m "not slow"              # fast subset
 ```
 
-## Project Structure
+## Project structure
 
 ```
-src/latos/
+packages/core/src/latos/
 ├── core/           Domain models (Project, Sample, Measurement)
+├── ingestion/      Parsers, technique detection, sample labeling + review flags
+├── analysis/       Per-technique analysis (XRD, UV-DRS, EDS, transport/zT)
+├── optimization/   Bayesian optimization + pre-registration
 ├── persistence/    SQLite + Parquet
-├── ingestion/      File parsers + sample labeling
-├── analysis/       Pure analysis functions per technique
-├── fitting/        Universal fit engine (lmfit-based)
-├── optimization/   Bayesian Optimization
-├── visualization/  Plot builders + style templates
-├── reporting/      Markdown/LaTeX export
-└── ui/             PySide6 app (only Qt code lives here)
+└── server/         FastAPI sidecar (the desktop app's API)
 
-tests/              Comprehensive test suite
-docs/               Algorithm documentation + monthly progress reports
+apps/desktop/           Tauri 2 + React 19 desktop shell
+packages/core/tests/    Test suite
 ```
 
-See [`CLAUDE.md`](./CLAUDE.md) and [`AGENTS.md`](./AGENTS.md) for detailed development notes.
+See [`CLAUDE.md`](./CLAUDE.md) and [`AGENTS.md`](./AGENTS.md) for development notes.
 
 ## Roadmap
 
-This project is being built in **8 stages**, each delivering a working improvement. The current platform stays usable throughout. See [Releases](https://github.com/srinikhil25/LatOS/releases) for milestone tags.
+- Multi-variable optimization (dopant type × amount × processing, together)
+- zT at a target application temperature as a selectable BO objective
+- Cross-technique correlation + one-click paper figures
+- Experimental validation of recommendations at the bench
+- Packaged installers
 
 ## Citation
 
@@ -110,9 +143,9 @@ If Latos contributes to your research, please cite:
 ```bibtex
 @software{latos2026,
   author = {Srinikhil},
-  title = {Latos: An Operating System for Multi-Modal Materials Characterization},
-  year = {2026},
-  url = {https://github.com/srinikhil25/LatOS}
+  title  = {Latos: An Operating System for Multi-Modal Materials Characterization},
+  year   = {2026},
+  url    = {https://github.com/srinikhil25/LatOS}
 }
 ```
 
@@ -122,7 +155,8 @@ If Latos contributes to your research, please cite:
 
 ## Acknowledgments
 
-- The Ikeda-Hamasaki Lab for being the test bed
+- The Ikeda–Hamasaki Lab for being the test bed
 - [Materials Project](https://materialsproject.org/) for reference XRD data
-- The maintainers of PySide6, lmfit, GPyTorch, BoTorch, and Ollama
-- [Materials-Informatics](https://github.com/srinikhil25/Materials-Informatics) — the Streamlit predecessor that informed this rewrite
+- The maintainers of FastAPI, Tauri, React, lmfit, scikit-learn, and SQLAlchemy
+- [Materials-Informatics](https://github.com/srinikhil25/Materials-Informatics) —
+  the Streamlit predecessor that informed this rewrite
