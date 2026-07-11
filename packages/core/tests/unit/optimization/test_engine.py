@@ -253,3 +253,84 @@ class TestXNormalization:
         rel_small = (small.recommendation.x - 1.0) / 4.0
         rel_big = (big.recommendation.x - 1e19) / 4e19
         assert rel_big == _pytest.approx(rel_small, abs=0.02)
+
+
+# ─── Reliability self-assessment (RG1) ───────────────────────────────
+
+
+class TestReliability:
+    def _optimize(self, n, y=None, **kw):
+        import numpy as _np
+
+        from latos.optimization.engine import optimize as _optimize
+
+        x = _np.linspace(1.0, 5.0, n)
+        if y is None:
+            y = 1.0 - 0.1 * (x - 3.0) ** 2  # smooth hump, peak at 3
+        return _optimize(
+            x, _np.asarray(y), bounds=(1.0, 5.0), input_name="d", target_name="zt", **kw
+        )
+
+    def test_small_series_is_exploratory(self):
+        res = self._optimize(4)
+        rel = res.reliability
+        assert rel is not None
+        assert rel.level == "exploratory"
+        assert rel.n_observations == 4
+        assert rel.loo_total == 4
+        assert 0.0 <= rel.loo_coverage <= 1.0
+        assert "Exploratory" in rel.note
+
+    def test_medium_series_is_indicative(self):
+        res = self._optimize(15)
+        assert res.reliability is not None
+        assert res.reliability.level == "indicative"
+
+    def test_large_series_is_calibrated(self):
+        res = self._optimize(30)
+        rel = res.reliability
+        assert rel is not None
+        assert rel.level == "calibrated"
+        # A smooth hump with sane noise should mostly predict itself.
+        assert rel.loo_coverage >= 0.8
+
+    def test_unpredictable_data_forces_exploratory(self):
+        """Alternating y with tiny declared noise: the model cannot predict
+        its own points, so the LOO rule must force 'exploratory' even at a
+        count that would otherwise be 'indicative'."""
+        import numpy as _np
+
+        y = _np.tile([0.2, 1.8], 6)  # n = 12, violently alternating
+        res = self._optimize(12, y=y, rel_noise=0.01)
+        rel = res.reliability
+        assert rel is not None
+        assert rel.loo_coverage < 0.5
+        assert rel.level == "exploratory"
+        assert "cannot predict its own data" in rel.note
+
+    def test_robustness_sweep_skips_reliability(self):
+        import numpy as _np
+
+        from latos.optimization.engine import length_scale_robustness
+        from latos.optimization.engine import optimize as _opt
+
+        x = _np.array([1.0, 3.0, 5.0])
+        y = _np.array([0.4, 0.98, 0.5])
+        skipped = _opt(
+            x, y, bounds=(1.0, 5.0), input_name="d", target_name="zt",
+            with_reliability=False,
+        )
+        assert skipped.reliability is None
+        report = length_scale_robustness(
+            x, y, bounds=(1.0, 5.0), input_name="d", target_name="zt",
+            length_scales=(1.0, 3.0),
+        )
+        assert len(report.entries) == 2  # sweep still works
+
+    def test_prereg_record_carries_reliability(self):
+        from latos.optimization.prereg import build_record
+
+        res = self._optimize(4)
+        record = build_record(res, prior_best=res.best_y)
+        assert record["reliability"]["level"] == "exploratory"
+        assert record["reliability"]["loo_total"] == 4

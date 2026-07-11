@@ -42,6 +42,7 @@ def build_record(
         "created_at": cfg.created_at.isoformat(),
         "objective": {
             "property": cfg.objective,
+            "direction": cfg.direction,
             "aggregation": cfg.objective_aggregation,
             "input_variable": cfg.input_name,
             "search_bounds": list(cfg.bounds),
@@ -81,6 +82,11 @@ def build_record(
             "stable": robustness.stable,
             "entries": [asdict(e) for e in robustness.entries],
         }
+    if result.reliability is not None:
+        # The reliability the tool assigned itself at freeze time — an
+        # auditor can judge how much the frozen claim was worth without
+        # rerunning anything.
+        record["reliability"] = asdict(result.reliability)
     return record
 
 
@@ -96,7 +102,8 @@ def _to_markdown(record: dict[str, Any]) -> str:
         f"_Committed {record['created_at']} — before the recommended sample is made._",
         "",
         "## Objective (frozen)",
-        f"- Maximize **{obj['property']}** (aggregation: {obj['aggregation']})",
+        f"- {obj.get('direction', 'maximize').capitalize()} **{obj['property']}** "
+        f"(aggregation: {obj['aggregation']})",
         f"- Input variable: `{obj['input_variable']}`",
         f"- Search bounds: {obj['search_bounds']}",
         "",
@@ -135,6 +142,16 @@ def _to_markdown(record: dict[str, Any]) -> str:
             f"{rob['recommended_x_spread']:.4g} "
             f"(tolerance {rob['tolerance']:.4g} of span {rob['search_span']:.4g})",
             f"- **{'STABLE' if rob['stable'] else 'UNSTABLE'}** — {verdict}",
+        ]
+    if "reliability" in record:
+        rel = record["reliability"]
+        lines += [
+            "",
+            "## Reliability (self-assessed at freeze time)",
+            f"- Level: **{rel['level'].upper()}** "
+            f"({rel['n_observations']} observations; leave-one-out "
+            f"{rel['loo_inside']}/{rel['loo_total']} inside the 95% band)",
+            f"- {rel['note']}",
         ]
     return "\n".join(lines) + "\n"
 

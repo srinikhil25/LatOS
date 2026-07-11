@@ -254,3 +254,92 @@ class TestInputVariablesEndpoint:
         by_name = {v["name"]: v for v in body}
         assert by_name["doping_pct"]["source"] == "synthesis"
         assert len(by_name["doping_pct"]["values"]) == 4
+
+
+class TestReliabilityGate:
+    def test_run_reports_exploratory_for_small_series(self, tmp_path: Path):
+        body = _run(_client(tmp_path))  # the 4-point TE fixture
+        assert body["reliability_level"] == "exploratory"
+        assert "4 measured points" in body["reliability_note"]
+        assert "Leave-one-out" in body["reliability_note"]
+
+    def test_freeze_records_reliability(self, tmp_path: Path):
+        client = _client(tmp_path)
+        body = client.post(
+            "/optimize/freeze",
+            json={"input_variable": "doping_pct", "target_property": "zt"},
+        ).json()
+        assert body["reliability_level"] == "exploratory"
+        # The written prereg JSON carries the same self-assessment.
+        import json as _json
+
+        record = _json.loads(Path(body["path"]).read_text(encoding="utf-8"))
+        assert record["reliability"]["level"] == "exploratory"
+        assert record["reliability"]["loo_total"] == 4
+
+
+class TestLoopCloser:
+    def _freeze(self, client: TestClient) -> str:
+        body = client.post(
+            "/optimize/freeze",
+            json={"input_variable": "doping_pct", "target_property": "zt"},
+        ).json()
+        return body["path"]
+
+    def test_list_prereg_empty_before_freeze(self, tmp_path: Path):
+        client = _client(tmp_path)
+        assert client.get("/optimize/prereg").json() == []
+
+    def test_freeze_then_list_shows_entry(self, tmp_path: Path):
+        client = _client(tmp_path)
+        self._freeze(client)
+        listed = client.get("/optimize/prereg").json()
+        assert len(listed) == 1
+        entry = listed[0]
+        assert entry["input_variable"] == "doping_pct"
+        assert entry["direction"] == "maximize"
+        assert entry["reliability_level"] == "exploratory"
+        assert entry["outcome"] is None
+
+    def test_validate_calibrated_and_no_improvement(self, tmp_path: Path):
+        client = _client(tmp_path)
+        path = self._freeze(client)
+        # The frozen prediction interval is wide (exploratory); a measured
+        # value near the prediction lands inside and does not beat 0.967.
+        v = client.post(
+            "/optimize/validate",
+            json={"prereg_path": path, "measured_value": 0.95},
+        ).json()
+        assert v["within_interval"] is True
+        assert v["improved"] is False
+        assert "within" in v["summary"].lower()
+
+    def test_validate_improvement(self, tmp_path: Path):
+        client = _client(tmp_path)
+        path = self._freeze(client)
+        v = client.post(
+            "/optimize/validate",
+            json={"prereg_path": path, "measured_value": 1.10},
+        ).json()
+        assert v["improved"] is True
+
+    def test_validate_persists_and_relist_attaches_outcome(self, tmp_path: Path):
+        client = _client(tmp_path)
+        path = self._freeze(client)
+        client.post(
+            "/optimize/validate",
+            json={"prereg_path": path, "measured_value": 0.95},
+        )
+        listed = client.get("/optimize/prereg").json()
+        assert len(listed) == 1  # the .outcome.json sibling is not a new row
+        assert listed[0]["outcome"]["within_interval"] is True
+        assert listed[0]["outcome"]["measured"] == 0.95
+
+    def test_validate_rejects_path_outside_project(self, tmp_path: Path):
+        client = _client(tmp_path)
+        self._freeze(client)
+        resp = client.post(
+            "/optimize/validate",
+            json={"prereg_path": str(tmp_path / "evil.json"), "measured_value": 1.0},
+        )
+        assert resp.status_code == 404

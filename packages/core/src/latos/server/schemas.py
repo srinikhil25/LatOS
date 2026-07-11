@@ -199,6 +199,11 @@ class OptimizeResult(BaseModel):
     input_variable: str
     target_property: str  # display label (e.g. "|zT − 1.0|" in target mode)
     objective: str = "maximize"  # direction actually optimized
+    # Self-assessed trustworthiness of the model's intervals, from the
+    # data itself (count tier + leave-one-out): exploratory | indicative
+    # | calibrated.
+    reliability_level: str = "unknown"
+    reliability_note: str = ""
     # Posterior over the search range, for the curve.
     grid_x: list[float]
     grid_mean: list[float]
@@ -230,6 +235,58 @@ class FreezeResult(BaseModel):
     prior_best: float
     robustness_stable: bool
     converged: bool
+    reliability_level: str = "unknown"  # exploratory | indicative | calibrated
+    reliability_note: str = ""
+
+
+class OutcomeVerdictOut(BaseModel):
+    """The score of a measured outcome against a frozen prediction.
+
+    `within_interval` is the calibration criterion (did the measurement
+    land inside the committed 95% interval?); `improved` is the
+    improvement criterion (did it beat the prior best, in the optimized
+    direction?).
+    """
+
+    measured: float
+    predicted_mean: float
+    predictive_interval_95: tuple[float, float]
+    prior_best: float
+    direction: str
+    within_interval: bool
+    improved: bool
+    signed_error: float
+    absolute_error: float
+    relative_error: float | None
+    summary: str
+    validated_at: str
+
+
+class PreregSummary(BaseModel):
+    """GET /optimize/prereg — one frozen pre-registration + its outcome."""
+
+    path: str
+    created_at: str
+    input_variable: str
+    property_name: str
+    direction: str
+    recommended_x: float
+    predicted_mean: float
+    predictive_interval_95: tuple[float, float]
+    prior_best: float
+    reliability_level: str
+    outcome: OutcomeVerdictOut | None = None  # None until the sample is validated
+
+
+class ValidateOutcomeRequest(BaseModel):
+    """POST /optimize/validate — score a measured value against a record.
+
+    `measured_value` must be in the same units as the frozen prediction
+    (the property the freeze optimized).
+    """
+
+    prereg_path: str
+    measured_value: float
 
 
 class MeasurementSummary(BaseModel):

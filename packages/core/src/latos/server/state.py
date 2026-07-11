@@ -9,6 +9,7 @@ session handling — the persisted truth lives in the project's own
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 from collections.abc import Callable
@@ -117,6 +118,17 @@ class ServerState:
                     self.error = f"{type(exc).__name__}: {exc}"
                 self._queue.put(TerminalEvent(IngestStatus.ERROR, self.error))
                 return
+            # Apply the researcher's synthesis log (if one sits next to the
+            # raw files) now that the project's samples exist. A bad log
+            # must never fail an otherwise-good ingestion.
+            try:
+                from latos.server.synthesis_log import apply_log  # noqa: PLC0415
+
+                apply_log(root, result.project)
+            except Exception:
+                logging.getLogger("latos.synthesis_log").exception(
+                    "applying the synthesis log failed"
+                )
             with self._lock:
                 self.status = IngestStatus.DONE
                 self.result = result

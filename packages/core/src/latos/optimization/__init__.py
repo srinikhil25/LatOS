@@ -18,23 +18,39 @@ from latos.optimization.engine import (
     OptimizationError,
     OptimizationResult,
     Recommendation,
+    ReliabilityReport,
     RobustnessEntry,
     RobustnessReport,
     length_scale_robustness,
     optimize,
 )
 from latos.optimization.prereg import build_record, freeze, write_record
+from latos.optimization.validate import (
+    OutcomeVerdict,
+    PreregEntry,
+    list_preregistrations,
+    outcome_path_for,
+    validate_outcome,
+    write_outcome,
+)
 
 __all__ = [
     "BoConfig",
     "OptimizationError",
     "OptimizationResult",
+    "OutcomeVerdict",
+    "PreregEntry",
     "Recommendation",
+    "ReliabilityReport",
     "RobustnessEntry",
     "RobustnessReport",
     "build_record",
     "freeze",
     "length_scale_robustness",
+    "list_preregistrations",
     "optimize",
+    "outcome_path_for",
+    "validate_outcome",
+    "write_outcome",
     "write_record",
 ]

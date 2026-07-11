@@ -67,6 +67,7 @@ __all__ = [
     "OptimizationError",
     "OptimizationResult",
     "Recommendation",
+    "ReliabilityReport",
     "RobustnessEntry",
     "RobustnessReport",
     "length_scale_robustness",
@@ -88,6 +89,18 @@ _N_RESTARTS = 8  # marginal-likelihood restarts when the length-scale is fitted
 # the length-scale bounds were designed for.
 _SPAN_UNITS = 4.0
 _DIRECTIONS = ("maximize", "minimize")
+
+# Reliability tiers by observation count, grounded in the retrospective
+# calibration study on real experimental data (P3HT/CNT, 233 samples):
+# the nominal 95% predictive interval actually covered ~50% of held-out
+# points when fit to 6 points, ~85% at 25, and 92% at 70+. Below these
+# counts the model is over-confident and its intervals must be read as
+# exploratory, not settled.
+_RELIABILITY_INDICATIVE_N = 10  # below this: "exploratory"
+_RELIABILITY_CALIBRATED_N = 25  # at or above this: "calibrated"
+# A leave-one-out coverage this poor forces "exploratory" regardless of n —
+# the model demonstrably cannot predict its own data points.
+_LOO_FORCE_EXPLORATORY = 0.5
 # A recommendation is "robust" if it moves by <= this fraction of the search
 # span as the kernel length-scale is varied (one-line kernel-artifact defense).
 _ROBUSTNESS_TOL_FRAC = 0.1
@@ -150,6 +163,32 @@ class BoConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ReliabilityReport:
+    """How much the model's own uncertainty can be trusted — from the data.
+
+    Two independent signals combine into `level`:
+
+    * **Observation count** — the calibration study's tiers (see the
+      constants above): "exploratory" below 10 points, "indicative" from
+      10, "calibrated" from 25.
+    * **Leave-one-out self-check** — refit without each point in turn and
+      ask whether the held-out measurement lands inside its own 95%
+      predictive interval. Coverage below 50% forces "exploratory": the
+      model demonstrably cannot predict its own data.
+
+    A small-n LOO *success* is weak evidence (few folds), but a small-n
+    LOO *failure* is strong evidence — hence the asymmetric rule.
+    """
+
+    level: str  # "exploratory" | "indicative" | "calibrated"
+    n_observations: int
+    loo_inside: int  # held-out points inside their 95% predictive interval
+    loo_total: int
+    loo_coverage: float
+    note: str  # plain-language explanation for the UI / prereg record
+
+
+@dataclass(frozen=True, slots=True)
 class OptimizationResult:
     """Everything the Optimize screen needs to render the loop.
 
@@ -177,6 +216,9 @@ class OptimizationResult:
     noise_threshold: float  # measurement-noise floor EI is compared against
     converged: bool
     config: BoConfig  # frozen record of the exact BO configuration
+    # How trustworthy the intervals are, from the data itself. None only
+    # when the caller skipped the assessment (e.g. the robustness sweep).
+    reliability: ReliabilityReport | None = None
 
 
 def _build_gp(
@@ -231,6 +273,76 @@ def _expected_improvement(
     return np.asarray(ei, dtype=float)
 
 
+def _assess_reliability(
+    x_norm: np.ndarray,
+    y: np.ndarray,
+    *,
+    rel_noise: float,
+    length_scale: float,
+    seed: int,
+) -> ReliabilityReport:
+    """Count-tier + leave-one-out reliability of the model's intervals.
+
+    Each LOO fold refits with the full fit's length-scale held FIXED — the
+    cheap, standard approximation (re-optimizing hyperparameters per fold
+    buys little at these sizes and costs n × restarts GP fits). The check
+    asks the only question that matters: does the model's own 95%
+    predictive interval contain the point it didn't see?
+    """
+    if not np.isfinite(length_scale):
+        length_scale = _LS_INIT
+    n = int(x_norm.size)
+    inside = 0
+    for i in range(n):
+        mask = np.arange(n) != i
+        gp, noise_std = _build_gp(y[mask], rel_noise, length_scale, seed)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            gp.fit(x_norm[mask].reshape(-1, 1), y[mask])
+        mu, sd = gp.predict(np.asarray([[x_norm[i]]]), return_std=True)
+        half = _CI95 * float(np.sqrt(sd[0] ** 2 + noise_std**2))
+        if abs(float(y[i]) - float(mu[0])) <= half:
+            inside += 1
+    coverage = inside / n if n else 0.0
+
+    if n < _RELIABILITY_INDICATIVE_N:
+        level = "exploratory"
+        note = (
+            f"Exploratory: only {n} measured points. Intervals from so few points "
+            f"are typically over-confident — treat the recommendation as a guide, "
+            f"not a settled answer. Leave-one-out: {inside}/{n} inside the 95% band."
+        )
+    elif n < _RELIABILITY_CALIBRATED_N:
+        level = "indicative"
+        note = (
+            f"Indicative: {n} measured points. The trend is meaningful but the "
+            f"95% intervals may still be somewhat narrow. "
+            f"Leave-one-out: {inside}/{n} inside the 95% band."
+        )
+    else:
+        level = "calibrated"
+        note = (
+            f"Calibrated: {n} measured points — enough for trustworthy intervals "
+            f"per the calibration study. Leave-one-out: {inside}/{n} inside the "
+            f"95% band."
+        )
+    if coverage < _LOO_FORCE_EXPLORATORY and level != "exploratory":
+        level = "exploratory"
+        note = (
+            f"Exploratory: leave-one-out coverage is only {inside}/{n} — the model "
+            f"cannot predict its own data points, so its intervals should not be "
+            f"trusted regardless of the data count."
+        )
+    return ReliabilityReport(
+        level=level,
+        n_observations=n,
+        loo_inside=inside,
+        loo_total=n,
+        loo_coverage=round(coverage, 3),
+        note=note,
+    )
+
+
 def optimize(
     x: np.ndarray,
     y: np.ndarray,
@@ -246,6 +358,7 @@ def optimize(
     seed: int = 0,
     objective_aggregation: str = "peak",
     created_at: datetime | None = None,
+    with_reliability: bool = True,
 ) -> OptimizationResult:
     """Run one round of Bayesian optimization over a 1-D parameter.
 
@@ -274,6 +387,10 @@ def optimize(
         objective_aggregation: How each sample's `y` was reduced (recorded
             in the frozen config for auditability).
         created_at: Timestamp for the frozen config; defaults to now (UTC).
+        with_reliability: Run the leave-one-out reliability self-check and
+            attach a `ReliabilityReport` (default). The robustness sweep
+            passes False — n extra GP fits per swept length-scale would
+            buy nothing there.
 
     Returns:
         An `OptimizationResult` with the posterior, the recommendation,
@@ -370,6 +487,16 @@ def optimize(
         created_at=created_at if created_at is not None else datetime.now(UTC),
     )
 
+    reliability: ReliabilityReport | None = None
+    if with_reliability:
+        reliability = _assess_reliability(
+            x_norm,
+            y_int,
+            rel_noise=rel_noise,
+            length_scale=config.length_scale,
+            seed=seed,
+        )
+
     return OptimizationResult(
         input_name=input_name,
         target_name=target_name,
@@ -386,6 +513,7 @@ def optimize(
         noise_threshold=noise_threshold,
         converged=converged,
         config=config,
+        reliability=reliability,
     )
 
 
@@ -451,6 +579,7 @@ def length_scale_robustness(
             xi=xi,
             grid_size=grid_size,
             seed=seed,
+            with_reliability=False,
         )
         rec = result.recommendation
         entries.append(

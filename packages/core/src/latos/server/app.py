@@ -30,6 +30,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 
+from latos import optimization
 from latos.analysis.base_analyzer import AnalyzerInputs
 from latos.analysis.registry import default_registry as analyzer_registry
 from latos.analysis.transport import TransportError
@@ -67,6 +68,8 @@ from latos.server.schemas import (
     OptimizationDataset,
     OptimizeResult,
     OptimizeRunRequest,
+    OutcomeVerdictOut,
+    PreregSummary,
     ProjectSummary,
     RecommendationOut,
     RemoveMeasurementsRequest,
@@ -78,6 +81,7 @@ from latos.server.schemas import (
     SkippedPoint,
     SplitMeasurementsRequest,
     ThermoelectricResult,
+    ValidateOutcomeRequest,
 )
 from latos.server.state import (
     IngestStatus,
@@ -592,6 +596,8 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             input_variable=res.input_name,
             target_property=res.target_name,
             objective=body.objective,
+            reliability_level=res.reliability.level if res.reliability else "unknown",
+            reliability_note=res.reliability.note if res.reliability else "",
             grid_x=list(res.grid_x),
             grid_mean=list(res.grid_mean),
             grid_ci95=list(res.grid_ci95),
@@ -617,6 +623,31 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
         the recommended sample is made, so it cannot be retuned afterwards.
         """
         return _freeze_recommendation(state, body)
+
+    @app.get("/optimize/prereg")
+    def list_prereg() -> list[PreregSummary]:
+        """Every frozen pre-registration for the open project, newest first.
+
+        Closes the loop's front half: each entry carries the committed
+        prediction and, once its sample is measured and validated, the
+        recorded outcome verdict.
+        """
+        if state.root is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        return [
+            _prereg_summary(e) for e in optimization.list_preregistrations(state.root)
+        ]
+
+    @app.post("/optimize/validate")
+    def validate_prereg(body: ValidateOutcomeRequest) -> OutcomeVerdictOut:
+        """Score a measured outcome against a frozen pre-registration.
+
+        Reads the frozen record, judges calibration (inside the 95%
+        interval?) and improvement (beat the prior best, in the optimized
+        direction?), and writes the verdict to a ``*.outcome.json`` sibling
+        so prediction and outcome stay side by side and auditable.
+        """
+        return _validate_prereg(state, body)
 
 
 def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> FreezeResult:
@@ -653,6 +684,8 @@ def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> Free
         prior_best=res.best_y,
         robustness_stable=robustness.stable,
         converged=res.converged,
+        reliability_level=res.reliability.level if res.reliability else "unknown",
+        reliability_note=res.reliability.note if res.reliability else "",
     )
 
 
@@ -740,6 +773,91 @@ def _assemble_optimization(
         bounds=bounds,
         target_label=target_label,
         direction=direction,
+    )
+
+
+def _validate_prereg(state: ServerState, body: ValidateOutcomeRequest) -> OutcomeVerdictOut:
+    """Score a measured outcome against a frozen record and persist the verdict.
+
+    The record path is confined to this project's ``.latos/prereg/``
+    directory so the endpoint can only read/write inside the open project.
+    """
+    if state.root is None:
+        raise HTTPException(status_code=404, detail="No project is open")
+    expected_dir = (state.root / ".latos" / "prereg").resolve()
+    try:
+        resolved = Path(body.prereg_path).resolve()
+        in_dir = resolved.parent == expected_dir
+    except OSError:
+        in_dir = False
+    if not in_dir or not resolved.is_file():
+        raise HTTPException(
+            status_code=404, detail="Unknown pre-registration for this project"
+        )
+    try:
+        record = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read the record: {exc}") from exc
+    verdict = optimization.validate_outcome(record, body.measured_value)
+    optimization.write_outcome(resolved, verdict)
+    return _verdict_out(verdict)
+
+
+def _prereg_summary(entry: optimization.PreregEntry) -> PreregSummary:
+    """Map a core PreregEntry to the API shape."""
+    return PreregSummary(
+        path=entry.path,
+        created_at=entry.created_at,
+        input_variable=entry.input_variable,
+        property_name=entry.property_name,
+        direction=entry.direction,
+        recommended_x=entry.recommended_x,
+        predicted_mean=entry.predicted_mean,
+        predictive_interval_95=entry.predictive_interval_95,
+        prior_best=entry.prior_best,
+        reliability_level=entry.reliability_level,
+        outcome=(_verdict_out_from_dict(entry.outcome) if entry.outcome else None),
+    )
+
+
+def _verdict_out(verdict: optimization.OutcomeVerdict) -> OutcomeVerdictOut:
+    """Map a core OutcomeVerdict to the API shape."""
+    return OutcomeVerdictOut(
+        measured=verdict.measured,
+        predicted_mean=verdict.predicted_mean,
+        predictive_interval_95=verdict.predictive_interval_95,
+        prior_best=verdict.prior_best,
+        direction=verdict.direction,
+        within_interval=verdict.within_interval,
+        improved=verdict.improved,
+        signed_error=verdict.signed_error,
+        absolute_error=verdict.absolute_error,
+        relative_error=verdict.relative_error,
+        summary=verdict.summary,
+        validated_at=verdict.validated_at,
+    )
+
+
+def _verdict_out_from_dict(data: dict[str, object]) -> OutcomeVerdictOut:
+    """Rebuild an OutcomeVerdictOut from a persisted outcome payload."""
+    interval = data.get("predictive_interval_95") or [0.0, 0.0]
+    return OutcomeVerdictOut(
+        measured=float(data["measured"]),  # type: ignore[arg-type]
+        predicted_mean=float(data["predicted_mean"]),  # type: ignore[arg-type]
+        predictive_interval_95=(float(interval[0]), float(interval[1])),  # type: ignore[index]
+        prior_best=float(data["prior_best"]),  # type: ignore[arg-type]
+        direction=str(data.get("direction", "maximize")),
+        within_interval=bool(data["within_interval"]),
+        improved=bool(data["improved"]),
+        signed_error=float(data["signed_error"]),  # type: ignore[arg-type]
+        absolute_error=float(data["absolute_error"]),  # type: ignore[arg-type]
+        relative_error=(
+            float(data["relative_error"])  # type: ignore[arg-type]
+            if data.get("relative_error") is not None
+            else None
+        ),
+        summary=str(data.get("summary", "")),
+        validated_at=str(data.get("validated_at", "")),
     )
 
 
