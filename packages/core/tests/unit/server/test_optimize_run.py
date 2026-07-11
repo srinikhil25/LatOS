@@ -185,3 +185,72 @@ class TestFreeze:
             json={"input_variable": "doping_pct", "target_property": "zt"},
         )
         assert resp.status_code == 409
+
+
+# ─── Objective modes + input-variable listing (OP2/OP3) ─────────────
+
+
+class TestObjectives:
+    def test_minimize_reports_lowest(self, tmp_path: Path):
+        client = _client(tmp_path)
+        body = client.post(
+            "/optimize/run",
+            json={
+                "input_variable": "doping_pct",
+                "target_property": "zt",
+                "objective": "minimize",
+            },
+        ).json()
+        assert body["objective"] == "minimize"
+        assert body["best_x"] == 1.0  # zt = 0.362, the lowest peak
+        assert body["best_y"] == 0.362
+
+    def test_target_mode_transforms_and_relabels(self, tmp_path: Path):
+        client = _client(tmp_path)
+        body = client.post(
+            "/optimize/run",
+            json={
+                "input_variable": "doping_pct",
+                "target_property": "zt",
+                "objective": "target",
+                "target_value": 0.5,
+            },
+        ).json()
+        assert body["target_property"] == "|zt - 0.5|"
+        # Distances: CS 0.087, CSCBI-1 0.138, CSCBI-3 0.467, CSCBI-5 0.018.
+        assert body["best_x"] == 5.0
+        assert abs(body["best_y"] - 0.018) < 1e-9
+
+    def test_target_without_value_is_400(self, tmp_path: Path):
+        client = _client(tmp_path)
+        resp = client.post(
+            "/optimize/run",
+            json={
+                "input_variable": "doping_pct",
+                "target_property": "zt",
+                "objective": "target",
+            },
+        )
+        assert resp.status_code == 400
+        assert "target_value" in resp.json()["detail"]
+
+    def test_unknown_objective_is_400(self, tmp_path: Path):
+        client = _client(tmp_path)
+        resp = client.post(
+            "/optimize/run",
+            json={
+                "input_variable": "doping_pct",
+                "target_property": "zt",
+                "objective": "upward",
+            },
+        )
+        assert resp.status_code == 400
+
+
+class TestInputVariablesEndpoint:
+    def test_lists_synthesis_variables_with_values(self, tmp_path: Path):
+        client = _client(tmp_path)
+        body = client.get("/optimize/inputs").json()
+        by_name = {v["name"]: v for v in body}
+        assert by_name["doping_pct"]["source"] == "synthesis"
+        assert len(by_name["doping_pct"]["values"]) == 4

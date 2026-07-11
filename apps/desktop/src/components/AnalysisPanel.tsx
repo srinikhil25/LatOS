@@ -63,7 +63,7 @@ export function AnalysisPanel({ measurementId }: { measurementId: string }) {
   if (results === null) {
     return <section className="text-xs text-secondary">Running analysis…</section>;
   }
-  // No analyzer applies to this technique (e.g. raw image, Hall).
+  // No analyzer applies to this technique (e.g. raw TEM/SEM images).
   if (results.length === 0) return null;
 
   return (

@@ -46,6 +46,11 @@ __all__ = ["HallXlsParser"]
 # also carries dozens of raw per-contact voltages, which are noise here).
 # Maps the parser's normalized metadata key → a clean, unit-tagged
 # feature name. Only keys present with a numeric value are emitted.
+#
+# The two *cross-configuration* Hall coefficients (the AC and BD van der
+# Pauw diagonals) are included as diagnostics: when they disagree in
+# sign, the averaged Hall coefficient — and everything derived from it
+# (carrier type, n, μ) — is noise, and the analyzer flags it.
 _HALL_FEATURE_KEYS: dict[str, str] = {
     "ccc_bulk_1_cm": "carrier_concentration_cm3",
     "mobility_cm_v_s": "mobility_cm2_vs",
@@ -53,6 +58,8 @@ _HALL_FEATURE_KEYS: dict[str, str] = {
     "conductivity_1_cm": "conductivity_s_cm",
     "avg_hall_coefficient_cm_c": "hall_coefficient_cm3_c",
     "sheet_resistance": "sheet_resistance_ohm_sq",
+    "ac_cross_hall_coefficient_cm_c": "hall_ac_cross_cm3_c",
+    "bd_cross_hall_coefficient_cm_c": "hall_bd_cross_cm3_c",
 }
 
 
@@ -84,7 +91,10 @@ class HallXlsParser(BaseParser):
     """Parser for Hall-effect `.xls` workbooks (single-temperature export)."""
 
     name: ClassVar[str] = "hall-xls"
-    version: ClassVar[str] = "1.1.0"
+    # 1.2.0: surfaces the AC/BD cross-configuration Hall coefficients as
+    # features so the analyzer can judge whether the averaged Hall signal
+    # is trustworthy.
+    version: ClassVar[str] = "1.2.0"
     technique: ClassVar[Technique] = Technique.HALL
     supported_extensions: ClassVar[tuple[str, ...]] = (".xls",)
 

@@ -24,7 +24,28 @@ if TYPE_CHECKING:
 Arrays = dict[str, "NDArray[np.float64]"]
 LoadArrays = Callable[[str], Arrays]
 
-__all__ = ["sample_zt"]
+__all__ = ["sample_zt", "seebeck_sign"]
+
+
+def seebeck_sign(sample: Sample, load_arrays: LoadArrays) -> float | None:
+    """Sign of the sample's Seebeck coefficient: +1 (p-type) / -1 (n-type).
+
+    Read from the sample's Resistivity/Seebeck measurement (median over
+    the temperature sweep — robust to a noisy endpoint). None when the
+    sample has no R&S data or the median is exactly zero. Used as the
+    independent carrier-type determination the Hall analyzer checks
+    itself against.
+    """
+    for m in sample.measurements:
+        if m.technique is not Technique.THERMOELECTRIC:
+            continue
+        arrays = load_arrays(m.id)
+        s = arrays.get("seebeck_uv_k")
+        if s is not None and len(s) > 0:
+            median = float(np.median(s))
+            if median != 0.0:
+                return 1.0 if median > 0 else -1.0
+    return None
 
 
 def _is_lfa(arrays: Arrays) -> bool:

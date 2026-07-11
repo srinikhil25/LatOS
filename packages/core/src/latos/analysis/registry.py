@@ -114,21 +114,34 @@ class AnalyzerRegistry:
 
 
 def default_registry() -> AnalyzerRegistry:
-    """Build an `AnalyzerRegistry` populated with every Stage 3 analyzer.
+    """Build an `AnalyzerRegistry` populated with every production analyzer.
 
     Order matters only for UI display — every applicable analyzer runs
     independently, so registration order doesn't change correctness.
 
     Currently registers:
     - `UvDrsTaucAnalyzer`: band gap from UV-DRS Kubelka-Munk + Tauc plot.
-    - `XrdPeakFitAnalyzer`: SNIP-baselined pseudo-Voigt peak fit for XRD.
+    - `XrdPeakFitAnalyzer`: SNIP-baselined pseudo-Voigt peak fit for XRD,
+      with Bragg d-spacings and Scherrer crystallite sizes.
+    - `EdsCompositionAnalyzer`: element ID + semi-quantitative composition.
+    - `HallMetricsAnalyzer`: carrier type / concentration / mobility with
+      a σ = q·n·μ internal-consistency check.
+    - `XpsRegionsAnalyzer`: apex peak binding energies per region, with the
+      C 1s charge-reference offset.
+    - `TransportSummaryAnalyzer`: per-measurement R&S (Seebeck sign, power
+      factor) and LFA (κ range) summaries; sample-level zT stays in
+      `transport_data.sample_zt`.
 
-    Future stages will add `transport-zt`, XPS peak deconvolution, etc.
+    Microscopy (particle-size from TEM/SEM images) is deliberately absent —
+    it needs the Stage 5 vision work, not a numeric kernel.
     """
     # Local imports keep the module light when only the registry types
     # are needed (e.g. by tests that build their own one-analyzer registry).
     from latos.analysis.eds.composition import EdsCompositionAnalyzer  # noqa: PLC0415
+    from latos.analysis.hall.metrics import HallMetricsAnalyzer  # noqa: PLC0415
+    from latos.analysis.transport.summary import TransportSummaryAnalyzer  # noqa: PLC0415
     from latos.analysis.uv_drs.tauc import UvDrsTaucAnalyzer  # noqa: PLC0415
+    from latos.analysis.xps.regions import XpsRegionsAnalyzer  # noqa: PLC0415
     from latos.analysis.xrd.peak_fit import XrdPeakFitAnalyzer  # noqa: PLC0415
 
     return AnalyzerRegistry(
@@ -136,5 +149,8 @@ def default_registry() -> AnalyzerRegistry:
             UvDrsTaucAnalyzer(),
             XrdPeakFitAnalyzer(),
             EdsCompositionAnalyzer(),
+            HallMetricsAnalyzer(),
+            XpsRegionsAnalyzer(),
+            TransportSummaryAnalyzer(),
         ],
     )

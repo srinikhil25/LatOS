@@ -154,7 +154,7 @@ class TestClassAttributes:
     def test_metadata(self) -> None:
         a = XrdPeakFitAnalyzer()
         assert a.name == "xrd-peak-fit"
-        assert a.version == "1.0.0"
+        assert a.version == "1.1.0"
         assert Technique.XRD in a.accepts_techniques
         # User-facing param keys present.
         for key in (
@@ -163,6 +163,8 @@ class TestClassAttributes:
             "min_peak_distance_2theta",
             "fit_window_fwhm_multiplier",
             "max_peaks",
+            "wavelength_angstrom",
+            "scherrer_k",
         ):
             assert key in a.default_params, f"{key} missing from default_params"
 
@@ -582,3 +584,28 @@ def test_default_registry_includes_xrd_peak_fit() -> None:
     analyzer = reg.get("xrd-peak-fit")
     assert analyzer is not None
     assert Technique.XRD in analyzer.accepts_techniques
+
+
+# ─── Bragg d-spacings + Scherrer sizes (1.1.0) ──────────────────────
+
+
+class TestBraggScherrer:
+    def test_known_silicon_111(self) -> None:
+        """Si (111) at 28.44° 2θ with Cu Kα₁ → d ≈ 3.135 Å; 0.2° FWHM → ~41 nm."""
+        from latos.analysis.xrd.peak_fit import _bragg_and_scherrer
+
+        d, sizes = _bragg_and_scherrer(
+            [28.44], [0.2], wavelength_angstrom=1.5406, k=0.9,
+        )
+        assert d[0] == pytest.approx(3.135, abs=0.005)
+        assert sizes[0] == pytest.approx(41.0, abs=1.5)
+
+    def test_degenerate_peaks_skipped(self) -> None:
+        from latos.analysis.xrd.peak_fit import _bragg_and_scherrer
+
+        d, sizes = _bragg_and_scherrer(
+            [28.44, 0.0, 30.0], [0.2, 0.2, 0.0], wavelength_angstrom=1.5406, k=0.9,
+        )
+        # Zero-center and zero-FWHM peaks contribute nothing.
+        assert len(d) == 1
+        assert len(sizes) == 1

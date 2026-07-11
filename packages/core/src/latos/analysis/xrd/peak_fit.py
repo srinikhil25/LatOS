@@ -96,6 +96,7 @@ References:
 
 from __future__ import annotations
 
+import math
 from typing import Any, ClassVar
 
 import numpy as np
@@ -163,7 +164,9 @@ class XrdPeakFitAnalyzer(BaseAnalyzer):
     """
 
     name: ClassVar[str] = "xrd-peak-fit"
-    version: ClassVar[str] = "1.0.0"
+    # 1.1.0: adds Bragg d-spacings + Scherrer crystallite-size estimates
+    # derived from the fitted centers/FWHMs.
+    version: ClassVar[str] = "1.1.0"
     accepts_techniques: ClassVar[tuple[Technique, ...]] = (Technique.XRD,)
     default_params: ClassVar[dict[str, Any]] = {
         # SNIP baseline. max_half_window expressed in 2θ degrees;
@@ -198,6 +201,11 @@ class XrdPeakFitAnalyzer(BaseAnalyzer):
         # noise-driven storm; the cap surfaces a warning rather than
         # churning through hundreds of futile fits.
         "max_peaks": 80,
+        # X-ray wavelength for Bragg d-spacings and Scherrer sizes.
+        # Cu Kα₁ by default — the overwhelmingly common lab anode.
+        "wavelength_angstrom": 1.5406,
+        # Scherrer shape factor K (0.9 for roughly spherical crystallites).
+        "scherrer_k": 0.9,
     }
 
     # ─── accepts ─────────────────────────────────────────────────────
@@ -481,6 +489,29 @@ class XrdPeakFitAnalyzer(BaseAnalyzer):
                 ),
             )
 
+        # 10. Bragg d-spacings and Scherrer crystallite sizes from the
+        # fitted centers/FWHMs. λ defaults to Cu Kα₁; without an
+        # instrumental-broadening correction the Scherrer number is a
+        # lower-bound estimate, and we say so.
+        wavelength_a = float(params.get("wavelength_angstrom", 1.5406))
+        scherrer_k = float(params.get("scherrer_k", 0.9))
+        d_spacings, sizes_nm = _bragg_and_scherrer(
+            centers, fwhms, wavelength_angstrom=wavelength_a, k=scherrer_k,
+        )
+        if sizes_nm:
+            issues.append(
+                ValidationIssue(
+                    field="crystallite_size",
+                    severity=Severity.INFO,
+                    message=(
+                        f"Scherrer sizes assume λ = {wavelength_a} Å (Cu K-alpha1) and "
+                        "no instrumental-broadening correction — treat as a lower-bound "
+                        "estimate."
+                    ),
+                    detected_at=utc_now(),
+                ),
+            )
+
         outputs: dict[str, Any] = {
             "n_peaks": len(centers),
             "peak_centers_2theta": centers,
@@ -488,6 +519,11 @@ class XrdPeakFitAnalyzer(BaseAnalyzer):
             "peak_fwhms_2theta": fwhms,
             "peak_areas": areas,
             "peak_fractions": fractions,
+            "d_spacings_angstrom": d_spacings,
+            "scherrer_sizes_nm": sizes_nm,
+            "mean_crystallite_size_nm": (
+                round(float(np.mean(sizes_nm)), 1) if sizes_nm else None
+            ),
             "r_squared": float(r_squared),
             "reduced_chi_square": float(reduced_chi_square),
             "noise_sigma_estimate": float(sigma_noise),
@@ -511,6 +547,36 @@ class XrdPeakFitAnalyzer(BaseAnalyzer):
 
 
 # ─── Module helpers ─────────────────────────────────────────────────
+def _bragg_and_scherrer(
+    centers_2theta: list[float],
+    fwhms_2theta: list[float],
+    *,
+    wavelength_angstrom: float,
+    k: float,
+) -> tuple[list[float], list[float]]:
+    """Per-peak Bragg d-spacings (Å) and Scherrer crystallite sizes (nm).
+
+    Bragg: d = λ / (2·sin θ).  Scherrer: L = K·λ / (β·cos θ), with β the
+    FWHM in radians of 2θ. Peaks with a non-positive or out-of-range
+    center/FWHM contribute nothing rather than a garbage number.
+    """
+    max_2theta_deg = 180.0  # a diffraction angle past this is meaningless
+    d_spacings: list[float] = []
+    sizes_nm: list[float] = []
+    for center, fwhm in zip(centers_2theta, fwhms_2theta, strict=True):
+        if not 0.0 < center < max_2theta_deg or fwhm <= 0.0:
+            continue
+        theta_rad = math.radians(center / 2.0)
+        sin_t, cos_t = math.sin(theta_rad), math.cos(theta_rad)
+        if sin_t <= 0.0 or cos_t <= 0.0:
+            continue
+        d_spacings.append(round(wavelength_angstrom / (2.0 * sin_t), 4))
+        beta_rad = math.radians(fwhm)
+        size_angstrom = k * wavelength_angstrom / (beta_rad * cos_t)
+        sizes_nm.append(round(size_angstrom / 10.0, 1))
+    return d_spacings, sizes_nm
+
+
 def _empirical_fwhm(*, sigma: float, fraction: float) -> float:
     """Compute the true FWHM of an lmfit pseudo-Voigt with given σ, η.
 

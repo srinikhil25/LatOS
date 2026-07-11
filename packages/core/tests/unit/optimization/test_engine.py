@@ -178,3 +178,78 @@ class TestRobustness:
             length_scales=(2.0, 2.5, 3.0),
         )
         assert report.stable == (report.recommended_x_spread <= report.tolerance)
+
+
+# ─── Objective direction + X normalization (OP1) ────────────────────
+
+
+class TestDirection:
+    def test_minimize_reports_lowest(self):
+        import numpy as _np
+        import pytest as _pytest
+
+        from latos.optimization.engine import optimize as _optimize
+
+        x = _np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        y = (x - 3.0) ** 2 + 0.2  # loss-like curve, minimum at x = 3
+        res = _optimize(
+            x, y, bounds=(1.0, 5.0), input_name="d", target_name="loss",
+            direction="minimize",
+        )
+        assert res.best_x == 3.0
+        assert res.best_y == _pytest.approx(0.2)
+        assert res.config.direction == "minimize"
+        # Displayed posterior stays in real units: the curve dips near x = 3.
+        i_min = int(_np.argmin(res.grid_mean))
+        assert 2.0 <= res.grid_x[i_min] <= 4.0
+
+    def test_invalid_direction_raises(self):
+        import numpy as _np
+        import pytest as _pytest
+
+        from latos.optimization.engine import OptimizationError as _Err
+        from latos.optimization.engine import optimize as _optimize
+
+        with _pytest.raises(_Err, match="direction"):
+            _optimize(
+                _np.array([1.0, 2.0, 3.0]), _np.array([1.0, 2.0, 1.0]),
+                bounds=(1.0, 3.0), input_name="d", target_name="y",
+                direction="upward",
+            )
+
+
+class TestXNormalization:
+    def test_large_scale_input_fits(self):
+        """Carrier-concentration-scale inputs (~1e19) must not degenerate."""
+        import numpy as _np
+
+        from latos.optimization.engine import optimize as _optimize
+
+        x = _np.array([1e19, 3e19, 5e19])
+        y = _np.array([0.4, 0.98, 0.5])
+        res = _optimize(
+            x, y, bounds=(1e19, 5e19), input_name="n", target_name="zt",
+        )
+        assert 1e19 <= res.recommendation.x <= 5e19
+        # The GP actually models the hump (an unnormalized fit flat-lines).
+        assert float(_np.std(res.grid_mean)) > 0.05
+
+    def test_scale_invariance_of_recommendation(self):
+        """The same shape at doping-scale and 1e19-scale x picks the same spot."""
+        import numpy as _np
+        import pytest as _pytest
+
+        from latos.optimization.engine import optimize as _optimize
+
+        y = _np.array([0.4, 0.98, 0.5])
+        small = _optimize(
+            _np.array([1.0, 3.0, 5.0]), y, bounds=(1.0, 5.0),
+            input_name="d", target_name="zt",
+        )
+        big = _optimize(
+            _np.array([1e19, 3e19, 5e19]), y, bounds=(1e19, 5e19),
+            input_name="n", target_name="zt",
+        )
+        rel_small = (small.recommendation.x - 1.0) / 4.0
+        rel_big = (big.recommendation.x - 1e19) / 4e19
+        assert rel_big == _pytest.approx(rel_small, abs=0.02)

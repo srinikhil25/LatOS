@@ -152,11 +152,35 @@ class OptimizationDataset(BaseModel):
 
 
 class OptimizeRunRequest(BaseModel):
-    """POST /optimize/run — run one BO round over a chosen variable/target."""
+    """POST /optimize/run — run one BO round over a chosen variable/target.
+
+    `objective` selects what "best" means:
+    - "maximize" (default) / "minimize" — direction of optimization.
+    - "target" — reach `target_value`; internally the distance
+      |y − target_value| is minimized, and the result is labelled as a
+      distance so the chart and verdict stay interpretable.
+    `at_temperature_k` applies only to the derived-zT target: optimize zT
+    at that temperature instead of the peak.
+    """
 
     input_variable: str
     target_property: str
     bounds: tuple[float, float] | None = None  # default: observed data range
+    objective: str = "maximize"  # "maximize" | "minimize" | "target"
+    target_value: float | None = None  # required when objective == "target"
+    at_temperature_k: float | None = None  # derived-zT only
+
+
+class InputVariableOut(BaseModel):
+    """One available BO input axis with its per-sample values.
+
+    `source` is "synthesis" (researcher-entered, editable) or "measured"
+    (from an instrument, e.g. Hall carrier concentration — read-only).
+    """
+
+    name: str
+    source: str
+    values: dict[str, float]  # sample_id -> value
 
 
 class RecommendationOut(BaseModel):
@@ -173,7 +197,8 @@ class OptimizeResult(BaseModel):
     """POST /optimize/run — posterior curve + recommendation + verdict."""
 
     input_variable: str
-    target_property: str
+    target_property: str  # display label (e.g. "|zT − 1.0|" in target mode)
+    objective: str = "maximize"  # direction actually optimized
     # Posterior over the search range, for the curve.
     grid_x: list[float]
     grid_mean: list[float]

@@ -81,6 +81,13 @@ _MIN_POINTS = 3  # a GP over fewer than 3 points isn't worth trusting
 _LS_INIT = 1.5  # RBF length-scale starting point when fitted
 _LS_BOUNDS = (1.0, 5.0)  # bounds the length-scale is fitted within
 _N_RESTARTS = 8  # marginal-likelihood restarts when the length-scale is fitted
+# X is normalized internally so the search span maps to this many units.
+# 4.0 makes the canonical doping series (bounds 1–5, span 4) numerically
+# identical to the historical unnormalized behaviour, while inputs of any
+# magnitude (e.g. carrier concentration ~1e19 cm⁻³) land in the same range
+# the length-scale bounds were designed for.
+_SPAN_UNITS = 4.0
+_DIRECTIONS = ("maximize", "minimize")
 # A recommendation is "robust" if it moves by <= this fraction of the search
 # span as the kernel length-scale is varied (one-line kernel-artifact defense).
 _ROBUSTNESS_TOL_FRAC = 0.1
@@ -123,12 +130,14 @@ class BoConfig:
     retuned after the answer is known.
     """
 
-    objective: str  # the property being maximized
+    objective: str  # the property being optimized
+    direction: str  # "maximize" or "minimize"
     objective_aggregation: str  # how y was reduced per sample (e.g. "peak")
     input_name: str  # the synthesis variable being optimized
     bounds: tuple[float, float]  # search range
     kernel: str  # human-readable kernel description
-    length_scale: float  # RBF length-scale actually used
+    x_scale: float  # raw-x units per normalized unit (span / _SPAN_UNITS)
+    length_scale: float  # RBF length-scale actually used (normalized-x units)
     length_scale_fitted: bool  # True if fitted from data, False if held fixed
     length_scale_bounds: tuple[float, float]  # bounds used when fitting
     xi: float  # EI exploration sweetener
@@ -229,6 +238,7 @@ def optimize(
     bounds: tuple[float, float],
     input_name: str,
     target_name: str,
+    direction: str = "maximize",
     length_scale: float | None = None,
     rel_noise: float = _REL_NOISE,
     xi: float = _XI,
@@ -240,11 +250,17 @@ def optimize(
     """Run one round of Bayesian optimization over a 1-D parameter.
 
     Args:
-        x: Observed parameter values, shape (n,).
-        y: Observed property values to maximize, shape (n,).
+        x: Observed parameter values, shape (n,). Any magnitude — x is
+            normalized internally so the search span maps to a fixed range
+            (carrier concentrations ~1e19 work as well as doping 1–5).
+        y: Observed property values, shape (n,).
         bounds: (low, high) search range for the recommendation.
         input_name: Label of the parameter (e.g. "doping_pct").
         target_name: Label of the property (e.g. "peak_zt").
+        direction: "maximize" (default) or "minimize". Minimization is exact —
+            the engine optimizes -y internally and reports back in original
+            units; all displayed quantities (posterior mean, best, prediction)
+            stay in the property's real scale.
         length_scale: Fix the RBF length-scale to this value; if None it is
             fitted from the data. Fixing it is how `length_scale_robustness`
             probes whether the recommendation is a kernel artifact.
@@ -275,24 +291,41 @@ def optimize(
         raise OptimizationError(
             f"Need at least {_MIN_POINTS} measured points to optimize; got {x.size}"
         )
+    if direction not in _DIRECTIONS:
+        raise OptimizationError(
+            f"direction must be one of {_DIRECTIONS}; got {direction!r}"
+        )
     lo, hi = bounds
     if not hi > lo:
         raise OptimizationError(f"bounds must have high > low; got {bounds}")
 
-    gp, noise_std = _build_gp(y, rel_noise, length_scale, seed)
+    # Normalize x so the search span maps to _SPAN_UNITS regardless of the
+    # variable's magnitude. The RBF is stationary, so the shift is free; the
+    # scale keeps the length-scale bounds meaningful for any input.
+    x_scale = (hi - lo) / _SPAN_UNITS
+    x_norm = (x - lo) / x_scale
+
+    # Minimization is exact negation: the GP and EI work on y_int; every
+    # displayed quantity is mapped back to the property's real scale.
+    sign = 1.0 if direction == "maximize" else -1.0
+    y_int = sign * y
+
+    gp, noise_std = _build_gp(y_int, rel_noise, length_scale, seed)
     # We deliberately bound the length-scale to keep a handful of points
     # from overfitting; sklearn then warns when the optimizer sits on that
     # bound. That's expected, not a problem — suppress it locally.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", ConvergenceWarning)
-        gp.fit(x.reshape(-1, 1), y)
+        gp.fit(x_norm.reshape(-1, 1), y_int)
 
     grid = np.linspace(lo, hi, grid_size)
-    mean, std = gp.predict(grid.reshape(-1, 1), return_std=True)
+    grid_norm = (grid - lo) / x_scale
+    mean_int, std = gp.predict(grid_norm.reshape(-1, 1), return_std=True)
 
-    f_best = float(np.max(y))
-    best_x = float(x[int(np.argmax(y))])
-    ei = _expected_improvement(mean, std, f_best, xi)
+    best_i = int(np.argmax(y_int))
+    f_best_int = float(y_int[best_i])
+    best_x = float(x[best_i])
+    ei = _expected_improvement(mean_int, std, f_best_int, xi)
 
     rec_i = int(np.argmax(ei))
     rec_sigma = float(std[rec_i])
@@ -302,7 +335,7 @@ def optimize(
     predictive_sd = float(np.sqrt(rec_sigma**2 + noise_std**2))
     recommendation = Recommendation(
         x=float(grid[rec_i]),
-        predicted_mean=float(mean[rec_i]),
+        predicted_mean=float(sign * mean_int[rec_i]),
         ci95=_CI95 * rec_sigma,
         predictive_sd=predictive_sd,
         ci95_predictive=_CI95 * predictive_sd,
@@ -317,10 +350,12 @@ def optimize(
 
     config = BoConfig(
         objective=target_name,
+        direction=direction,
         objective_aggregation=objective_aggregation,
         input_name=input_name,
         bounds=(float(lo), float(hi)),
         kernel="ConstantKernel * RBF",
+        x_scale=float(x_scale),
         length_scale=(
             float(length_scale) if length_scale is not None else _fitted_length_scale(gp)
         ),
@@ -339,13 +374,13 @@ def optimize(
         input_name=input_name,
         target_name=target_name,
         grid_x=tuple(grid.tolist()),
-        grid_mean=tuple(mean.tolist()),
+        grid_mean=tuple((sign * mean_int).tolist()),
         grid_ci95=tuple((_CI95 * std).tolist()),
         grid_ei=tuple(ei.tolist()),
         observed_x=tuple(x.tolist()),
         observed_y=tuple(y.tolist()),
         best_x=best_x,
-        best_y=f_best,
+        best_y=float(y[best_i]),
         recommendation=recommendation,
         max_ei=max_ei,
         noise_threshold=noise_threshold,
@@ -390,6 +425,7 @@ def length_scale_robustness(
     input_name: str,
     target_name: str,
     length_scales: tuple[float, ...],
+    direction: str = "maximize",
     rel_noise: float = _REL_NOISE,
     xi: float = _XI,
     grid_size: int = _GRID_SIZE,
@@ -409,6 +445,7 @@ def length_scale_robustness(
             bounds=bounds,
             input_name=input_name,
             target_name=target_name,
+            direction=direction,
             length_scale=float(ls),
             rel_noise=rel_noise,
             xi=xi,

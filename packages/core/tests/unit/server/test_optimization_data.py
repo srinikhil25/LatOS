@@ -266,3 +266,167 @@ class TestDerivedZt:
         )
         assert rows == []
         assert all("derive zT" in s.reason for s in skipped)
+
+
+# ─── Measured features as inputs/targets + zT at temperature (OP2) ──
+
+
+def _hall_measurement(sample_id: str, n_cm3: float) -> Measurement:
+    """A features-only Hall measurement (no arrays)."""
+    return Measurement(
+        id=new_id(),
+        sample_id=sample_id,
+        technique=Technique.HALL,
+        instrument=None,
+        measured_at=None,
+        parsed_at=utc_now(),
+        parser_version="1.0.0",
+        files=(),
+        issues=(),
+        parsed_data_path=None,
+        analysis_results=(),
+        features={"carrier_concentration_cm3": n_cm3, "mobility_cm2_vs": 100.0},
+    )
+
+
+def _project_with_hall(root: Path) -> tuple[Project, ArrayStore, dict[str, str]]:
+    """Samples carrying a zt array AND a Hall features measurement."""
+    store = ArrayStore(root / ".latos" / "arrays")
+    pid = new_id()
+    samples = []
+    ids: dict[str, str] = {}
+    series = [("CS-1", 0.42, 7.3e18), ("CS-3", 0.97, 2.1e19), ("CS-5", 0.51, 4.4e19)]
+    for name, zt_peak, n in series:
+        sid = new_id()
+        ids[name] = sid
+        samples.append(
+            Sample(
+                id=sid,
+                project_id=pid,
+                canonical_name=name,
+                aliases=(),
+                measurements=(
+                    _te_measurement(sid, store, zt_peak),
+                    _hall_measurement(sid, n),
+                ),
+            )
+        )
+    project = Project(
+        id=pid,
+        name=root.name,
+        root_path=root,
+        created_at=utc_now(),
+        schema_version=4,
+        samples=tuple(samples),
+        unassigned_files=(),
+    )
+    return project, store, ids
+
+
+class TestMeasuredInputVariables:
+    def test_list_input_variables_includes_both_sources(self, tmp_path: Path):
+        project, _store, ids = _project_with_hall(tmp_path)
+        params = {ids["CS-1"]: {"doping_pct": 1.0}}
+        out = optimization_data.list_input_variables(project, params)
+        by_name = {v.name: v for v in out}
+        assert by_name["doping_pct"].source == "synthesis"
+        assert by_name["carrier_concentration_cm3"].source == "measured"
+        assert by_name["carrier_concentration_cm3"].values[ids["CS-3"]] == 2.1e19
+
+    def test_build_dataset_resolves_x_from_features(self, tmp_path: Path):
+        project, store, _ids = _project_with_hall(tmp_path)
+        rows, skipped = optimization_data.build_dataset(
+            project, store, {}, "carrier_concentration_cm3", "zt"
+        )
+        assert not skipped
+        xs = {r.sample_name: r.x for r in rows}
+        assert xs["CS-1"] == 7.3e18
+        assert {r.sample_name: r.y for r in rows}["CS-3"] == 0.97
+
+    def test_feature_as_target(self, tmp_path: Path):
+        project, store, ids = _project_with_hall(tmp_path)
+        params = {sid: {"doping_pct": d} for sid, d in
+                  [(ids["CS-1"], 1.0), (ids["CS-3"], 3.0), (ids["CS-5"], 5.0)]}
+        rows, skipped = optimization_data.build_dataset(
+            project, store, params, "doping_pct", "mobility_cm2_vs"
+        )
+        assert not skipped
+        assert all(r.y == 100.0 for r in rows)
+
+    def test_targets_list_includes_curated_features(self, tmp_path: Path):
+        project, store, _ids = _project_with_hall(tmp_path)
+        props = optimization_data.list_target_properties(project, store)
+        assert "carrier_concentration_cm3" in props
+        assert "mobility_cm2_vs" in props
+
+
+def _zt_pair_measurements(sample_id: str, store: ArrayStore) -> tuple[Measurement, ...]:
+    """An R&S + LFA pair with an analytically known zT(T): 0.3 at 300 K, 2.4 at 600 K."""
+    out = []
+    for arrays in (
+        {
+            "temperature_k": np.array([300.0, 600.0]),
+            "resistivity_uohm_m": np.array([10.0, 10.0]),
+            "seebeck_uv_k": np.array([100.0, 200.0]),
+        },
+        {
+            "temperature_k": np.array([300.0, 600.0]),
+            "thermal_conductivity": np.array([1.0, 1.0]),
+        },
+    ):
+        mid = new_id()
+        store.write(
+            mid,
+            ParsedData(
+                technique=Technique.THERMOELECTRIC,
+                arrays=arrays,
+                metadata={},
+                instrument=None,
+                measured_at=None,
+                issues=(),
+                parser_name="te",
+                parser_version="1.0.0",
+            ),
+        )
+        out.append(
+            Measurement(
+                id=mid,
+                sample_id=sample_id,
+                technique=Technique.THERMOELECTRIC,
+                instrument=None,
+                measured_at=None,
+                parsed_at=utc_now(),
+                parser_version="1.0.0",
+                files=(),
+                issues=(),
+                parsed_data_path=None,
+                analysis_results=(),
+            )
+        )
+    return tuple(out)
+
+
+class TestDerivedZtAtTemperature:
+    def _sample(self, tmp_path: Path):
+        store = ArrayStore(tmp_path / ".latos" / "arrays")
+        sid = new_id()
+        sample = Sample(
+            id=sid,
+            project_id=new_id(),
+            canonical_name="CS",
+            aliases=(),
+            measurements=_zt_pair_measurements(sid, store),
+        )
+        return sample, store
+
+    def test_interpolates_between_grid_points(self, tmp_path: Path):
+        sample, store = self._sample(tmp_path)
+        # zT is 0.3 at 300 K and 2.4 at 600 K -> linear interp at 450 K.
+        value = optimization_data.derived_zt_at(sample, store, 450.0)
+        assert value is not None
+        assert abs(value - 1.35) < 1e-6
+
+    def test_outside_measured_range_is_none(self, tmp_path: Path):
+        sample, store = self._sample(tmp_path)
+        assert optimization_data.derived_zt_at(sample, store, 200.0) is None
+        assert optimization_data.derived_zt_at(sample, store, 700.0) is None

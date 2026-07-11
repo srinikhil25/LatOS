@@ -21,6 +21,7 @@ import math
 import os
 import queue
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
 
@@ -56,6 +57,7 @@ from latos.server.schemas import (
     FreezeResult,
     HealthResponse,
     IngestStartedResponse,
+    InputVariableOut,
     MeasurementArrays,
     MeasurementSummary,
     MergeSamplesRequest,
@@ -282,16 +284,24 @@ def _json_safe(value: object) -> object:
 
 
 def _run_analysis(
-    measurement: Measurement, arrays: dict[str, np.ndarray]
+    measurement: Measurement,
+    arrays: dict[str, np.ndarray],
+    param_overrides: dict[str, dict[str, object]] | None = None,
 ) -> list[AnalyzerResultOut]:
-    """Run every applicable analyzer on a measurement and serialize results."""
+    """Run every applicable analyzer on a measurement and serialize results.
+
+    `param_overrides` maps analyzer name → caller-supplied parameters
+    (e.g. the sample's Seebeck sign injected for the Hall analyzer's
+    cross-technique check).
+    """
     out: list[AnalyzerResultOut] = []
     for analyzer in analyzer_registry().find_for(measurement):
+        overrides = (param_overrides or {}).get(analyzer.name)
         result = analyzer.analyze(
             AnalyzerInputs(
                 measurement=measurement,
                 arrays=arrays,
-                params=analyzer.merge_params(None),
+                params=analyzer.merge_params(overrides),
             )
         )
         out.append(
@@ -424,7 +434,20 @@ def _register_sample_read_routes(app: FastAPI, state: ServerState) -> None:
         measurement = _find_measurement(result, measurement_id)
         if measurement is None:
             raise HTTPException(status_code=404, detail="Unknown measurement")
-        return _run_analysis(measurement, store.load(measurement_id))
+        # Cross-technique context: give the Hall analyzer the sample's
+        # Seebeck sign so it can check the two carrier-type determinations
+        # against each other.
+        overrides: dict[str, dict[str, object]] | None = None
+        if measurement.technique is Technique.HALL:
+            sample = next(
+                (s for s in result.project.samples if s.id == measurement.sample_id),
+                None,
+            )
+            if sample is not None:
+                sign = transport_data.seebeck_sign(sample, store.load)
+                if sign is not None:
+                    overrides = {"hall-metrics": {"seebeck_sign": sign}}
+        return _run_analysis(measurement, store.load(measurement_id), overrides)
 
 
 def _register_review_routes(app: FastAPI, state: ServerState) -> None:
@@ -513,6 +536,22 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             raise HTTPException(status_code=404, detail="No project is open")
         return {"properties": optimization_data.list_target_properties(result.project, store)}
 
+    @app.get("/optimize/inputs")
+    def optimize_inputs() -> list[InputVariableOut]:
+        """Available BO input axes: synthesis parameters + measured features.
+
+        Measured features (e.g. the Hall carrier concentration) give a
+        common physical axis when a sample set shares no synthesis knob.
+        """
+        result = state.result
+        if result is None or state.root is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        params = synthesis_store.load_params(state.root)
+        return [
+            InputVariableOut(name=v.name, source=v.source, values=v.values)
+            for v in optimization_data.list_input_variables(result.project, params)
+        ]
+
     @app.get("/optimize/dataset")
     def optimize_dataset(input_variable: str, target_property: str) -> OptimizationDataset:
         result = state.result
@@ -536,36 +575,15 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
     @app.post("/optimize/run")
     def optimize_run(body: OptimizeRunRequest) -> OptimizeResult:
         # Hard gate: optimization only runs on human-confirmed identity.
-        _require_confirmed(state)
-        result = state.result
-        store = state.array_store()
-        if result is None or store is None or state.root is None:
-            raise HTTPException(status_code=404, detail="No project is open")
-
-        params = synthesis_store.load_params(state.root)
-        rows, _skipped = optimization_data.build_dataset(
-            result.project, store, params, body.input_variable, body.target_property
-        )
-        if len(rows) < _MIN_OPTIMIZE_POINTS:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Need at least {_MIN_OPTIMIZE_POINTS} samples with both a "
-                    f"'{body.input_variable}' value and '{body.target_property}' data; "
-                    f"only {len(rows)} qualify."
-                ),
-            )
-
-        xs = np.array([r.x for r in rows])
-        ys = np.array([r.y for r in rows])
-        bounds = body.bounds or (float(xs.min()), float(xs.max()))
+        asm = _assemble_optimization(state, body)
         try:
             res = optimize(
-                xs,
-                ys,
-                bounds=bounds,
+                asm.xs,
+                asm.ys,
+                bounds=asm.bounds,
                 input_name=body.input_variable,
-                target_name=body.target_property,
+                target_name=asm.target_label,
+                direction=asm.direction,
             )
         except OptimizationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -573,14 +591,12 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
         return OptimizeResult(
             input_variable=res.input_name,
             target_property=res.target_name,
+            objective=body.objective,
             grid_x=list(res.grid_x),
             grid_mean=list(res.grid_mean),
             grid_ci95=list(res.grid_ci95),
             grid_ei=list(res.grid_ei),
-            points=[
-                DatasetPoint(sample_id=r.sample_id, sample_name=r.sample_name, x=r.x, y=r.y)
-                for r in rows
-            ],
+            points=asm.points,
             best_x=res.best_x,
             best_y=res.best_y,
             recommendation=_rec_out(res.recommendation),
@@ -605,43 +621,24 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
 
 def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> FreezeResult:
     """Optimize, sweep kernel robustness, and write the pre-registration record."""
-    _require_confirmed(state)
-    result = state.result
-    store = state.array_store()
-    if result is None or store is None or state.root is None:
-        raise HTTPException(status_code=404, detail="No project is open")
-
-    params = synthesis_store.load_params(state.root)
-    rows, _skipped = optimization_data.build_dataset(
-        result.project, store, params, body.input_variable, body.target_property
-    )
-    if len(rows) < _MIN_OPTIMIZE_POINTS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Need at least {_MIN_OPTIMIZE_POINTS} samples with both a "
-                f"'{body.input_variable}' value and '{body.target_property}' data; "
-                f"only {len(rows)} qualify."
-            ),
-        )
-
-    xs = np.array([r.x for r in rows])
-    ys = np.array([r.y for r in rows])
-    bounds = body.bounds or (float(xs.min()), float(xs.max()))
+    asm = _assemble_optimization(state, body)
+    assert state.root is not None  # _assemble_optimization guarantees an open project
     try:
         res = optimize(
-            xs,
-            ys,
-            bounds=bounds,
+            asm.xs,
+            asm.ys,
+            bounds=asm.bounds,
             input_name=body.input_variable,
-            target_name=body.target_property,
+            target_name=asm.target_label,
+            direction=asm.direction,
         )
         robustness = length_scale_robustness(
-            xs,
-            ys,
-            bounds=bounds,
+            asm.xs,
+            asm.ys,
+            bounds=asm.bounds,
             input_name=body.input_variable,
-            target_name=body.target_property,
+            target_name=asm.target_label,
+            direction=asm.direction,
             length_scales=(1.0, 2.0, 3.0, 4.0, 5.0),
         )
     except OptimizationError as exc:
@@ -656,6 +653,93 @@ def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> Free
         prior_best=res.best_y,
         robustness_stable=robustness.stable,
         converged=res.converged,
+    )
+
+
+@dataclass(frozen=True)
+class _AssembledOptimization:
+    """The (x, y) table plus the resolved objective, ready for the engine."""
+
+    points: list[DatasetPoint]
+    xs: np.ndarray
+    ys: np.ndarray
+    bounds: tuple[float, float]
+    target_label: str
+    direction: str  # what the engine runs: "maximize" | "minimize"
+
+
+def _assemble_optimization(
+    state: ServerState, body: OptimizeRunRequest
+) -> _AssembledOptimization:
+    """Shared assembly for /optimize/run and /optimize/freeze.
+
+    Resolves the input variable (synthesis parameter or measured feature),
+    the target (array property, feature, or derived zT — optionally at a
+    temperature), and the objective mode. "target" mode is implemented as
+    exact minimization of |y - target_value|, relabelled so the chart and
+    verdict speak in distance units.
+    """
+    _require_confirmed(state)
+    result = state.result
+    store = state.array_store()
+    if result is None or store is None or state.root is None:
+        raise HTTPException(status_code=404, detail="No project is open")
+
+    if body.objective not in ("maximize", "minimize", "target"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"objective must be maximize, minimize or target; got {body.objective!r}",
+        )
+
+    params = synthesis_store.load_params(state.root)
+    rows, _skipped = optimization_data.build_dataset(
+        result.project,
+        store,
+        params,
+        body.input_variable,
+        body.target_property,
+        at_temperature_k=body.at_temperature_k,
+    )
+    if len(rows) < _MIN_OPTIMIZE_POINTS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Need at least {_MIN_OPTIMIZE_POINTS} samples with both a "
+                f"'{body.input_variable}' value and '{body.target_property}' data; "
+                f"only {len(rows)} qualify."
+            ),
+        )
+
+    xs = np.array([r.x for r in rows])
+    ys = np.array([r.y for r in rows])
+    target_label = body.target_property
+    if body.target_property == optimization_data.DERIVED_ZT and body.at_temperature_k:
+        target_label = f"{target_label} @ {body.at_temperature_k:g} K"
+
+    direction = "maximize"
+    if body.objective == "minimize":
+        direction = "minimize"
+    elif body.objective == "target":
+        if body.target_value is None:
+            raise HTTPException(
+                status_code=400, detail="objective 'target' requires target_value"
+            )
+        ys = np.abs(ys - body.target_value)
+        target_label = f"|{target_label} - {body.target_value:g}|"
+        direction = "minimize"
+
+    points = [
+        DatasetPoint(sample_id=r.sample_id, sample_name=r.sample_name, x=r.x, y=float(y))
+        for r, y in zip(rows, ys.tolist(), strict=True)
+    ]
+    bounds = body.bounds or (float(xs.min()), float(xs.max()))
+    return _AssembledOptimization(
+        points=points,
+        xs=xs,
+        ys=ys,
+        bounds=bounds,
+        target_label=target_label,
+        direction=direction,
     )
 
 
@@ -679,17 +763,20 @@ def _verdict(res: OptimizationResult) -> str:
     No jargon — this is read by materials scientists, not CS people.
     """
     rec = res.recommendation
+    best_word = "lowest" if res.config.direction == "minimize" else "best"
     if res.converged:
         return (
             f"Optimum reached within measurement precision. "
-            f"Best so far: {res.best_y:.3f} at {res.input_name} = {res.best_x:g}. "
-            f"A confirmatory run at {rec.x:.1f} is optional but unlikely to improve."
+            f"{best_word.capitalize()} so far: {res.best_y:.3f} at "
+            f"{res.input_name} = {res.best_x:g}. "
+            f"A confirmatory run at {rec.x:.3g} is optional but unlikely to improve."
         )
     return (
-        f"Recommended next experiment: {res.input_name} = {rec.x:.1f} "
+        f"Recommended next experiment: {res.input_name} = {rec.x:.3g} "
         f"(predicted {res.target_name} {rec.predicted_mean:.2f} "
         f"+/- {rec.ci95_predictive:.2f}, 95% predictive). "
-        f"A meaningful improvement over the current best ({res.best_y:.3f}) is still expected."
+        f"A meaningful improvement over the current {best_word} ({res.best_y:.3f}) "
+        f"is still expected."
     )
 
 
