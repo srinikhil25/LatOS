@@ -49,6 +49,9 @@ dependencies = [
     "pillow>=10.0",
     "tifffile>=2024.1",
 
+    # Publication figure export
+    "matplotlib>=3.8",
+
     # Persistence
     "sqlalchemy>=2.0",
     "alembic>=1.13",

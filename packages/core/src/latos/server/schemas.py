@@ -514,3 +514,46 @@ class FitPresetsOut(BaseModel):
     """GET /fit/presets — known XPS spin-orbit doublets: name -> [ΔBE, ratio]."""
 
     doublets: dict[str, list[float]]
+
+
+# ─── Cross-correlation + reporting (Stage 6) ───────────────────────────
+class FeatureCellOut(BaseModel):
+    """One property's value for one sample, with provenance."""
+
+    value: float
+    unit: str
+    source: str
+    reliable: bool
+
+
+class FeatureRowOut(BaseModel):
+    """A sample's row in the feature table."""
+
+    sample_id: str
+    sample_name: str
+    features: dict[str, FeatureCellOut]
+
+
+class FeatureTableOut(BaseModel):
+    """GET /features — the sample × property matrix with provenance."""
+
+    properties: list[str]
+    rows: list[FeatureRowOut]
+
+
+class CorrelationOut(BaseModel):
+    """One property-pair relationship."""
+
+    property_a: str
+    property_b: str
+    pearson: float
+    spearman: float
+    n: int
+
+
+class CorrelationsOut(BaseModel):
+    """GET /correlations — Pearson matrix (heatmap) + ranked pairs."""
+
+    properties: list[str]
+    matrix: list[list[float | None]]
+    pairs: list[CorrelationOut]

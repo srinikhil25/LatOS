@@ -66,16 +66,22 @@ from latos.optimization import (
     length_scale_robustness,
     optimize,
 )
-from latos.server import edits, optimization_data, synthesis_store, transport_data
+from latos.reporting.correlation import correlate
+from latos.server import edits, features, optimization_data, synthesis_store, transport_data
 from latos.server.edits import EditError
 from latos.server.imaging import render_to_png
 from latos.server.schemas import (
     AnalyzerResultOut,
+    CorrelationOut,
+    CorrelationsOut,
     DatasetPoint,
     DeleteProjectRequest,
     DeleteProjectResult,
     DetectPeaksRequest,
     DetectPeaksResult,
+    FeatureCellOut,
+    FeatureRowOut,
+    FeatureTableOut,
     FitComponentOut,
     FitParamOut,
     FitPresetsOut,
@@ -120,6 +126,13 @@ from latos.server.state import (
     TerminalEvent,
 )
 from latos.server.trash import trash_path
+from latos.visualization.figures import (
+    ScatterPoint,
+    correlation_heatmap,
+    figure_to_bytes,
+    scatter,
+)
+from latos.visualization.styles import JournalStyle
 
 # Techniques whose measurements carry a renderable image rather than
 # plottable arrays.
@@ -250,6 +263,7 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
     _register_review_routes(app, state)
     _register_optimization_data_routes(app, state)
     _register_fit_routes(app)
+    _register_report_routes(app, state)
 
     _register_sample_read_routes(app, state)
 
@@ -456,6 +470,138 @@ def _register_fit_routes(app: FastAPI) -> None:
     @app.get("/fit/presets")
     def fit_presets() -> FitPresetsOut:
         return FitPresetsOut(doublets={k: [d, r] for k, (d, r) in XPS_DOUBLETS.items()})
+
+
+def _register_report_routes(app: FastAPI, state: ServerState) -> None:
+    """Cross-sample feature table + correlations (Stage 6).
+
+    The feature table is expensive (it runs the analysis layer across every
+    sample), so it is cached per open project and reused by both endpoints;
+    reopening or editing the project yields a fresh `result` object and
+    invalidates the cache.
+    """
+    cache: dict[int, features.FeatureTable] = {}
+
+    def cached_table() -> features.FeatureTable:
+        result = state.result
+        store = state.array_store()
+        if result is None or store is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        key = id(result)
+        if key not in cache:
+            cache.clear()  # keep only the current project's table
+            cache[key] = features.extract_features(result.project, store)
+        return cache[key]
+
+    @app.get("/features")
+    def feature_table() -> FeatureTableOut:
+        table = cached_table()
+        return FeatureTableOut(
+            properties=table.properties,
+            rows=[
+                FeatureRowOut(
+                    sample_id=r.sample_id,
+                    sample_name=r.sample_name,
+                    features={
+                        name: FeatureCellOut(
+                            value=c.value, unit=c.unit, source=c.source, reliable=c.reliable
+                        )
+                        for name, c in r.features.items()
+                    },
+                )
+                for r in table.rows
+            ],
+        )
+
+    @app.get("/correlations")
+    def correlations(*, reliable_only: bool = False) -> CorrelationsOut:
+        """Pairwise correlations across the feature table.
+
+        `reliable_only` drops values flagged unreliable (failed a physics /
+        data-quality check) before correlating.
+        """
+        table = cached_table()
+        samples: list[dict[str, float | None]] = []
+        for row in table.rows:
+            values: dict[str, float | None] = {}
+            for name in table.properties:
+                cell = row.features.get(name)
+                if cell is not None and (cell.reliable or not reliable_only):
+                    values[name] = cell.value
+            samples.append(values)
+        result = correlate(table.properties, samples)
+        return CorrelationsOut(
+            properties=result.properties,
+            matrix=result.matrix,
+            pairs=[
+                CorrelationOut(
+                    property_a=p.property_a,
+                    property_b=p.property_b,
+                    pearson=p.pearson,
+                    spearman=p.spearman,
+                    n=p.n,
+                )
+                for p in result.pairs
+            ],
+        )
+
+    @app.get("/report/styles")
+    def report_styles() -> dict[str, list[str]]:
+        return {"styles": [s.value for s in JournalStyle]}
+
+    media_types = {"svg": "image/svg+xml", "pdf": "application/pdf", "png": "image/png"}
+
+    @app.get("/report/figure")
+    def report_figure(
+        kind: str,
+        style: str = "nature",
+        fmt: str = "svg",
+        x: str | None = None,
+        y: str | None = None,
+    ) -> Response:
+        """Render a publication figure (`kind` = heatmap | scatter) as bytes.
+
+        `scatter` requires `x` and `y` property names; `style` is a journal
+        preset. Unreliable values render as open markers and are excluded
+        from the scatter fit line.
+        """
+        table = cached_table()
+        try:
+            journal = JournalStyle(style)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Unknown style {style!r}") from exc
+
+        if kind == "heatmap":
+            samples: list[dict[str, float | None]] = [
+                {n: c.value for n in table.properties if (c := row.features.get(n)) is not None}
+                for row in table.rows
+            ]
+            corr = correlate(table.properties, samples)
+            fig = correlation_heatmap(corr.properties, corr.matrix, style=journal)
+        elif kind == "scatter":
+            if not x or not y:
+                raise HTTPException(status_code=400, detail="scatter needs x and y properties")
+            points = []
+            for row in table.rows:
+                cx, cy = row.features.get(x), row.features.get(y)
+                if cx is not None and cy is not None:
+                    points.append(
+                        ScatterPoint(
+                            row.sample_name,
+                            cx.value,
+                            cy.value,
+                            reliable=cx.reliable and cy.reliable,
+                        )
+                    )
+            fig = scatter(x, y, points, style=journal)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown figure kind {kind!r}")
+
+        try:
+            data = figure_to_bytes(fig, fmt)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return Response(content=data, media_type=media_types[fmt])
 
 
 def _register_sample_read_routes(app: FastAPI, state: ServerState) -> None:
