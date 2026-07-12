@@ -43,8 +43,9 @@ class TestGuards:
 
 
 class TestRealTeCase:
+    @staticmethod
     @pytest.fixture(scope="class")
-    def result(self):
+    def result():
         x, y = _real_te_data()
         return optimize(
             x,
@@ -104,8 +105,9 @@ class TestConvergence:
 
 
 class TestPredictiveCiAndConfig:
+    @staticmethod
     @pytest.fixture(scope="class")
-    def result(self):
+    def result():
         x, y = _real_te_data()
         return optimize(
             x, y, bounds=(0.0, 5.0), input_name="doping_pct", target_name="peak_zt", seed=0
