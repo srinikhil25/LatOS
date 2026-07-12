@@ -37,6 +37,10 @@ const BACKGROUNDS: { value: BackgroundKind; label: string }[] = [
   { value: "none", label: "None" },
 ];
 
+// Techniques that produce a peak-fittable spectrum (excludes images like
+// TEM/SEM and scalar/curve techniques like Hall and thermoelectric).
+const FITTABLE = new Set(["xrd", "xps", "raman", "uv_drs", "eds"]);
+
 // Preferred x / y column names, most specific first.
 const X_HINTS = ["two_theta", "binding_energy", "raman_shift", "wavelength_nm", "energy_ev"];
 const Y_HINTS = ["intensity", "cps", "counts", "reflectance_pct", "absorbance"];
@@ -102,6 +106,7 @@ export function Fit({ onBack }: { onBack: () => void }) {
     const out: MeasOption[] = [];
     for (const s of samples) {
       for (const m of s.measurements) {
+        if (!FITTABLE.has(m.technique)) continue;
         out.push({ id: m.id, label: `${s.name} · ${m.technique}${m.filename ? ` · ${m.filename}` : ""}` });
       }
     }

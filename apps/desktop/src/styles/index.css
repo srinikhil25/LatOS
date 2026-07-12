@@ -48,3 +48,11 @@ body {
 [data-selectable] {
   user-select: text;
 }
+
+/* Native form controls follow the app theme — the OS default <option>
+   popup is otherwise white-on-white in dark mode (unreadable). */
+select,
+option {
+  background-color: var(--latos-surface);
+  color: var(--latos-text-primary);
+}
