@@ -35,8 +35,11 @@ export function OptimizeChart({ result }: { result: OptimizeResult }) {
   const xMin = gx[0];
   const xMax = gx[gx.length - 1];
 
-  const upper = result.grid_mean.map((m, i) => m + result.grid_ci95[i]);
-  const lower = result.grid_mean.map((m, i) => m - result.grid_ci95[i]);
+  // Explicit physical band from the engine — asymmetric for a log-space fit and
+  // clamped to the property's domain, so it never dips below zero for a
+  // strictly-positive quantity (falls back to mean ± ci95 for older payloads).
+  const upper = result.grid_upper ?? result.grid_mean.map((m, i) => m + result.grid_ci95[i]);
+  const lower = result.grid_lower ?? result.grid_mean.map((m, i) => m - result.grid_ci95[i]);
   const yLo = Math.min(...lower, ...result.points.map((p) => p.y));
   const yHi = Math.max(...upper, ...result.points.map((p) => p.y));
   const yPad = 0.08 * (yHi - yLo || 1);

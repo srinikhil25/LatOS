@@ -45,6 +45,10 @@ _MU_MAX_CM2_VS = 1e5
 # magnitudes differ by more than this factor the Hall signal is rough.
 _CROSS_RATIO_WARN = 3.0
 
+# Hall conductivity vs the independent R&S conductivity: a factor beyond this
+# points to a units / thickness / geometry error in one of the measurements.
+_SIGMA_CROSS_RATIO = 3.0
+
 
 class HallMetricsAnalyzer(BaseAnalyzer):
     """Interpret a single-point Hall export: carrier type + reliability.
@@ -64,13 +68,16 @@ class HallMetricsAnalyzer(BaseAnalyzer):
     """
 
     name: ClassVar[str] = "hall-metrics"
-    # 1.1.0: cross-configuration reliability + Seebeck cross-check.
-    version: ClassVar[str] = "1.1.0"
+    # 1.2.0: + conductivity cross-check vs the R&S resistivity.
+    version: ClassVar[str] = "1.2.0"
     accepts_techniques: ClassVar[tuple[Technique, ...]] = (Technique.HALL,)
     default_params: ClassVar[dict[str, Any]] = {
         # Sign of the sample's Seebeck coefficient (+1 p-type, -1 n-type),
         # injected by the caller when an R&S measurement exists. None = skip.
         "seebeck_sign": None,
+        # Conductivity (S/cm) from the R&S resistivity near room T, injected
+        # by the caller for a cross-technique consistency check. None = skip.
+        "rs_conductivity_s_cm": None,
     }
 
     def accepts(self, measurement: Measurement) -> bool:
@@ -97,6 +104,7 @@ class HallMetricsAnalyzer(BaseAnalyzer):
             issues,
             hall_reliable=hall_reliable,
         )
+        _conductivity_cross_check(f, inputs.params.get("rs_conductivity_s_cm"), outputs, issues)
         return AnalyzerOutput(outputs=outputs, derived_arrays={}, issues=tuple(issues))
 
 
@@ -282,6 +290,52 @@ def _cross_technique_check(
             f"Seebeck sign indicates {seebeck_type.split(' ', 1)[0]}.{trust}",
         )
     )
+
+
+def _conductivity_cross_check(
+    f: dict[str, float],
+    rs_conductivity: object,
+    outputs: dict[str, Any],
+    issues: list[ValidationIssue],
+) -> None:
+    """Cross-technique check: Hall conductivity vs the R&S conductivity.
+
+    Two independent measurements of the same electrical conductivity — the Hall
+    export and 1/ρ from the resistivity/Seebeck run — should agree. A large
+    discrepancy is a real cross-technique inconsistency (a units, thickness, or
+    contact-geometry error somewhere), which no single technique can catch.
+    """
+    if not isinstance(rs_conductivity, (int, float)) or rs_conductivity <= 0:
+        return
+    hall_sigma = f.get("conductivity_s_cm")
+    if not hall_sigma or hall_sigma <= 0:
+        return
+
+    rs = float(rs_conductivity)
+    ratio = max(hall_sigma, rs) / min(hall_sigma, rs)
+    outputs["conductivity_from_rs_s_cm"] = f"{rs:.4e}"
+    outputs["conductivity_cross_ratio"] = round(ratio, 1)
+    if ratio > _SIGMA_CROSS_RATIO:
+        issues.append(
+            _warn(
+                "conductivity_cross",
+                f"Cross-technique disagreement: Hall conductivity ({hall_sigma:.3e} S/cm) "
+                f"and the resistivity/Seebeck conductivity ({rs:.3e} S/cm) differ by "
+                f"{ratio:.0f}x — check units, sample thickness or contact geometry.",
+            )
+        )
+    else:
+        issues.append(
+            ValidationIssue(
+                field="conductivity_cross",
+                severity=Severity.INFO,
+                message=(
+                    "Cross-technique agreement: Hall and resistivity/Seebeck conductivity "
+                    f"agree within {ratio:.0f}x."
+                ),
+                detected_at=utc_now(),
+            )
+        )
 
 
 def _consistency_check(

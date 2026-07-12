@@ -357,3 +357,103 @@ class TestReliability:
         record = build_record(res, prior_best=res.best_y)
         assert record["reliability"]["level"] == "exploratory"
         assert record["reliability"]["loo_total"] == 4
+
+
+# ─── Physics layer: log-space + physical bounds (PH1) ───────────────
+
+
+class TestPhysicsLayer:
+    _X = None
+
+    def _x(self):
+        import numpy as _np
+
+        return _np.array([0.0, 1.0, 3.0, 5.0])
+
+    def test_log_keeps_predictions_and_band_positive(self):
+        import numpy as _np
+
+        from latos.optimization.engine import optimize
+
+        y = _np.array([16.4, 2494.0, 200.0, 327.0])  # positive, ~2 orders
+        r = optimize(
+            self._x(),
+            y,
+            bounds=(0, 5),
+            input_name="d",
+            target_name="mobility_cm2_vs",
+            y_transform="log",
+            y_min=0.0,
+            y_max=1e5,
+        )
+        assert r.config.y_transform == "log"
+        assert min(r.grid_lower) > 0.0
+        assert r.recommendation.predictive_interval_95[0] > 0.0
+        assert r.recommendation.predicted_mean > 0.0
+
+    def test_identity_positive_band_clamped_to_domain(self):
+        import numpy as _np
+
+        from latos.optimization.engine import optimize
+
+        y = _np.array([0.607, 0.373, 0.985, 0.496])
+        r = optimize(
+            self._x(),
+            y,
+            bounds=(0, 5),
+            input_name="d",
+            target_name="zT (derived)",
+            y_transform="identity",
+            y_min=0.0,
+            y_max=4.0,
+        )
+        assert min(r.grid_lower) >= 0.0
+        assert max(r.grid_upper) <= 4.0 + 1e-9
+
+    def test_log_falls_back_on_nonpositive_data(self):
+        import numpy as _np
+
+        from latos.optimization.engine import optimize
+
+        y = _np.array([16.4, 2494.0, -771.0, 327.0])  # a negative (bad) mobility
+        r = optimize(
+            self._x(),
+            y,
+            bounds=(0, 5),
+            input_name="d",
+            target_name="mobility_cm2_vs",
+            y_transform="log",
+            y_min=0.0,
+            y_max=1e5,
+        )
+        assert r.config.y_transform == "identity"  # cannot log a negative
+        assert min(r.grid_lower) >= 0.0  # still clamped to the domain
+
+    def test_log_recommendation_is_monotonic(self):
+
+        from latos.optimization.engine import optimize
+
+        x = self._x()
+        y = 1.0 - 0.1 * (x - 3.0) ** 2 + 3.0  # positive hump, peak at x=3
+        r = optimize(
+            x,
+            y,
+            bounds=(0, 5),
+            input_name="d",
+            target_name="mobility_cm2_vs",
+            y_transform="log",
+            y_min=0.0,
+        )
+        assert 2.0 <= r.recommendation.x <= 4.0
+
+    def test_identity_default_unchanged(self):
+        """Regression: default (identity, no bounds) matches the pre-physics run."""
+        import numpy as _np
+
+        from latos.optimization.engine import optimize
+
+        x = _np.array([0.0, 1.0, 3.0, 5.0])
+        y = _np.array([0.607, 0.373, 0.985, 0.496])
+        r = optimize(x, y, bounds=(0, 5), input_name="d", target_name="zt")
+        assert r.config.y_transform == "identity"
+        assert 2.5 <= r.recommendation.x <= 4.0  # peak near 3% doping

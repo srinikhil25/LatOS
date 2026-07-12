@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
-from latos.analysis.transport import ZtResult, compute_zt
+from latos.analysis.transport import TransportError, ZtResult, compute_zt
 from latos.core.enums import Technique
+from latos.optimization import spb
 
 if TYPE_CHECKING:
     from latos.core.models import Sample
@@ -24,7 +25,42 @@ if TYPE_CHECKING:
 Arrays = dict[str, "NDArray[np.float64]"]
 LoadArrays = Callable[[str], Arrays]
 
-__all__ = ["sample_zt", "seebeck_sign"]
+__all__ = [
+    "rs_conductivity_s_cm",
+    "sample_spb_guidance",
+    "sample_zt",
+    "seebeck_sign",
+]
+
+# 1 µΩ·m = 1e-4 Ω·cm, so σ[S/cm] = 1 / ρ[Ω·cm] = 1e4 / ρ[µΩ·m].
+_UOHM_M_TO_S_CM = 1e4
+
+
+def rs_conductivity_s_cm(sample: Sample, load_arrays: LoadArrays) -> float | None:
+    """Electrical conductivity from the R&S resistivity, near room temperature.
+
+    The Hall measurement is single-temperature (≈ room T), so we take the R&S
+    resistivity at its lowest measured temperature (closest to the Hall point)
+    and convert to S/cm. Returns None if the sample has no usable R&S
+    resistivity. This is the *independent* conductivity the Hall σ is checked
+    against (a cross-technique consistency test).
+    """
+    for m in sample.measurements:
+        if m.technique is not Technique.THERMOELECTRIC:
+            continue
+        arrays = load_arrays(m.id)
+        rho = arrays.get("resistivity_uohm_m")
+        temp = arrays.get("temperature_k")
+        if rho is None or len(rho) == 0:
+            continue
+        rho_arr = np.asarray(rho, dtype=float)
+        if temp is not None and len(temp) == len(rho_arr):
+            rho_room = float(rho_arr[int(np.argmin(np.asarray(temp, dtype=float)))])
+        else:
+            rho_room = float(np.nanmin(rho_arr))
+        if rho_room > 0:
+            return _UOHM_M_TO_S_CM / rho_room
+    return None
 
 
 def seebeck_sign(sample: Sample, load_arrays: LoadArrays) -> float | None:
@@ -103,3 +139,27 @@ def sample_zt(sample: Sample, load_arrays: LoadArrays) -> ZtResult:
         lfa_temperature_k=lfa["temperature_k"],
         thermal_conductivity_w_mk=lfa["thermal_conductivity"],
     )
+
+
+def sample_spb_guidance(sample: Sample, load_arrays: LoadArrays) -> spb.SpbGuidance | None:
+    """Single-parabolic-band read on `sample` from its (Seebeck, zT) at peak zT.
+
+    Pairs the Seebeck coefficient measured *at the zT-peak temperature* with the
+    peak zT, then asks the SPB physics model where the material sits relative to
+    its own zT optimum (see `latos.optimization.spb.guidance`). Uses the Seebeck
+    axis only — reliable even when the Hall carrier concentration is noise.
+
+    Returns None when the sample cannot derive zT (missing R&S/LFA), so callers
+    can skip it without special-casing.
+    """
+    try:
+        zt = sample_zt(sample, load_arrays)
+    except TransportError:
+        return None
+    temp = np.asarray(zt.temperature_k, dtype=float)
+    seebeck_v_k = np.asarray(zt.seebeck_v_k, dtype=float)
+    if temp.size == 0 or seebeck_v_k.size != temp.size:
+        return None
+    # Seebeck at the zT-peak temperature, converted V/K -> µV/K.
+    seebeck_uv_k = float(np.interp(zt.peak_zt_temperature_k, temp, seebeck_v_k)) * 1e6
+    return spb.guidance(seebeck_uv_k, zt.peak_zt)

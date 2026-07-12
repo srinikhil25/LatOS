@@ -16,6 +16,7 @@ import {
   getOptimizeTargets,
   getParameters,
   getSamples,
+  getSpbCheck,
   listPreregistrations,
   runOptimize,
   setSampleParameters,
@@ -28,6 +29,7 @@ import {
   type PreregSummary,
   type SampleParams,
   type SampleSummary,
+  type SpbCheckResult,
 } from "../lib/api";
 import { OptimizeChart } from "../components/OptimizeChart";
 
@@ -79,6 +81,7 @@ export function Optimize({ onBack }: { onBack: () => void }) {
   const [preregs, setPreregs] = useState<PreregSummary[]>([]);
   const [measuredInputs, setMeasuredInputs] = useState<Record<string, string>>({});
   const [validatingPath, setValidatingPath] = useState<string | null>(null);
+  const [spb, setSpb] = useState<SpbCheckResult | null>(null);
 
   const loadPreregs = useCallback(() => {
     listPreregistrations()
@@ -140,6 +143,11 @@ export function Optimize({ onBack }: { onBack: () => void }) {
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
     loadPreregs();
+    // Physics read is independent of the run controls; fetch once. A failure
+    // here (e.g. no thermoelectric data) simply hides the panel.
+    getSpbCheck()
+      .then(setSpb)
+      .catch(() => setSpb(null));
   }, [valuesFor, loadPreregs]);
 
   // Switching (or naming) the variable reloads its stored values into the table.
@@ -254,6 +262,59 @@ export function Optimize({ onBack }: { onBack: () => void }) {
             <div className="rounded-md border border-edge bg-[color-mix(in_srgb,var(--latos-severity-warning)_10%,transparent)] px-4 py-3 text-sm" data-selectable>
               {error}
             </div>
+          )}
+
+          {/* Physics check — single parabolic band. Independent of a run:
+              interprets the best sample's measured (Seebeck, zT) against
+              thermoelectric physics, on the reliable Seebeck axis. */}
+          {spb?.best && (
+            <section
+              className={`rounded-lg border px-5 py-4 text-sm ${
+                spb.best.applicable
+                  ? "border-edge bg-surface"
+                  : "border-severity-warning bg-[color-mix(in_srgb,var(--latos-severity-warning)_12%,transparent)]"
+              }`}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-xs font-semibold uppercase tracking-wide text-secondary">
+                  Physics check — single parabolic band
+                </span>
+                <span className="text-xs text-secondary" data-selectable>
+                  best: {spb.best.sample_name}
+                </span>
+              </div>
+              {spb.best.applicable ? (
+                <div className="mt-2 space-y-1">
+                  <p className="text-primary" data-selectable>
+                    Quality factor β ≈ {fmtVal(spb.best.beta ?? 0)}. Measured |S| ={" "}
+                    {fmtVal(spb.best.measured_seebeck_uv_k)} µV/K; peak-zT optimum at |S| ≈{" "}
+                    {fmtVal(spb.best.optimal_seebeck_uv_k ?? 0)} µV/K.
+                  </p>
+                  <p className="text-secondary" data-selectable>
+                    {spb.best.direction === "at_optimum"
+                      ? "This sample sits near its single-band zT optimum."
+                      : spb.best.direction === "increase_seebeck"
+                        ? "Under-doped for peak zT — lower the carrier concentration (raise |S|)."
+                        : "Over-doped for peak zT — raise the carrier concentration (lower |S|)."}
+                  </p>
+                </div>
+              ) : (
+                <div className="mt-2 space-y-1">
+                  <p className="font-medium text-severity-warning" data-selectable>
+                    Measured zT ({fmtVal(spb.best.measured_zt)}) exceeds the single-band ceiling
+                    {spb.best.zt_ceiling != null
+                      ? ` (${fmtVal(spb.best.zt_ceiling)})`
+                      : ""}{" "}
+                    at |S| = {fmtVal(spb.best.measured_seebeck_uv_k)} µV/K.
+                  </p>
+                  <p className="text-secondary" data-selectable>
+                    A single parabolic band cannot reach this zT at such a low Seebeck. Expect
+                    multi-band transport, or check the Seebeck data/units before trusting a
+                    physics-informed target.
+                  </p>
+                </div>
+              )}
+            </section>
           )}
 
           {/* Verdict + chart */}

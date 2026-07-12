@@ -34,8 +34,10 @@ from latos import optimization
 from latos.analysis.base_analyzer import AnalyzerInputs
 from latos.analysis.registry import default_registry as analyzer_registry
 from latos.analysis.transport import TransportError
+from latos.core import physics
 from latos.core.enums import ReviewStatus, Technique
 from latos.core.models import Measurement, Project
+from latos.ingestion.array_store import ArrayStore
 from latos.ingestion.labeling.anomalies import flag_anomalies
 from latos.ingestion.labeling.suggestions import suggest_merges
 from latos.ingestion.orchestrator import IngestionResult
@@ -80,6 +82,8 @@ from latos.server.schemas import (
     SampleSummary,
     SetTechniqueRequest,
     SkippedPoint,
+    SpbCheckResult,
+    SpbSampleOut,
     SplitMeasurementsRequest,
     ThermoelectricResult,
     ValidateOutcomeRequest,
@@ -288,6 +292,31 @@ def _json_safe(value: object) -> object:
     return value
 
 
+def _hall_cross_technique_overrides(
+    result: IngestionResult, store: ArrayStore, measurement: Measurement
+) -> dict[str, dict[str, object]] | None:
+    """Cross-technique context for the Hall analyzer, from sibling measurements.
+
+    Injects the sample's Seebeck sign (carrier-type check) and its R&S-derived
+    conductivity (conductivity cross-check) so the Hall analyzer can compare
+    itself against the independent transport measurements. None when not Hall
+    or no sibling data exists.
+    """
+    if measurement.technique is not Technique.HALL:
+        return None
+    sample = next((s for s in result.project.samples if s.id == measurement.sample_id), None)
+    if sample is None:
+        return None
+    hall_params: dict[str, object] = {}
+    sign = transport_data.seebeck_sign(sample, store.load)
+    if sign is not None:
+        hall_params["seebeck_sign"] = sign
+    rs_sigma = transport_data.rs_conductivity_s_cm(sample, store.load)
+    if rs_sigma is not None:
+        hall_params["rs_conductivity_s_cm"] = rs_sigma
+    return {"hall-metrics": hall_params} if hall_params else None
+
+
 def _run_analysis(
     measurement: Measurement,
     arrays: dict[str, np.ndarray],
@@ -439,19 +468,7 @@ def _register_sample_read_routes(app: FastAPI, state: ServerState) -> None:
         measurement = _find_measurement(result, measurement_id)
         if measurement is None:
             raise HTTPException(status_code=404, detail="Unknown measurement")
-        # Cross-technique context: give the Hall analyzer the sample's
-        # Seebeck sign so it can check the two carrier-type determinations
-        # against each other.
-        overrides: dict[str, dict[str, object]] | None = None
-        if measurement.technique is Technique.HALL:
-            sample = next(
-                (s for s in result.project.samples if s.id == measurement.sample_id),
-                None,
-            )
-            if sample is not None:
-                sign = transport_data.seebeck_sign(sample, store.load)
-                if sign is not None:
-                    overrides = {"hall-metrics": {"seebeck_sign": sign}}
+        overrides = _hall_cross_technique_overrides(result, store, measurement)
         return _run_analysis(measurement, store.load(measurement_id), overrides)
 
 
@@ -581,6 +598,22 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             quality_flags=[_flag_out(f) for f in flags],
         )
 
+    @app.get("/optimize/spb")
+    def optimize_spb() -> SpbCheckResult:
+        """Single-parabolic-band physics read of the project's samples.
+
+        For each sample that can derive zT, interpret its measured
+        (Seebeck, zT) at the zT peak against SPB physics — where it sits
+        versus its own zT optimum, or a multi-band / data flag when the
+        pair is inconsistent with single-band transport. `best` is the
+        highest-peak-zT sample.
+        """
+        result = state.result
+        store = state.array_store()
+        if result is None or store is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        return _assemble_spb_check(result.project, store)
+
     @app.post("/optimize/run")
     def optimize_run(body: OptimizeRunRequest) -> OptimizeResult:
         # Hard gate: optimization only runs on human-confirmed identity.
@@ -593,6 +626,9 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
                 input_name=body.input_variable,
                 target_name=asm.target_label,
                 direction=asm.direction,
+                y_transform=asm.y_transform,
+                y_min=asm.y_min,
+                y_max=asm.y_max,
             )
         except OptimizationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -607,6 +643,8 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             grid_x=list(res.grid_x),
             grid_mean=list(res.grid_mean),
             grid_ci95=list(res.grid_ci95),
+            grid_lower=list(res.grid_lower),
+            grid_upper=list(res.grid_upper),
             grid_ei=list(res.grid_ei),
             points=asm.points,
             best_x=res.best_x,
@@ -665,6 +703,9 @@ def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> Free
             input_name=body.input_variable,
             target_name=asm.target_label,
             direction=asm.direction,
+            y_transform=asm.y_transform,
+            y_min=asm.y_min,
+            y_max=asm.y_max,
         )
         robustness = length_scale_robustness(
             asm.xs,
@@ -673,6 +714,9 @@ def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> Free
             input_name=body.input_variable,
             target_name=asm.target_label,
             direction=asm.direction,
+            y_transform=asm.y_transform,
+            y_min=asm.y_min,
+            y_max=asm.y_max,
             length_scales=(1.0, 2.0, 3.0, 4.0, 5.0),
         )
     except OptimizationError as exc:
@@ -703,6 +747,10 @@ class _AssembledOptimization:
     target_label: str
     direction: str  # what the engine runs: "maximize" | "minimize"
     quality_flags: list[QualityFlagOut]  # untrustworthy points (warn, don't block)
+    # Physics layer: the fit space + physical clamp bounds for the target.
+    y_transform: str  # "identity" | "log"
+    y_min: float | None
+    y_max: float | None
 
 
 def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _AssembledOptimization:
@@ -773,6 +821,17 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
             result.project, rows, body.input_variable, body.target_property
         )
     ]
+    # Physics layer: choose the fit space + clamp bounds from the property's
+    # physics. Target mode optimizes a distance |y - t| (not the property
+    # itself), so it stays linear/unclamped.
+    y_transform, y_min, y_max = "identity", None, None
+    prop = physics.lookup(body.target_property)
+    if prop is not None and body.objective != "target":
+        if prop.log_natural:
+            y_transform = "log"
+        if prop.positive:  # only clamp strictly-positive quantities
+            y_min, y_max = prop.min_value, prop.max_value
+
     bounds = body.bounds or (float(xs.min()), float(xs.max()))
     return _AssembledOptimization(
         points=points,
@@ -782,6 +841,9 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
         target_label=target_label,
         direction=direction,
         quality_flags=flags,
+        y_transform=y_transform,
+        y_min=y_min,
+        y_max=y_max,
     )
 
 
@@ -793,6 +855,34 @@ def _flag_out(flag: optimization_data.QualityFlag) -> QualityFlagOut:
         value=flag.value,
         reason=flag.reason,
     )
+
+
+def _assemble_spb_check(project: Project, store: ArrayStore) -> SpbCheckResult:
+    """Single-parabolic-band read of every sample that can derive zT.
+
+    `best` is the highest-peak-zT sample. Kept out of the route body so the
+    route-registration function stays within its statement budget.
+    """
+    samples: list[SpbSampleOut] = []
+    for sample in project.samples:
+        g = transport_data.sample_spb_guidance(sample, store.load)
+        if g is None:
+            continue
+        samples.append(
+            SpbSampleOut(
+                sample_name=sample.canonical_name,
+                applicable=g.applicable,
+                note=g.note,
+                measured_seebeck_uv_k=g.measured_seebeck_uv_k,
+                measured_zt=g.measured_zt,
+                beta=g.beta,
+                optimal_seebeck_uv_k=g.optimal_seebeck_uv_k,
+                zt_ceiling=g.zt_ceiling,
+                direction=g.direction,
+            )
+        )
+    best = max(samples, key=lambda s: s.measured_zt, default=None)
+    return SpbCheckResult(best=best, samples=samples)
 
 
 def _validate_prereg(state: ServerState, body: ValidateOutcomeRequest) -> OutcomeVerdictOut:
@@ -879,16 +969,18 @@ def _verdict_out_from_dict(data: dict[str, object]) -> OutcomeVerdictOut:
 
 
 def _rec_out(rec: Recommendation) -> RecommendationOut:
-    """Map an engine `Recommendation` to the API shape (both CIs + interval)."""
+    """Map an engine `Recommendation` to the API shape (both CIs + interval).
+
+    The interval comes straight from the engine's `predictive_interval_95` —
+    it is exact and physically-bounded (asymmetric for a log-space fit), not a
+    symmetric ± half-width, which would be wrong for a positive quantity.
+    """
     return RecommendationOut(
         x=rec.x,
         predicted_mean=rec.predicted_mean,
         ci95=rec.ci95,
         ci95_predictive=rec.ci95_predictive,
-        predictive_interval_95=(
-            rec.predicted_mean - rec.ci95_predictive,
-            rec.predicted_mean + rec.ci95_predictive,
-        ),
+        predictive_interval_95=rec.predictive_interval_95,
     )
 
 

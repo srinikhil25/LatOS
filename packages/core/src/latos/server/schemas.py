@@ -156,6 +156,34 @@ class QualityFlagOut(BaseModel):
     reason: str
 
 
+class SpbSampleOut(BaseModel):
+    """One sample's single-parabolic-band read (Seebeck vs zT at its zT peak)."""
+
+    sample_name: str
+    applicable: bool
+    note: str
+    measured_seebeck_uv_k: float
+    measured_zt: float
+    beta: float | None = None
+    optimal_seebeck_uv_k: float | None = None
+    zt_ceiling: float | None = None
+    direction: str | None = None  # increase_seebeck | decrease_seebeck | at_optimum
+
+
+class SpbCheckResult(BaseModel):
+    """GET /optimize/spb — physics-informed read of the project's best sample.
+
+    The single-parabolic-band model interprets each sample's measured
+    (Seebeck, zT) against thermoelectric physics: whether it sits below,
+    at, or above its own zT optimum, or — when the pair is inconsistent
+    with single-band transport — an explicit multi-band / data flag rather
+    than a fabricated target. `best` is the sample with the highest peak zT.
+    """
+
+    best: SpbSampleOut | None
+    samples: list[SpbSampleOut] = []
+
+
 class OptimizationDataset(BaseModel):
     """GET /optimize/dataset — the (x, y) table + what was skipped/flagged."""
 
@@ -222,10 +250,14 @@ class OptimizeResult(BaseModel):
     # Points whose target/axis value can't be trusted (e.g. an unreliable
     # Hall measurement). Non-empty means "warn before acting on this run".
     quality_flags: list[QualityFlagOut] = []
-    # Posterior over the search range, for the curve.
+    # Posterior over the search range, for the curve. grid_lower/grid_upper are
+    # the explicit 95% band in physical units (asymmetric for a log-space fit,
+    # clamped to the physical domain); grid_ci95 is a symmetric approximation.
     grid_x: list[float]
     grid_mean: list[float]
     grid_ci95: list[float]
+    grid_lower: list[float]
+    grid_upper: list[float]
     grid_ei: list[float]
     # Observed points, with sample names for labelling.
     points: list[DatasetPoint]

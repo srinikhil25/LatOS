@@ -37,6 +37,14 @@ def _run(features: dict[str, float]):
     return a.analyze(inputs)
 
 
+def _run_with_params(features: dict[str, float], params):
+    a = HallMetricsAnalyzer()
+    inputs = AnalyzerInputs(
+        measurement=_measure_stub(features), arrays={}, params=a.merge_params(params)
+    )
+    return a.analyze(inputs)
+
+
 class TestMetadata:
     def test_accepts_hall_only(self):
         assert HallMetricsAnalyzer().accepts_techniques == (Technique.HALL,)
@@ -208,3 +216,29 @@ class TestCrossConfigReliability:
         from latos.analysis.hall.metrics import cross_config_reliability
 
         assert cross_config_reliability({})[0] == "unknown"
+
+
+# ─── Conductivity cross-check vs R&S (1.2.0) ────────────────────────
+
+
+class TestConductivityCrossCheck:
+    def test_large_disagreement_flagged(self):
+        f = dict(_CONSISTENT)
+        f["conductivity_s_cm"] = 2930.0
+        out = _run_with_params(f, {"rs_conductivity_s_cm": 66667.0})  # ~23x
+        assert out.outputs["conductivity_cross_ratio"] > 3
+        assert any(
+            i.severity is Severity.WARNING and i.field == "conductivity_cross" for i in out.issues
+        )
+
+    def test_agreement_reports_info(self):
+        f = dict(_CONSISTENT)
+        f["conductivity_s_cm"] = 2930.0
+        out = _run_with_params(f, {"rs_conductivity_s_cm": 3200.0})
+        assert any(
+            i.severity is Severity.INFO and i.field == "conductivity_cross" for i in out.issues
+        )
+
+    def test_no_rs_conductivity_skips(self):
+        out = _run_with_params(dict(_CONSISTENT), {})
+        assert "conductivity_cross_ratio" not in out.outputs

@@ -296,6 +296,8 @@ export interface OptimizeResult {
   grid_x: number[];
   grid_mean: number[];
   grid_ci95: number[];
+  grid_lower: number[]; // explicit 95% band (physical units, clamped, log-aware)
+  grid_upper: number[];
   grid_ei: number[];
   points: DatasetPoint[];
   best_x: number;
@@ -320,6 +322,30 @@ export function setSampleParameters(
 
 export function getOptimizeTargets(): Promise<string[]> {
   return request<{ properties: string[] }>("/optimize/targets").then((r) => r.properties);
+}
+
+/** One sample's single-parabolic-band read (Seebeck vs zT at its zT peak).
+ * When `applicable` is false the (Seebeck, zT) pair is inconsistent with a
+ * single band — a multi-band / data flag, not a fabricated target. */
+export interface SpbSample {
+  sample_name: string;
+  applicable: boolean;
+  note: string;
+  measured_seebeck_uv_k: number;
+  measured_zt: number;
+  beta: number | null;
+  optimal_seebeck_uv_k: number | null;
+  zt_ceiling: number | null;
+  direction: "increase_seebeck" | "decrease_seebeck" | "at_optimum" | null;
+}
+
+export interface SpbCheckResult {
+  best: SpbSample | null;
+  samples: SpbSample[];
+}
+
+export function getSpbCheck(): Promise<SpbCheckResult> {
+  return request<SpbCheckResult>("/optimize/spb");
 }
 
 /** One available BO input axis. `synthesis` values are researcher-entered

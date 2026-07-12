@@ -13,6 +13,7 @@ a kernel artifact.
 
 from __future__ import annotations
 
+from latos.optimization import spb
 from latos.optimization.engine import (
     BoConfig,
     OptimizationError,
@@ -50,6 +51,7 @@ __all__ = [
     "list_preregistrations",
     "optimize",
     "outcome_path_for",
+    "spb",
     "validate_outcome",
     "write_outcome",
     "write_record",

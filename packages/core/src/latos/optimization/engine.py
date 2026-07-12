@@ -46,6 +46,7 @@ identical.
 
 from __future__ import annotations
 
+import math
 import os
 import warnings
 from dataclasses import dataclass
@@ -106,6 +107,43 @@ _LOO_FORCE_EXPLORATORY = 0.5
 _ROBUSTNESS_TOL_FRAC = 0.1
 _CI95 = 1.96  # 95% Gaussian half-width in standard deviations
 
+# y-space transforms (the physics layer). Strictly-positive order-of-magnitude
+# quantities (mobility, conductivity, …) are fit in log space so the surrogate
+# can never predict a negative value and its multiplicative noise is modelled
+# correctly. Everything else is fit linearly and clamped to its physical domain.
+_IDENTITY = "identity"
+_LOG = "log"
+_TRANSFORMS = (_IDENTITY, _LOG)
+
+
+def _forward(y: np.ndarray, transform: str) -> np.ndarray:
+    """Map property values into the space the GP is fit in."""
+    return np.log(y) if transform == _LOG else y
+
+
+def _inverse(v: np.ndarray, transform: str) -> np.ndarray:
+    """Map GP-space values back to physical (property) units."""
+    return np.exp(v) if transform == _LOG else v
+
+
+def _clamp(v: np.ndarray, lo: float | None, hi: float | None) -> np.ndarray:
+    """Clip to a physical domain (None = unbounded on that side)."""
+    if lo is not None:
+        v = np.maximum(v, lo)
+    if hi is not None:
+        v = np.minimum(v, hi)
+    return v
+
+
+def _to_phys(v: float, transform: str, lo: float | None, hi: float | None) -> float:
+    """Inverse-transform and clamp a single fit-space value to physical units."""
+    r = math.exp(v) if transform == _LOG else v
+    if lo is not None:
+        r = max(r, lo)
+    if hi is not None:
+        r = min(r, hi)
+    return float(r)
+
 
 class OptimizationError(ValueError):
     """The optimization could not be run (too few points, bad inputs)."""
@@ -126,10 +164,15 @@ class Recommendation:
     """
 
     x: float  # recommended parameter value
-    predicted_mean: float  # GP-predicted property there
-    ci95: float  # +/- 95% model half-width on that prediction
-    predictive_sd: float  # sqrt(model variance + measurement noise variance)
-    ci95_predictive: float  # +/- 95% half-width a new measurement should land in
+    predicted_mean: float  # GP-predicted property there (physical units)
+    ci95: float  # +/- 95% model half-width (approx, physical units)
+    predictive_sd: float  # sqrt(model variance + noise variance), in fit space
+    ci95_predictive: float  # +/- 95% predictive half-width (approx, physical units)
+    # Explicit [low, high] predictive interval in physical units. Carried
+    # separately because a log-space fit gives an ASYMMETRIC interval that a
+    # single half-width can't represent — this is the band to test calibration
+    # against, and it is always inside the property's physical domain.
+    predictive_interval_95: tuple[float, float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +188,7 @@ class BoConfig:
 
     objective: str  # the property being optimized
     direction: str  # "maximize" or "minimize"
+    y_transform: str  # fit space for the target: "identity" | "log"
     objective_aggregation: str  # how y was reduced per sample (e.g. "peak")
     input_name: str  # the synthesis variable being optimized
     bounds: tuple[float, float]  # search range
@@ -200,10 +244,15 @@ class OptimizationResult:
 
     input_name: str
     target_name: str
-    # Posterior over the search range (1-D), for plotting.
+    # Posterior over the search range (1-D), for plotting. `grid_lower` /
+    # `grid_upper` are the explicit 95% model band in physical units — correct
+    # (and asymmetric) for a log-space fit, and clamped to the physical domain.
+    # `grid_ci95` is a symmetric-half-width approximation kept for compatibility.
     grid_x: tuple[float, ...]
     grid_mean: tuple[float, ...]
     grid_ci95: tuple[float, ...]
+    grid_lower: tuple[float, ...]
+    grid_upper: tuple[float, ...]
     grid_ei: tuple[float, ...]
     # The observed data echoed back (so the UI can plot the points).
     observed_x: tuple[float, ...]
@@ -221,17 +270,28 @@ class OptimizationResult:
     reliability: ReliabilityReport | None = None
 
 
+def _noise_std(y_work: np.ndarray, rel_noise: float, transform: str) -> float:
+    """Absolute measurement-noise std in the GP's fit space.
+
+    In log space a *relative* measurement error becomes a constant *additive*
+    error (d(ln y) = dy/y), so the noise floor is simply `rel_noise`; in linear
+    space it scales with the data magnitude.
+    """
+    if transform == _LOG:
+        return rel_noise
+    return rel_noise * float(np.mean(np.abs(y_work)))
+
+
 def _build_gp(
-    y: np.ndarray, rel_noise: float, length_scale: float | None, seed: int
-) -> tuple[GaussianProcessRegressor, float]:
+    y: np.ndarray, noise_std: float, length_scale: float | None, seed: int
+) -> GaussianProcessRegressor:
     """A GP with a smooth RBF trend and a realistic measurement-noise floor.
 
-    When `length_scale` is None the length-scale is fitted by marginal
-    likelihood (within `_LS_BOUNDS`); when a value is given it is held
-    fixed — which is what `length_scale_robustness()` sweeps over. Returns
-    the (unfitted) GP and the absolute noise std used, in `y`'s units.
+    `noise_std` is the absolute noise in `y`'s (fit-space) units — the caller
+    computes it via `_noise_std` so log-space fits get the right floor. When
+    `length_scale` is None it is fitted by marginal likelihood (within
+    `_LS_BOUNDS`); a fixed value is what `length_scale_robustness()` sweeps.
     """
-    noise_std = rel_noise * float(np.mean(np.abs(y)))
     alpha = (noise_std / max(float(np.std(y)), 1e-9)) ** 2
     if length_scale is None:
         rbf = RBF(length_scale=_LS_INIT, length_scale_bounds=_LS_BOUNDS)
@@ -240,14 +300,13 @@ def _build_gp(
         rbf = RBF(length_scale=length_scale, length_scale_bounds="fixed")
         n_restarts = 0
     kernel = ConstantKernel(1.0, (1e-2, 1e2)) * rbf
-    gp = GaussianProcessRegressor(
+    return GaussianProcessRegressor(
         kernel=kernel,
         alpha=alpha,
         normalize_y=True,
         n_restarts_optimizer=n_restarts,
         random_state=seed,
     )
-    return gp, noise_std
 
 
 def _fitted_length_scale(gp: GaussianProcessRegressor) -> float:
@@ -273,21 +332,56 @@ def _expected_improvement(
     return np.asarray(ei, dtype=float)
 
 
+def _recommend(
+    grid: np.ndarray,
+    rec_i: int,
+    mean_int: np.ndarray,
+    std: np.ndarray,
+    *,
+    sign: float,
+    noise_std: float,
+    transform: str,
+    y_min: float | None,
+    y_max: float | None,
+) -> Recommendation:
+    """Build the recommendation at grid index `rec_i`, mapped to physical units.
+
+    The model and predictive intervals are formed in fit space, then inverse-
+    transformed and clamped, so both are exact (and asymmetric under log) and
+    inside the property's physical domain.
+    """
+    rec_sigma = float(std[rec_i])
+    predictive_sd = float(np.sqrt(rec_sigma**2 + noise_std**2))
+    pm_work = float(sign * mean_int[rec_i])
+    lo_pred = _to_phys(pm_work - _CI95 * predictive_sd, transform, y_min, y_max)
+    hi_pred = _to_phys(pm_work + _CI95 * predictive_sd, transform, y_min, y_max)
+    lo_model = _to_phys(pm_work - _CI95 * rec_sigma, transform, y_min, y_max)
+    hi_model = _to_phys(pm_work + _CI95 * rec_sigma, transform, y_min, y_max)
+    return Recommendation(
+        x=float(grid[rec_i]),
+        predicted_mean=_to_phys(pm_work, transform, y_min, y_max),
+        ci95=(hi_model - lo_model) / 2.0,
+        predictive_sd=predictive_sd,
+        ci95_predictive=(hi_pred - lo_pred) / 2.0,
+        predictive_interval_95=(lo_pred, hi_pred),
+    )
+
+
 def _assess_reliability(
     x_norm: np.ndarray,
     y: np.ndarray,
     *,
-    rel_noise: float,
+    noise_std: float,
     length_scale: float,
     seed: int,
 ) -> ReliabilityReport:
     """Count-tier + leave-one-out reliability of the model's intervals.
 
-    Each LOO fold refits with the full fit's length-scale held FIXED — the
-    cheap, standard approximation (re-optimizing hyperparameters per fold
-    buys little at these sizes and costs n × restarts GP fits). The check
-    asks the only question that matters: does the model's own 95%
-    predictive interval contain the point it didn't see?
+    Runs in the GP's fit space (`y` and `noise_std` are already transformed),
+    so the coverage check is consistent with a log-space fit. Each LOO fold
+    refits with the full fit's length-scale held FIXED — the cheap, standard
+    approximation. The check asks the only question that matters: does the
+    model's own 95% predictive interval contain the point it didn't see?
     """
     if not np.isfinite(length_scale):
         length_scale = _LS_INIT
@@ -295,7 +389,7 @@ def _assess_reliability(
     inside = 0
     for i in range(n):
         mask = np.arange(n) != i
-        gp, noise_std = _build_gp(y[mask], rel_noise, length_scale, seed)
+        gp = _build_gp(y[mask], noise_std, length_scale, seed)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", ConvergenceWarning)
             gp.fit(x_norm[mask].reshape(-1, 1), y[mask])
@@ -351,6 +445,9 @@ def optimize(
     input_name: str,
     target_name: str,
     direction: str = "maximize",
+    y_transform: str = _IDENTITY,
+    y_min: float | None = None,
+    y_max: float | None = None,
     length_scale: float | None = None,
     rel_noise: float = _REL_NOISE,
     xi: float = _XI,
@@ -374,6 +471,15 @@ def optimize(
             the engine optimizes -y internally and reports back in original
             units; all displayed quantities (posterior mean, best, prediction)
             stay in the property's real scale.
+        y_transform: "identity" (default) or "log". "log" fits a strictly-
+            positive, order-of-magnitude target (mobility, conductivity, …) in
+            log space, so the prediction and its interval can never be negative
+            and the multiplicative noise is modelled correctly. Falls back to
+            "identity" if the data contains a non-positive value.
+        y_min: lower physical bound for the target (clamps the band/interval),
+            or None. From the physics registry; keeps a positive property's band
+            from ever dipping below zero.
+        y_max: upper physical bound for the target, or None.
         length_scale: Fix the RBF length-scale to this value; if None it is
             fitted from the data. Fixing it is how `length_scale_robustness`
             probes whether the recommendation is a kernel artifact.
@@ -420,12 +526,21 @@ def optimize(
     x_scale = (hi - lo) / _SPAN_UNITS
     x_norm = (x - lo) / x_scale
 
-    # Minimization is exact negation: the GP and EI work on y_int; every
-    # displayed quantity is mapped back to the property's real scale.
-    sign = 1.0 if direction == "maximize" else -1.0
-    y_int = sign * y
+    # Physics layer: fit a strictly-positive, order-of-magnitude target in log
+    # space so the surrogate can never predict a negative value. Fall back to
+    # linear if a log target carries a non-positive value (a bad measurement,
+    # flagged elsewhere) so the fit never crashes.
+    transform = y_transform if y_transform in _TRANSFORMS else _IDENTITY
+    if transform == _LOG and bool(np.any(y <= 0)):
+        transform = _IDENTITY
+    y_work = _forward(y, transform)
+    noise_std = _noise_std(y_work, rel_noise, transform)
 
-    gp, noise_std = _build_gp(y_int, rel_noise, length_scale, seed)
+    # Minimization is exact negation in the (possibly log) fit space.
+    sign = 1.0 if direction == "maximize" else -1.0
+    y_int = sign * y_work
+
+    gp = _build_gp(y_int, noise_std, length_scale, seed)
     # We deliberately bound the length-scale to keep a handful of points
     # from overfitting; sklearn then warns when the optimizer sits on that
     # bound. That's expected, not a problem — suppress it locally.
@@ -442,30 +557,38 @@ def optimize(
     best_x = float(x[best_i])
     ei = _expected_improvement(mean_int, std, f_best_int, xi)
 
+    # Undo the direction flip, then map the posterior back to physical units,
+    # clamped to the property's domain. The band [lower, upper] is exact even
+    # when the log inverse makes it asymmetric.
+    mean_work = sign * mean_int
+    grid_mean = _clamp(_inverse(mean_work, transform), y_min, y_max)
+    grid_lower = _clamp(_inverse(mean_work - _CI95 * std, transform), y_min, y_max)
+    grid_upper = _clamp(_inverse(mean_work + _CI95 * std, transform), y_min, y_max)
+    grid_ci95 = (grid_upper - grid_lower) / 2.0
+
     rec_i = int(np.argmax(ei))
-    rec_sigma = float(std[rec_i])
-    # Predictive uncertainty adds measurement noise to the model uncertainty:
-    # this is the band a *new* measurement at the recommended point should
-    # fall within, and the one to test calibration against.
-    predictive_sd = float(np.sqrt(rec_sigma**2 + noise_std**2))
-    recommendation = Recommendation(
-        x=float(grid[rec_i]),
-        predicted_mean=float(sign * mean_int[rec_i]),
-        ci95=_CI95 * rec_sigma,
-        predictive_sd=predictive_sd,
-        ci95_predictive=_CI95 * predictive_sd,
+    recommendation = _recommend(
+        grid,
+        rec_i,
+        mean_int,
+        std,
+        sign=sign,
+        noise_std=noise_std,
+        transform=transform,
+        y_min=y_min,
+        y_max=y_max,
     )
     max_ei = float(ei[rec_i])
-    # Stopping rule: when the best possible expected improvement is
-    # smaller than the measurement noise, no experiment can *reliably*
-    # do better. A noise-aware heuristic for "stop and publish", not a
-    # formal optimality guarantee.
-    noise_threshold = rel_noise * float(np.mean(np.abs(y)))
+    # Stopping rule: when the best expected improvement is smaller than the
+    # measurement noise floor (in fit space), no experiment can *reliably* do
+    # better. A noise-aware heuristic for "stop and publish", not a guarantee.
+    noise_threshold = noise_std
     converged = max_ei < noise_threshold
 
     config = BoConfig(
         objective=target_name,
         direction=direction,
+        y_transform=transform,
         objective_aggregation=objective_aggregation,
         input_name=input_name,
         bounds=(float(lo), float(hi)),
@@ -490,7 +613,7 @@ def optimize(
         reliability = _assess_reliability(
             x_norm,
             y_int,
-            rel_noise=rel_noise,
+            noise_std=noise_std,
             length_scale=config.length_scale,
             seed=seed,
         )
@@ -499,8 +622,10 @@ def optimize(
         input_name=input_name,
         target_name=target_name,
         grid_x=tuple(grid.tolist()),
-        grid_mean=tuple((sign * mean_int).tolist()),
-        grid_ci95=tuple((_CI95 * std).tolist()),
+        grid_mean=tuple(grid_mean.tolist()),
+        grid_ci95=tuple(grid_ci95.tolist()),
+        grid_lower=tuple(grid_lower.tolist()),
+        grid_upper=tuple(grid_upper.tolist()),
         grid_ei=tuple(ei.tolist()),
         observed_x=tuple(x.tolist()),
         observed_y=tuple(y.tolist()),
@@ -552,6 +677,9 @@ def length_scale_robustness(
     target_name: str,
     length_scales: tuple[float, ...],
     direction: str = "maximize",
+    y_transform: str = _IDENTITY,
+    y_min: float | None = None,
+    y_max: float | None = None,
     rel_noise: float = _REL_NOISE,
     xi: float = _XI,
     grid_size: int = _GRID_SIZE,
@@ -561,7 +689,8 @@ def length_scale_robustness(
     """Re-run the optimization at several fixed length-scales and compare.
 
     Returns a `RobustnessReport` whose `stable` flag is True when the
-    recommended point varies by at most `tol_frac` of the search span.
+    recommended point varies by at most `tol_frac` of the search span. The
+    y-transform/domain must match the main run so the sweep is comparable.
     """
     entries: list[RobustnessEntry] = []
     for ls in length_scales:
@@ -572,6 +701,9 @@ def length_scale_robustness(
             input_name=input_name,
             target_name=target_name,
             direction=direction,
+            y_transform=y_transform,
+            y_min=y_min,
+            y_max=y_max,
             length_scale=float(ls),
             rel_noise=rel_noise,
             xi=xi,

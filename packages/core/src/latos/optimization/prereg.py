@@ -35,14 +35,16 @@ def build_record(
     """Assemble the pre-registration record as a JSON-serializable dict."""
     cfg = result.config
     rec = result.recommendation
-    lo95 = rec.predicted_mean - rec.ci95_predictive
-    hi95 = rec.predicted_mean + rec.ci95_predictive
+    # Exact, physically-bounded interval from the engine (asymmetric for a
+    # log-space fit) — not a symmetric ± half-width.
+    lo95, hi95 = rec.predictive_interval_95
     record: dict[str, Any] = {
         "kind": "latos.bo.prereg",
         "created_at": cfg.created_at.isoformat(),
         "objective": {
             "property": cfg.objective,
             "direction": cfg.direction,
+            "y_transform": cfg.y_transform,
             "aggregation": cfg.objective_aggregation,
             "input_variable": cfg.input_name,
             "search_bounds": list(cfg.bounds),
