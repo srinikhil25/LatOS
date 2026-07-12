@@ -32,6 +32,7 @@ import {
   type SpbCheckResult,
 } from "../lib/api";
 import { OptimizeChart } from "../components/OptimizeChart";
+import { AnalysisLoader } from "../components/AnalysisLoader";
 
 /** "etching_time_h" → "etching time h" for on-screen labels. */
 const humanize = (v: string) => v.replace(/_/g, " ").trim() || "variable";
@@ -61,6 +62,14 @@ function reliabilityChipClass(level: string): string {
     "bg-[color-mix(in_srgb,var(--latos-severity-warning)_18%,transparent)] text-severity-warning"
   );
 }
+
+/** The real steps runOptimize runs through, shown while a run is in flight. */
+const OPTIMIZE_STAGES = [
+  "Standardizing inputs & assembling (X, y)…",
+  "Fitting the Gaussian-process surrogate…",
+  "Optimizing the acquisition function…",
+  "Checking kernel robustness & reliability…",
+];
 
 export function Optimize({ onBack }: { onBack: () => void }) {
   const [samples, setSamples] = useState<SampleSummary[]>([]);
@@ -315,6 +324,10 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                 </div>
               )}
             </section>
+          )}
+
+          {running && (
+            <AnalysisLoader title="Running the optimization" stages={OPTIMIZE_STAGES} />
           )}
 
           {/* Verdict + chart */}

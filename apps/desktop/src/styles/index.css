@@ -56,3 +56,16 @@ option {
   background-color: var(--latos-surface);
   color: var(--latos-text-primary);
 }
+
+/* Indeterminate progress sweep — a short bar that shuttles across its
+   track. Used by <AnalysisLoader> for computations whose duration is not
+   known ahead of time (feature-table build, batch fits). It signals
+   "working" through motion without claiming a false completion fraction. */
+@keyframes latos-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}

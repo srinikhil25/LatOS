@@ -17,9 +17,20 @@ import {
   type FeatureTable,
 } from "../lib/api";
 import { axisLabel } from "../lib/labels";
+import { AnalysisLoader } from "../components/AnalysisLoader";
 
 const FORMATS = ["svg", "pdf", "png"] as const;
 type Fmt = (typeof FORMATS)[number];
+
+/** The real steps the /features build runs through, shown while it computes. */
+const FEATURE_STAGES = [
+  "Reading measurements for every sample…",
+  "Fitting XRD peaks — Scherrer crystallite sizes…",
+  "Computing UV-DRS Tauc band gaps…",
+  "Summarizing transport — peak zT and power factor…",
+  "Running physics & data-quality checks…",
+  "Assembling the cross-sample feature table…",
+];
 
 /** Diverging red/blue fill for a Pearson r in [-1, 1] (null = blank). */
 function cellColor(r: number | null): string {
@@ -106,10 +117,7 @@ export function Correlate({ onBack }: { onBack: () => void }) {
           )}
 
           {loading && (
-            <div className="rounded-lg border border-edge bg-surface px-5 py-6 text-sm text-secondary">
-              Building the feature table (running the analysis across every sample)… this is
-              computed once, then cached.
-            </div>
+            <AnalysisLoader title="Building the feature table" stages={FEATURE_STAGES} />
           )}
 
           {table && corr && (

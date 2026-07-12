@@ -18,6 +18,7 @@ import {
   type SampleSummary,
 } from "../lib/api";
 import { axisLabel } from "../lib/labels";
+import { AnalysisLoader } from "../components/AnalysisLoader";
 
 const SHAPES: { value: PeakShape; label: string }[] = [
   { value: "pseudo_voigt", label: "Pseudo-Voigt" },
@@ -40,6 +41,14 @@ const BACKGROUNDS: { value: BackgroundKind; label: string }[] = [
 // Techniques that produce a peak-fittable spectrum (excludes images like
 // TEM/SEM and scalar/curve techniques like Hall and thermoelectric).
 const FITTABLE = new Set(["xrd", "xps", "raman", "uv_drs", "eds"]);
+
+/** The real steps runFit runs through, shown while a fit is in flight. */
+const FIT_STAGES = [
+  "Sorting the spectrum & seeding parameters…",
+  "Building the composite peak + background model…",
+  "Least-squares refinement (lmfit)…",
+  "Computing ±1σ uncertainties and residuals…",
+];
 
 // Preferred x / y column names, most specific first.
 const X_HINTS = ["two_theta", "binding_energy", "raman_shift", "wavelength_nm", "energy_ev"];
@@ -94,7 +103,8 @@ export function Fit({ onBack }: { onBack: () => void }) {
   const [background, setBackground] = useState<BackgroundKind>("linear");
   const [result, setResult] = useState<FitResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "detecting" | "fitting">("idle");
+  const busy = phase !== "idle";
 
   useEffect(() => {
     getSamples()
@@ -140,21 +150,22 @@ export function Fit({ onBack }: { onBack: () => void }) {
 
   const autoDetect = useCallback(() => {
     if (xy.x.length < 5) return;
-    setBusy(true);
+    setPhase("detecting");
     detectPeaks(xy.x, xy.y)
       .then((r) => setPeaks(r.centers.slice().sort((a, b) => a - b)))
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setBusy(false));
+      .finally(() => setPhase("idle"));
   }, [xy]);
 
   const doFit = useCallback(() => {
     if (xy.x.length < 5 || peaks.length === 0) return;
-    setBusy(true);
+    setPhase("fitting");
     setError(null);
+    setResult(null);
     runFit({ x: xy.x, y: xy.y, peak_shape: shape, peaks, background: { kind: background } })
       .then(setResult)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setBusy(false));
+      .finally(() => setPhase("idle"));
   }, [xy, peaks, shape, background]);
 
   const removePeak = (i: number) => setPeaks((p) => p.filter((_, j) => j !== i));
@@ -321,11 +332,15 @@ export function Fit({ onBack }: { onBack: () => void }) {
                   disabled={busy || peaks.length === 0}
                   className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
                 >
-                  {busy ? "Fitting…" : "Fit"}
+                  {phase === "fitting" ? "Fitting…" : "Fit"}
                 </button>
               </div>
             )}
           </section>
+
+          {phase === "fitting" && (
+            <AnalysisLoader title="Running the fit" stages={FIT_STAGES} />
+          )}
 
           {/* Result */}
           {result && (
