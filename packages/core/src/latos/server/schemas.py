@@ -429,3 +429,88 @@ class MeasurementArrays(BaseModel):
     measurement_id: str
     names: list[str]
     arrays: dict[str, list[float | None]]
+
+
+# ─── Fit engine (Stage 4) ──────────────────────────────────────────────
+class DetectPeaksRequest(BaseModel):
+    """POST /fit/detect-peaks — auto-detect candidate peak centers."""
+
+    x: list[float]
+    y: list[float]
+    max_peaks: int = 30
+    min_prominence_frac: float = 0.02
+
+
+class DetectPeaksResult(BaseModel):
+    """Candidate peak centers (x-values), strongest first."""
+
+    centers: list[float]
+
+
+class FitBackgroundInput(BaseModel):
+    """Background choice for a fit request."""
+
+    kind: str = "linear"  # none|constant|linear|polynomial|shirley|als
+    degree: int = 2
+    lam: float = 1e5
+    p: float = 0.01
+
+
+class FitConstraintInput(BaseModel):
+    """One inter-peak constraint (peaks referenced by index)."""
+
+    type: str  # fixed_delta | fixed_ratio | shared_width
+    ref: int
+    target: int
+    delta: float | None = None  # fixed_delta
+    ratio: float | None = None  # fixed_ratio
+
+
+class FitRequest(BaseModel):
+    """POST /fit — fit N peaks of one shape over a background to (x, y)."""
+
+    x: list[float]
+    y: list[float]
+    peak_shape: str = "pseudo_voigt"
+    peaks: list[float]  # initial peak centers
+    background: FitBackgroundInput = FitBackgroundInput()
+    constraints: list[FitConstraintInput] = []
+
+
+class FitParamOut(BaseModel):
+    """A fitted parameter's value and 1σ uncertainty (None if unestimated)."""
+
+    name: str
+    value: float
+    stderr: float | None
+
+
+class FitComponentOut(BaseModel):
+    """One fitted peak's headline numbers."""
+
+    center: float
+    amplitude: float
+    sigma: float
+    fwhm: float | None
+    height: float | None
+
+
+class FitResultOut(BaseModel):
+    """POST /fit — the fit, its components, arrays for overlay, and a report."""
+
+    success: bool
+    r_squared: float
+    chi_square: float
+    reduced_chi_square: float
+    components: list[FitComponentOut]
+    params: list[FitParamOut]
+    baseline: list[float]
+    best_fit: list[float]
+    residual: list[float]
+    markdown: str
+
+
+class FitPresetsOut(BaseModel):
+    """GET /fit/presets — known XPS spin-orbit doublets: name -> [ΔBE, ratio]."""
+
+    doublets: dict[str, list[float]]

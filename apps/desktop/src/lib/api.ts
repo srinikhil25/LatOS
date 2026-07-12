@@ -150,6 +150,79 @@ export function getMeasurementArrays(id: string): Promise<MeasurementArrays> {
   return request<MeasurementArrays>(`/measurements/${id}/arrays`);
 }
 
+// ─── Fit engine (Stage 4) ──────────────────────────────────────────────
+export type PeakShape =
+  | "gaussian"
+  | "lorentzian"
+  | "voigt"
+  | "pseudo_voigt"
+  | "doniach"
+  | "skewed_voigt";
+
+export type BackgroundKind =
+  | "none"
+  | "constant"
+  | "linear"
+  | "polynomial"
+  | "shirley"
+  | "als";
+
+export interface FitConstraint {
+  type: "fixed_delta" | "fixed_ratio" | "shared_width";
+  ref: number;
+  target: number;
+  delta?: number;
+  ratio?: number;
+}
+
+export interface FitComponent {
+  center: number;
+  amplitude: number;
+  sigma: number;
+  fwhm: number | null;
+  height: number | null;
+}
+
+export interface FitParam {
+  name: string;
+  value: number;
+  stderr: number | null;
+}
+
+export interface FitResult {
+  success: boolean;
+  r_squared: number;
+  chi_square: number;
+  reduced_chi_square: number;
+  components: FitComponent[];
+  params: FitParam[];
+  baseline: number[];
+  best_fit: number[];
+  residual: number[];
+  markdown: string;
+}
+
+export interface FitRequest {
+  x: number[];
+  y: number[];
+  peak_shape: PeakShape;
+  peaks: number[];
+  background: { kind: BackgroundKind; degree?: number; lam?: number; p?: number };
+  constraints?: FitConstraint[];
+}
+
+export function detectPeaks(x: number[], y: number[], maxPeaks = 30): Promise<{ centers: number[] }> {
+  return post<{ centers: number[] }>("/fit/detect-peaks", { x, y, max_peaks: maxPeaks });
+}
+
+export function runFit(req: FitRequest): Promise<FitResult> {
+  return post<FitResult>("/fit", req);
+}
+
+export function getFitPresets(): Promise<{ doublets: Record<string, number[]> }> {
+  return request<{ doublets: Record<string, number[]> }>("/fit/presets");
+}
+
 export interface AnalyzerResult {
   analyzer: string;
   outputs: Record<string, unknown>;

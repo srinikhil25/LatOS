@@ -7,6 +7,7 @@
 
 import { useEffect, useState } from "react";
 import { waitForCore } from "./lib/api";
+import { Fit } from "./screens/Fit";
 import { Hub } from "./screens/Hub";
 import { Optimize } from "./screens/Optimize";
 import { Review } from "./screens/Review";
@@ -14,7 +15,7 @@ import { Samples } from "./screens/Samples";
 import { Start } from "./screens/Start";
 
 type CoreStatus = "connecting" | "ready" | "down";
-type Screen = "start" | "hub" | "samples" | "review" | "optimize";
+type Screen = "start" | "hub" | "samples" | "review" | "optimize" | "fit";
 
 export default function App() {
   const [core, setCore] = useState<CoreStatus>("connecting");
@@ -65,6 +66,8 @@ export default function App() {
       return <Review onBack={() => setScreen("hub")} />;
     case "optimize":
       return <Optimize onBack={() => setScreen("hub")} />;
+    case "fit":
+      return <Fit onBack={() => setScreen("hub")} />;
     default:
       return (
         <Hub
@@ -72,6 +75,7 @@ export default function App() {
           onOpenSamples={() => setScreen("samples")}
           onOpenReview={() => setScreen("review")}
           onOpenOptimize={() => setScreen("optimize")}
+          onOpenFit={() => setScreen("fit")}
         />
       );
   }

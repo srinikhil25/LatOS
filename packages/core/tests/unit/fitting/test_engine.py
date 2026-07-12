@@ -87,6 +87,23 @@ class TestFitSpectrum:
         r = fit_spectrum(x, y, spec)
         assert r.r_squared > 0.99
 
+    def test_descending_x_fits_and_aligns(self):
+        # XPS binding energy runs high→low. The engine must fit a
+        # descending-x spectrum and return arrays in the caller's order.
+        x, y = _two_peak_spectrum()
+        xr, yr = x[::-1], y[::-1]
+        spec = FitSpec(PeakShape.GAUSSIAN, [PeakInit(30.0), PeakInit(60.0)])
+        r = fit_spectrum(xr, yr, spec)
+        assert r.r_squared > 0.999
+        centers = sorted(c.center for c in r.components)
+        assert centers[0] == pytest.approx(30.0, abs=0.3)
+        assert centers[1] == pytest.approx(60.0, abs=0.3)
+        # Every fitted center stays inside the measured window (no runaway).
+        assert all(0.0 <= c.center <= 100.0 for c in r.components)
+        # Returned arrays align with the (descending) input order.
+        assert r.best_fit.shape == yr.shape
+        assert np.allclose(r.residual, yr - r.best_fit)
+
 
 class TestGuards:
     def test_no_peaks_raises(self):

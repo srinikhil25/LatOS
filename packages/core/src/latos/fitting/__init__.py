@@ -28,12 +28,20 @@ from latos.fitting.engine import (
     compute_baseline,
     fit_spectrum,
 )
+from latos.fitting.peak_finder import detect_peaks
 from latos.fitting.peak_shapes import PeakShape, peak_model
 from latos.fitting.presets import (
     XPS_DOUBLETS,
     raman_preset,
     xps_doublet_preset,
     xrd_preset,
+)
+from latos.fitting.reports import csv_table, latex_table, markdown_report
+from latos.fitting.templates import (
+    load_template,
+    save_template,
+    spec_from_dict,
+    spec_to_dict,
 )
 
 __all__ = [
@@ -52,9 +60,17 @@ __all__ = [
     "SharedWidth",
     "apply_constraints",
     "compute_baseline",
+    "csv_table",
+    "detect_peaks",
     "fit_spectrum",
+    "latex_table",
+    "load_template",
+    "markdown_report",
     "peak_model",
     "raman_preset",
+    "save_template",
+    "spec_from_dict",
+    "spec_to_dict",
     "xps_doublet_preset",
     "xrd_preset",
 ]

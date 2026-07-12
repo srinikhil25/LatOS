@@ -37,6 +37,23 @@ from latos.analysis.transport import TransportError
 from latos.core import physics
 from latos.core.enums import ReviewStatus, Technique
 from latos.core.models import Measurement, Project
+from latos.fitting import (
+    XPS_DOUBLETS,
+    BackgroundKind,
+    BackgroundSpec,
+    FitError,
+    FitResult,
+    FitSpec,
+    FixedDelta,
+    FixedRatio,
+    PeakInit,
+    PeakShape,
+    SharedWidth,
+    detect_peaks,
+    fit_spectrum,
+    markdown_report,
+)
+from latos.fitting.constraints import Constraint
 from latos.ingestion.array_store import ArrayStore
 from latos.ingestion.labeling.anomalies import flag_anomalies
 from latos.ingestion.labeling.suggestions import suggest_merges
@@ -57,6 +74,13 @@ from latos.server.schemas import (
     DatasetPoint,
     DeleteProjectRequest,
     DeleteProjectResult,
+    DetectPeaksRequest,
+    DetectPeaksResult,
+    FitComponentOut,
+    FitParamOut,
+    FitPresetsOut,
+    FitRequest,
+    FitResultOut,
     FreezeResult,
     HealthResponse,
     IngestStartedResponse,
@@ -225,6 +249,7 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
 
     _register_review_routes(app, state)
     _register_optimization_data_routes(app, state)
+    _register_fit_routes(app)
 
     _register_sample_read_routes(app, state)
 
@@ -346,6 +371,91 @@ def _run_analysis(
             )
         )
     return out
+
+
+def _build_fit_spec(body: FitRequest) -> FitSpec:
+    """Assemble a core `FitSpec` from a `/fit` request body."""
+    constraints: list[Constraint] = []
+    for c in body.constraints:
+        if c.type == "fixed_delta":
+            constraints.append(FixedDelta(ref=c.ref, target=c.target, delta=c.delta or 0.0))
+        elif c.type == "fixed_ratio":
+            constraints.append(FixedRatio(ref=c.ref, target=c.target, ratio=c.ratio or 1.0))
+        elif c.type == "shared_width":
+            constraints.append(SharedWidth(ref=c.ref, target=c.target))
+    return FitSpec(
+        peak_shape=PeakShape(body.peak_shape),
+        peaks=[PeakInit(center=c) for c in body.peaks],
+        background=BackgroundSpec(
+            kind=BackgroundKind(body.background.kind),
+            degree=body.background.degree,
+            lam=body.background.lam,
+            p=body.background.p,
+        ),
+        constraints=constraints,
+    )
+
+
+def _fit_result_out(result: FitResult) -> FitResultOut:
+    """Map a core `FitResult` to the API shape (arrays as lists + a report)."""
+    return FitResultOut(
+        success=result.success,
+        r_squared=result.r_squared,
+        chi_square=result.chi_square,
+        reduced_chi_square=result.reduced_chi_square,
+        components=[
+            FitComponentOut(
+                center=c.center,
+                amplitude=c.amplitude,
+                sigma=c.sigma,
+                fwhm=c.fwhm,
+                height=c.height,
+            )
+            for c in result.components
+        ],
+        params=[
+            FitParamOut(name=name, value=value, stderr=stderr)
+            for name, (value, stderr) in result.params.items()
+        ],
+        baseline=result.baseline.tolist(),
+        best_fit=result.best_fit.tolist(),
+        residual=result.residual.tolist(),
+        markdown=markdown_report(result),
+    )
+
+
+def _register_fit_routes(app: FastAPI) -> None:
+    """Register the Stage-4 peak-fitting endpoints.
+
+    Stateless: they fit the posted (x, y) arrays, so no project need be
+    open — the frontend already has the measurement's arrays.
+    """
+
+    @app.post("/fit/detect-peaks")
+    def detect(body: DetectPeaksRequest) -> DetectPeaksResult:
+        centers = detect_peaks(
+            np.asarray(body.x, dtype=float),
+            np.asarray(body.y, dtype=float),
+            max_peaks=body.max_peaks,
+            min_prominence_frac=body.min_prominence_frac,
+        )
+        return DetectPeaksResult(centers=centers)
+
+    @app.post("/fit")
+    def run_fit(body: FitRequest) -> FitResultOut:
+        try:
+            result = fit_spectrum(
+                np.asarray(body.x, dtype=float),
+                np.asarray(body.y, dtype=float),
+                _build_fit_spec(body),
+            )
+        except (FitError, KeyError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _fit_result_out(result)
+
+    @app.get("/fit/presets")
+    def fit_presets() -> FitPresetsOut:
+        return FitPresetsOut(doublets={k: [d, r] for k, (d, r) in XPS_DOUBLETS.items()})
 
 
 def _register_sample_read_routes(app: FastAPI, state: ServerState) -> None:
