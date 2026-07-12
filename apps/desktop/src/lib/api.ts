@@ -223,6 +223,83 @@ export function getFitPresets(): Promise<{ doublets: Record<string, number[]> }>
   return request<{ doublets: Record<string, number[]> }>("/fit/presets");
 }
 
+// ─── Cross-correlation + reporting (Stage 6) ───────────────────────────
+export interface FeatureCell {
+  value: number;
+  unit: string;
+  source: string;
+  reliable: boolean;
+}
+
+export interface FeatureRow {
+  sample_id: string;
+  sample_name: string;
+  features: Record<string, FeatureCell>;
+}
+
+export interface FeatureTable {
+  properties: string[];
+  rows: FeatureRow[];
+}
+
+export interface Correlation {
+  property_a: string;
+  property_b: string;
+  pearson: number;
+  spearman: number;
+  n: number;
+}
+
+export interface Correlations {
+  properties: string[];
+  matrix: (number | null)[][];
+  pairs: Correlation[];
+}
+
+/** The feature table can be slow to compute on first call (runs the analysis
+ * layer across every sample); it is cached server-side thereafter. */
+export function getFeatures(): Promise<FeatureTable> {
+  return request<FeatureTable>("/features");
+}
+
+export function getCorrelations(reliableOnly = false): Promise<Correlations> {
+  return request<Correlations>(`/correlations?reliable_only=${reliableOnly}`);
+}
+
+export function getReportStyles(): Promise<string[]> {
+  return request<{ styles: string[] }>("/report/styles").then((r) => r.styles);
+}
+
+/** URL for a rendered publication figure (heatmap or scatter). */
+export function figureUrl(opts: {
+  kind: "heatmap" | "scatter";
+  style: string;
+  fmt: "svg" | "pdf" | "png";
+  x?: string;
+  y?: string;
+}): string {
+  const p = new URLSearchParams({ kind: opts.kind, style: opts.style, fmt: opts.fmt });
+  if (opts.x) p.set("x", opts.x);
+  if (opts.y) p.set("y", opts.y);
+  return `${BASE}/report/figure?${p.toString()}`;
+}
+
+/** Fetch a figure as a blob and trigger a browser download. */
+export async function downloadFigure(
+  opts: Parameters<typeof figureUrl>[0],
+  filename: string,
+): Promise<void> {
+  const resp = await fetch(figureUrl(opts));
+  if (!resp.ok) throw new Error(`Figure export failed (${resp.status})`);
+  const blob = await resp.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export interface AnalyzerResult {
   analyzer: string;
   outputs: Record<string, unknown>;

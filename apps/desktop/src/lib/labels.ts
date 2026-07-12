@@ -50,6 +50,11 @@ const AXIS_LABELS: Record<string, string> = {
   sheet_resistance_ohm_sq: "Sheet resistance (Ω/□)",
   // ─ Optical / band structure ─
   band_gap_ev: "Band gap (eV)",
+  // ─ Cross-sample features (Correlate page) ─
+  crystallite_size_nm: "Crystallite size (nm)",
+  peak_zt: "Peak zT",
+  peak_seebeck_uv_k: "Peak Seebeck (µV/K)",
+  peak_thermal_conductivity: "Peak thermal conductivity (W/m·K)",
   // ─ Synthesis variables (common defaults) ─
   doping_pct: "Doping (%)",
   // ─ Plot fallbacks ─

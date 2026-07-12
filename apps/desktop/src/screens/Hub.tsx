@@ -54,12 +54,14 @@ export function Hub({
   onOpenReview,
   onOpenOptimize,
   onOpenFit,
+  onOpenCorrelate,
 }: {
   onBack: () => void;
   onOpenSamples: () => void;
   onOpenReview: () => void;
   onOpenOptimize: () => void;
   onOpenFit: () => void;
+  onOpenCorrelate: () => void;
 }) {
   const [project, setProject] = useState<ProjectSummary | null>(null);
   const [samples, setSamples] = useState<SampleSummary[]>([]);
@@ -153,6 +155,11 @@ export function Hub({
           title="Fit"
           subtitle="Peak fitting & reports"
           onClick={onOpenFit}
+        />
+        <WorkspaceCard
+          title="Correlate"
+          subtitle="Cross-technique & figures"
+          onClick={onOpenCorrelate}
         />
         <WorkspaceCard
           title="Optimize"

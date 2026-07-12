@@ -231,7 +231,6 @@ module = [
     "mp_api.*",
     "scipy.*",
     "sklearn.*",
-    "matplotlib.*",
     "xlrd.*",
     "openpyxl.*",
     "pyarrow.*",
@@ -246,6 +245,15 @@ ignore_missing_imports = true
 # under our 3.11 target. Skip imports of it entirely.
 [[tool.mypy.overrides]]
 module = ["tifffile", "tifffile.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+# matplotlib ships `py.typed`; newer versions type rcParams as a dict keyed
+# by a Literal of every valid key, so passing a plain `dict[str, object]` to
+# `rc_context` fails [arg-type] on CI's fresh install (but not our pinned
+# local one). We only use matplotlib for figure export, so skip its types.
+[[tool.mypy.overrides]]
+module = ["matplotlib", "matplotlib.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 
