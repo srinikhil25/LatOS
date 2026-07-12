@@ -212,8 +212,7 @@ def list_input_variables(project: Project, params: SynthesisParams) -> list[Inpu
                 measured.setdefault(name, {}).setdefault(sample.id, float(value))
 
     out = [
-        InputVariable(name=n, source="synthesis", values=v)
-        for n, v in sorted(synthesis.items())
+        InputVariable(name=n, source="synthesis", values=v) for n, v in sorted(synthesis.items())
     ]
     out += [
         InputVariable(name=n, source="measured", values=v)
@@ -224,9 +223,7 @@ def list_input_variables(project: Project, params: SynthesisParams) -> list[Inpu
     return out
 
 
-def _resolve_x(
-    sample: Sample, params: SynthesisParams, input_variable: str
-) -> float | None:
+def _resolve_x(sample: Sample, params: SynthesisParams, input_variable: str) -> float | None:
     """Input value for a sample: synthesis parameter first, then features."""
     x = params.get(sample.id, {}).get(input_variable)
     if x is not None:

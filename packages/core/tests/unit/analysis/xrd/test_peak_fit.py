@@ -595,7 +595,10 @@ class TestBraggScherrer:
         from latos.analysis.xrd.peak_fit import _bragg_and_scherrer
 
         d, sizes = _bragg_and_scherrer(
-            [28.44], [0.2], wavelength_angstrom=1.5406, k=0.9,
+            [28.44],
+            [0.2],
+            wavelength_angstrom=1.5406,
+            k=0.9,
         )
         assert d[0] == pytest.approx(3.135, abs=0.005)
         assert sizes[0] == pytest.approx(41.0, abs=1.5)
@@ -604,7 +607,10 @@ class TestBraggScherrer:
         from latos.analysis.xrd.peak_fit import _bragg_and_scherrer
 
         d, sizes = _bragg_and_scherrer(
-            [28.44, 0.0, 30.0], [0.2, 0.2, 0.0], wavelength_angstrom=1.5406, k=0.9,
+            [28.44, 0.0, 30.0],
+            [0.2, 0.2, 0.0],
+            wavelength_angstrom=1.5406,
+            k=0.9,
         )
         # Zero-center and zero-FWHM peaks contribute nothing.
         assert len(d) == 1

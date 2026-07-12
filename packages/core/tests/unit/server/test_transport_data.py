@@ -24,8 +24,11 @@ def _meas(sample_id: str, technique: Technique = Technique.THERMOELECTRIC) -> Me
         parser_version="1.0.0",
         files=(
             FileRef(
-                path=Path("D:/x.xlsx"), sha256="0" * 64, size_bytes=1,
-                role=FileRole.RAW, scanned_at=utc_now(),
+                path=Path("D:/x.xlsx"),
+                sha256="0" * 64,
+                size_bytes=1,
+                role=FileRole.RAW,
+                scanned_at=utc_now(),
             ),
         ),
         issues=(),
@@ -49,9 +52,7 @@ def _sample_with() -> tuple[Sample, str, str]:
     sid = new_id()
     lfa = _meas(sid)
     rs = _meas(sid)
-    sample = Sample(
-        id=sid, project_id=new_id(), canonical_name="CS", measurements=(lfa, rs)
-    )
+    sample = Sample(id=sid, project_id=new_id(), canonical_name="CS", measurements=(lfa, rs))
     return sample, lfa.id, rs.id
 
 

@@ -9,6 +9,7 @@
  */
 
 import type { OptimizeResult } from "../lib/api";
+import { axisLabel } from "../lib/labels";
 
 const W = 720;
 const H = 470;
@@ -108,7 +109,7 @@ export function OptimizeChart({ result }: { result: OptimizeResult }) {
 
       {/* axis titles */}
       <text x={(ML + W - MR) / 2} y={H - 4} textAnchor="middle" fontSize="12" fill={GRID}>
-        {result.input_variable}
+        {axisLabel(result.input_variable)}
       </text>
       <text
         x={14}
@@ -118,7 +119,7 @@ export function OptimizeChart({ result }: { result: OptimizeResult }) {
         fill={GRID}
         transform={`rotate(-90 14 ${(MAIN_TOP + MAIN_BOT) / 2})`}
       >
-        {result.target_property}
+        {axisLabel(result.target_property)}
       </text>
 
       {/* EI strip */}

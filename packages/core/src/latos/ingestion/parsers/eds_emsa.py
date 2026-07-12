@@ -72,12 +72,16 @@ class EdsEmsaParser(BaseParser):
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError as exc:
-            return self._empty([
-                ValidationIssue(
-                    field="file", severity=Severity.ERROR,
-                    message=f"Could not read file: {exc}", detected_at=utc_now(),
-                ),
-            ])
+            return self._empty(
+                [
+                    ValidationIssue(
+                        field="file",
+                        severity=Severity.ERROR,
+                        message=f"Could not read file: {exc}",
+                        detected_at=utc_now(),
+                    ),
+                ]
+            )
 
         keywords: dict[str, str] = {}
         data_tokens: list[float] = []
@@ -101,12 +105,16 @@ class EdsEmsaParser(BaseParser):
                 data_tokens.extend(float(t) for t in _NUMBER_RE.findall(line))
 
         if not data_tokens:
-            return self._empty([
-                ValidationIssue(
-                    field="data", severity=Severity.ERROR,
-                    message="No spectrum data found after #SPECTRUM.", detected_at=utc_now(),
-                ),
-            ])
+            return self._empty(
+                [
+                    ValidationIssue(
+                        field="data",
+                        severity=Severity.ERROR,
+                        message="No spectrum data found after #SPECTRUM.",
+                        detected_at=utc_now(),
+                    ),
+                ]
+            )
 
         datatype = keywords.get("DATATYPE", "Y").upper()
         if datatype == "XY":

@@ -189,14 +189,26 @@ def _lfa_meas(sample_id: str, store: ArrayStore) -> Measurement:
                 "temperature_k": np.array([300.0, 400.0, 500.0, 600.0]),
                 "thermal_conductivity": np.array([5.0, 4.5, 4.2, 4.0]),
             },
-            metadata={}, instrument=None, measured_at=None, issues=(),
-            parser_name="lfa-xlsx", parser_version="1.0.0",
+            metadata={},
+            instrument=None,
+            measured_at=None,
+            issues=(),
+            parser_name="lfa-xlsx",
+            parser_version="1.0.0",
         ),
     )
     return Measurement(
-        id=mid, sample_id=sample_id, technique=Technique.THERMOELECTRIC,
-        instrument=None, measured_at=None, parsed_at=utc_now(), parser_version="1.0.0",
-        files=(), issues=(), parsed_data_path=None, analysis_results=(),
+        id=mid,
+        sample_id=sample_id,
+        technique=Technique.THERMOELECTRIC,
+        instrument=None,
+        measured_at=None,
+        parsed_at=utc_now(),
+        parser_version="1.0.0",
+        files=(),
+        issues=(),
+        parsed_data_path=None,
+        analysis_results=(),
     )
 
 
@@ -211,14 +223,26 @@ def _rs_meas(sample_id: str, store: ArrayStore) -> Measurement:
                 "resistivity_uohm_m": np.array([0.12, 0.18, 0.24, 0.29]),
                 "seebeck_uv_k": np.array([8.0, 14.0, 22.0, 32.0]),
             },
-            metadata={}, instrument=None, measured_at=None, issues=(),
-            parser_name="resistivity-seebeck-xlsx", parser_version="1.0.0",
+            metadata={},
+            instrument=None,
+            measured_at=None,
+            issues=(),
+            parser_name="resistivity-seebeck-xlsx",
+            parser_version="1.0.0",
         ),
     )
     return Measurement(
-        id=mid, sample_id=sample_id, technique=Technique.THERMOELECTRIC,
-        instrument=None, measured_at=None, parsed_at=utc_now(), parser_version="1.0.0",
-        files=(), issues=(), parsed_data_path=None, analysis_results=(),
+        id=mid,
+        sample_id=sample_id,
+        technique=Technique.THERMOELECTRIC,
+        instrument=None,
+        measured_at=None,
+        parsed_at=utc_now(),
+        parser_version="1.0.0",
+        files=(),
+        issues=(),
+        parsed_data_path=None,
+        analysis_results=(),
     )
 
 
@@ -227,12 +251,20 @@ def _project_with_te_pair(root: Path) -> tuple[Project, ArrayStore, str]:
     pid = new_id()
     sid = new_id()
     sample = Sample(
-        id=sid, project_id=pid, canonical_name="CS", aliases=(),
+        id=sid,
+        project_id=pid,
+        canonical_name="CS",
+        aliases=(),
         measurements=(_lfa_meas(sid, store), _rs_meas(sid, store)),
     )
     project = Project(
-        id=pid, name=root.name, root_path=root, created_at=utc_now(),
-        schema_version=4, samples=(sample,), unassigned_files=(),
+        id=pid,
+        name=root.name,
+        root_path=root,
+        created_at=utc_now(),
+        schema_version=4,
+        samples=(sample,),
+        unassigned_files=(),
     )
     return project, store, sid
 
@@ -251,8 +283,11 @@ class TestDerivedZt:
     def test_build_dataset_uses_derived_zt(self, tmp_path: Path):
         project, store, sid = _project_with_te_pair(tmp_path)
         rows, skipped = optimization_data.build_dataset(
-            project, store, {sid: {"doping_pct": 3.0}},
-            "doping_pct", optimization_data.DERIVED_ZT,
+            project,
+            store,
+            {sid: {"doping_pct": 3.0}},
+            "doping_pct",
+            optimization_data.DERIVED_ZT,
         )
         assert len(rows) == 1
         assert 0.0 < rows[0].y < 1.5
@@ -261,8 +296,11 @@ class TestDerivedZt:
     def test_missing_pair_reported(self, tmp_path: Path):
         project, store, _ = _project_with_zt(tmp_path)
         rows, skipped = optimization_data.build_dataset(
-            project, store, {s.id: {"doping_pct": 1.0} for s in project.samples},
-            "doping_pct", optimization_data.DERIVED_ZT,
+            project,
+            store,
+            {s.id: {"doping_pct": 1.0} for s in project.samples},
+            "doping_pct",
+            optimization_data.DERIVED_ZT,
         )
         assert rows == []
         assert all("derive zT" in s.reason for s in skipped)
@@ -345,8 +383,10 @@ class TestMeasuredInputVariables:
 
     def test_feature_as_target(self, tmp_path: Path):
         project, store, ids = _project_with_hall(tmp_path)
-        params = {sid: {"doping_pct": d} for sid, d in
-                  [(ids["CS-1"], 1.0), (ids["CS-3"], 3.0), (ids["CS-5"], 5.0)]}
+        params = {
+            sid: {"doping_pct": d}
+            for sid, d in [(ids["CS-1"], 1.0), (ids["CS-3"], 3.0), (ids["CS-5"], 5.0)]
+        }
         rows, skipped = optimization_data.build_dataset(
             project, store, params, "doping_pct", "mobility_cm2_vs"
         )

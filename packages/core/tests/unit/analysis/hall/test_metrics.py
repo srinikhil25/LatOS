@@ -30,7 +30,9 @@ def _measure_stub(features: dict[str, float]):
 def _run(features: dict[str, float]):
     a = HallMetricsAnalyzer()
     inputs = AnalyzerInputs(
-        measurement=_measure_stub(features), arrays={}, params=a.merge_params(None),
+        measurement=_measure_stub(features),
+        arrays={},
+        params=a.merge_params(None),
     )
     return a.analyze(inputs)
 
@@ -69,18 +71,14 @@ class TestConsistency:
         out = _run(_CONSISTENT)
         assert out.outputs["consistency_deviation_pct"] < 5
         assert any(
-            i.severity is Severity.INFO and "consistent" in i.message.lower()
-            for i in out.issues
+            i.severity is Severity.INFO and "consistent" in i.message.lower() for i in out.issues
         )
 
     def test_unit_slip_flagged(self):
         f = dict(_CONSISTENT)
         f["conductivity_s_cm"] = 80.11e3  # three orders off — classic unit slip
         out = _run(f)
-        assert any(
-            i.severity is Severity.WARNING and i.field == "consistency"
-            for i in out.issues
-        )
+        assert any(i.severity is Severity.WARNING and i.field == "consistency" for i in out.issues)
 
     def test_implausible_concentration_flagged(self):
         f = dict(_CONSISTENT)
@@ -118,8 +116,7 @@ class TestCrossConfiguration:
         assert "UNRELIABLE" in out.outputs["carrier_type"]
         assert "disagree in sign" in out.outputs["carrier_type_reliability"]
         assert any(
-            i.severity is Severity.WARNING and i.field == "hall_reliability"
-            for i in out.issues
+            i.severity is Severity.WARNING and i.field == "hall_reliability" for i in out.issues
         )
 
     def test_large_ratio_is_questionable(self):
@@ -149,8 +146,7 @@ class TestSeebeckCrossCheck:
         out = _run_with(dict(_CONSISTENT), seebeck_sign=+1.0)
         assert out.outputs["carrier_type_from_seebeck"] == "p-type (holes)"
         assert any(
-            i.severity is Severity.INFO and "agreement" in i.message.lower()
-            for i in out.issues
+            i.severity is Severity.INFO and "agreement" in i.message.lower() for i in out.issues
         )
 
     def test_disagreement_with_unreliable_hall_trusts_seebeck(self):

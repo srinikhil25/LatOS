@@ -409,9 +409,7 @@ def optimize(
             f"Need at least {_MIN_POINTS} measured points to optimize; got {x.size}"
         )
     if direction not in _DIRECTIONS:
-        raise OptimizationError(
-            f"direction must be one of {_DIRECTIONS}; got {direction!r}"
-        )
+        raise OptimizationError(f"direction must be one of {_DIRECTIONS}; got {direction!r}")
     lo, hi = bounds
     if not hi > lo:
         raise OptimizationError(f"bounds must have high > low; got {bounds}")

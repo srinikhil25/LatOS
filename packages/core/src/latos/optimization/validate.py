@@ -213,9 +213,7 @@ def list_preregistrations(root: Path) -> list[PreregEntry]:
                     predicted_mean=float(pred["predicted_mean"]),
                     predictive_interval_95=(lo, hi),
                     prior_best=float(record.get("prior_best", float("nan"))),
-                    reliability_level=str(
-                        record.get("reliability", {}).get("level", "unknown")
-                    ),
+                    reliability_level=str(record.get("reliability", {}).get("level", "unknown")),
                     outcome=outcome,
                 )
             )

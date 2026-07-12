@@ -161,7 +161,11 @@ class TestPreregRecordCarriesDirection:
         x = np.array([1.0, 3.0, 5.0])
         y = np.array([2.0, 1.0, 1.8])  # a loss to minimize
         res = optimize(
-            x, y, bounds=(1.0, 5.0), input_name="d", target_name="loss",
+            x,
+            y,
+            bounds=(1.0, 5.0),
+            input_name="d",
+            target_name="loss",
             direction="minimize",
         )
         record = build_record(res, prior_best=res.best_y)

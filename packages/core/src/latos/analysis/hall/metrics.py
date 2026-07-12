@@ -90,14 +90,18 @@ class HallMetricsAnalyzer(BaseAnalyzer):
         hall_reliable = _cross_configuration_check(f, outputs, issues)
         _consistency_check(f, outputs, issues)
         _cross_technique_check(
-            f, inputs.params.get("seebeck_sign"), outputs, issues,
+            f,
+            inputs.params.get("seebeck_sign"),
+            outputs,
+            issues,
             hall_reliable=hall_reliable,
         )
         return AnalyzerOutput(outputs=outputs, derived_arrays={}, issues=tuple(issues))
 
 
 def _restate_metrics(
-    f: dict[str, float], issues: list[ValidationIssue],
+    f: dict[str, float],
+    issues: list[ValidationIssue],
 ) -> dict[str, Any]:
     """Interpreted outputs from the exported scalars, with plausibility flags."""
     outputs: dict[str, Any] = {}
@@ -109,28 +113,30 @@ def _restate_metrics(
     # exported bulk concentration carries the same sign convention.
     sign_source = hall_coeff if hall_coeff is not None else n_signed
     if sign_source:
-        outputs["carrier_type"] = (
-            "n-type (electrons)" if sign_source < 0 else "p-type (holes)"
-        )
+        outputs["carrier_type"] = "n-type (electrons)" if sign_source < 0 else "p-type (holes)"
 
     if n_signed is not None:
         n_abs = abs(n_signed)
         outputs["carrier_concentration_cm3"] = f"{n_abs:.3e}"
         if not _N_MIN_CM3 <= n_abs <= _N_MAX_CM3:
-            issues.append(_warn(
-                "carrier_concentration",
-                f"Carrier concentration {n_abs:.2e} cm⁻³ is outside the "
-                f"plausible bulk range [{_N_MIN_CM3:.0e}, {_N_MAX_CM3:.0e}] — "
-                "check units or contact quality.",
-            ))
+            issues.append(
+                _warn(
+                    "carrier_concentration",
+                    f"Carrier concentration {n_abs:.2e} cm⁻³ is outside the "
+                    f"plausible bulk range [{_N_MIN_CM3:.0e}, {_N_MAX_CM3:.0e}] — "
+                    "check units or contact quality.",
+                )
+            )
     if mobility is not None:
         outputs["mobility_cm2_vs"] = round(mobility, 3)
         if not 0 < mobility <= _MU_MAX_CM2_VS:
-            issues.append(_warn(
-                "mobility",
-                f"Mobility {mobility:.3g} cm²/(V·s) is outside the plausible "
-                f"range (0, {_MU_MAX_CM2_VS:.0e}] — check units.",
-            ))
+            issues.append(
+                _warn(
+                    "mobility",
+                    f"Mobility {mobility:.3g} cm²/(V·s) is outside the plausible "
+                    f"range (0, {_MU_MAX_CM2_VS:.0e}] — check units.",
+                )
+            )
     for key, out_key in (
         ("resistivity_ohm_cm", "resistivity_ohm_cm"),
         ("conductivity_s_cm", "conductivity_s_cm"),
@@ -144,7 +150,9 @@ def _restate_metrics(
 
 
 def _cross_configuration_check(
-    f: dict[str, float], outputs: dict[str, Any], issues: list[ValidationIssue],
+    f: dict[str, float],
+    outputs: dict[str, Any],
+    issues: list[ValidationIssue],
 ) -> bool:
     """Do the AC and BD van der Pauw diagonals tell the same story?
 
@@ -162,13 +170,15 @@ def _cross_configuration_check(
         outputs["carrier_type_reliability"] = "unreliable — cross-configurations disagree in sign"
         if "carrier_type" in outputs:
             outputs["carrier_type"] = f"{outputs['carrier_type']} — UNRELIABLE"
-        issues.append(_warn(
-            "hall_reliability",
-            f"The two Hall cross-configurations disagree in sign "
-            f"(AC {ac:+.3g}, BD {bd:+.3g} cm³/C) — the Hall voltage is at the noise "
-            "floor. Carrier type, concentration and mobility are unreliable; "
-            "conductivity and resistivity remain valid.",
-        ))
+        issues.append(
+            _warn(
+                "hall_reliability",
+                f"The two Hall cross-configurations disagree in sign "
+                f"(AC {ac:+.3g}, BD {bd:+.3g} cm³/C) — the Hall voltage is at the noise "
+                "floor. Carrier type, concentration and mobility are unreliable; "
+                "conductivity and resistivity remain valid.",
+            )
+        )
         return False
 
     ratio = max(abs(ac), abs(bd)) / min(abs(ac), abs(bd))
@@ -177,12 +187,14 @@ def _cross_configuration_check(
         outputs["carrier_type_reliability"] = (
             f"questionable — cross-configurations differ by {ratio:.0f}x"
         )
-        issues.append(_warn(
-            "hall_reliability",
-            f"The two Hall cross-configurations agree in sign but differ by "
-            f"{ratio:.0f}x (AC {ac:+.3g}, BD {bd:+.3g} cm³/C) — treat the carrier "
-            "concentration and mobility as rough estimates.",
-        ))
+        issues.append(
+            _warn(
+                "hall_reliability",
+                f"The two Hall cross-configurations agree in sign but differ by "
+                f"{ratio:.0f}x (AC {ac:+.3g}, BD {bd:+.3g} cm³/C) — treat the carrier "
+                "concentration and mobility as rough estimates.",
+            )
+        )
     else:
         outputs["carrier_type_reliability"] = "good — cross-configurations agree"
     return True
@@ -212,15 +224,17 @@ def _cross_technique_check(
     seebeck_type = "p-type (holes)" if seebeck_p else "n-type (electrons)"
     outputs["carrier_type_from_seebeck"] = seebeck_type
     if hall_p == seebeck_p:
-        issues.append(ValidationIssue(
-            field="carrier_type",
-            severity=Severity.INFO,
-            message=(
-                f"Cross-technique agreement: Hall and Seebeck independently "
-                f"indicate {seebeck_type}."
-            ),
-            detected_at=utc_now(),
-        ))
+        issues.append(
+            ValidationIssue(
+                field="carrier_type",
+                severity=Severity.INFO,
+                message=(
+                    f"Cross-technique agreement: Hall and Seebeck independently "
+                    f"indicate {seebeck_type}."
+                ),
+                detected_at=utc_now(),
+            )
+        )
         return
 
     hall_type = "p-type" if hall_p else "n-type"
@@ -230,15 +244,19 @@ def _cross_technique_check(
         if not hall_reliable
         else " Check both measurements — in a single-carrier material these must agree."
     )
-    issues.append(_warn(
-        "carrier_type",
-        f"Cross-technique disagreement: Hall indicates {hall_type} but the "
-        f"Seebeck sign indicates {seebeck_type.split(' ', 1)[0]}.{trust}",
-    ))
+    issues.append(
+        _warn(
+            "carrier_type",
+            f"Cross-technique disagreement: Hall indicates {hall_type} but the "
+            f"Seebeck sign indicates {seebeck_type.split(' ', 1)[0]}.{trust}",
+        )
+    )
 
 
 def _consistency_check(
-    f: dict[str, float], outputs: dict[str, Any], issues: list[ValidationIssue],
+    f: dict[str, float],
+    outputs: dict[str, Any],
+    issues: list[ValidationIssue],
 ) -> None:
     """Conductivity recomputed from q·n·μ must agree with the measured one."""
     n_signed = f.get("carrier_concentration_cm3")
@@ -255,27 +273,34 @@ def _consistency_check(
     rel = abs(sigma_calc - abs(sigma_meas)) / abs(sigma_meas)
     outputs["consistency_deviation_pct"] = round(rel * 100, 1)
     if rel > _SIGMA_MISMATCH_FRAC:
-        issues.append(_warn(
-            "consistency",
-            f"Conductivity from q·n·μ ({sigma_calc:.3e} S/cm) disagrees with the "
-            f"measured value ({abs(sigma_meas):.3e} S/cm) by {rel * 100:.0f}% — "
-            "possible unit slip or unreliable Hall fit.",
-        ))
+        issues.append(
+            _warn(
+                "consistency",
+                f"Conductivity from q·n·μ ({sigma_calc:.3e} S/cm) disagrees with the "
+                f"measured value ({abs(sigma_meas):.3e} S/cm) by {rel * 100:.0f}% — "
+                "possible unit slip or unreliable Hall fit.",
+            )
+        )
     else:
-        issues.append(ValidationIssue(
-            field="consistency",
-            severity=Severity.INFO,
-            message=(
-                f"Internally consistent: conductivity from q·n·μ reproduces the "
-                f"measured value within {rel * 100:.0f}%."
-            ),
-            detected_at=utc_now(),
-        ))
+        issues.append(
+            ValidationIssue(
+                field="consistency",
+                severity=Severity.INFO,
+                message=(
+                    f"Internally consistent: conductivity from q·n·μ reproduces the "
+                    f"measured value within {rel * 100:.0f}%."
+                ),
+                detected_at=utc_now(),
+            )
+        )
 
 
 def _warn(field: str, message: str) -> ValidationIssue:
     return ValidationIssue(
-        field=field, severity=Severity.WARNING, message=message, detected_at=utc_now(),
+        field=field,
+        severity=Severity.WARNING,
+        message=message,
+        detected_at=utc_now(),
     )
 
 
@@ -285,8 +310,10 @@ def _error(message: str) -> AnalyzerOutput:
         derived_arrays={},
         issues=(
             ValidationIssue(
-                field="analyze", severity=Severity.ERROR,
-                message=message, detected_at=utc_now(),
+                field="analyze",
+                severity=Severity.ERROR,
+                message=message,
+                detected_at=utc_now(),
             ),
         ),
     )

@@ -60,7 +60,8 @@ class TransportSummaryAnalyzer(BaseAnalyzer):
             )
         if "thermal_conductivity" in arrays:
             return _summarize_lfa(
-                t, np.asarray(arrays["thermal_conductivity"], dtype=np.float64),
+                t,
+                np.asarray(arrays["thermal_conductivity"], dtype=np.float64),
             )
         return _error(
             "Unrecognized thermoelectric arrays — expected an R&S run "
@@ -69,23 +70,29 @@ class TransportSummaryAnalyzer(BaseAnalyzer):
 
 
 def _summarize_rs(
-    t: np.ndarray, rho_uohm_m: np.ndarray, s_uv_k: np.ndarray,
+    t: np.ndarray,
+    rho_uohm_m: np.ndarray,
+    s_uv_k: np.ndarray,
 ) -> AnalyzerOutput:
     """Seebeck sign, extremes, and the power-factor curve for an R&S run."""
     issues: list[ValidationIssue] = []
 
     if np.any(rho_uohm_m <= 0):
-        issues.append(_warn(
-            "resistivity",
-            "Some resistivity values are ≤ 0 — power factor is not physical there.",
-        ))
+        issues.append(
+            _warn(
+                "resistivity",
+                "Some resistivity values are ≤ 0 — power factor is not physical there.",
+            )
+        )
     sign = np.sign(s_uv_k[np.abs(s_uv_k) > 0])
     if sign.size and not (np.all(sign > 0) or np.all(sign < 0)):
-        issues.append(_warn(
-            "seebeck",
-            "Seebeck changes sign across the temperature range — bipolar/mixed "
-            "conduction, or a data problem worth checking.",
-        ))
+        issues.append(
+            _warn(
+                "seebeck",
+                "Seebeck changes sign across the temperature range — bipolar/mixed "
+                "conduction, or a data problem worth checking.",
+            )
+        )
 
     # PF = S²·σ = S² / ρ.  S: µV/K → V/K; ρ: µΩ·m → Ω·m; PF → µW/(m·K²).
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -105,7 +112,8 @@ def _summarize_rs(
         "seebeck_max_uv_k": round(float(s_uv_k[i_smax]), 1),
         "seebeck_max_at_k": round(float(t[i_smax]), 1),
         "resistivity_range_uohm_m": [
-            round(float(np.min(rho_uohm_m)), 4), round(float(np.max(rho_uohm_m)), 4),
+            round(float(np.min(rho_uohm_m)), 4),
+            round(float(np.max(rho_uohm_m)), 4),
         ],
     }
     if np.any(np.isfinite(pf_uw_mk2)):
@@ -124,23 +132,28 @@ def _summarize_lfa(t: np.ndarray, kappa: np.ndarray) -> AnalyzerOutput:
     """Thermal-conductivity range for an LFA run, with plausibility flags."""
     issues: list[ValidationIssue] = []
     if np.any(kappa <= 0):
-        issues.append(_warn(
-            "thermal_conductivity",
-            "Some thermal-conductivity values are ≤ 0 — check the LFA export.",
-        ))
+        issues.append(
+            _warn(
+                "thermal_conductivity",
+                "Some thermal-conductivity values are ≤ 0 — check the LFA export.",
+            )
+        )
     if float(np.nanmax(kappa)) > _KAPPA_MAX_W_MK:
-        issues.append(_warn(
-            "thermal_conductivity",
-            f"κ exceeds {_KAPPA_MAX_W_MK:.0f} W/(m·K) — implausible for a bulk "
-            "thermoelectric; a unit error upstream is likely.",
-        ))
+        issues.append(
+            _warn(
+                "thermal_conductivity",
+                f"κ exceeds {_KAPPA_MAX_W_MK:.0f} W/(m·K) — implausible for a bulk "
+                "thermoelectric; a unit error upstream is likely.",
+            )
+        )
 
     i_min = int(np.nanargmin(kappa))
     outputs: dict[str, Any] = {
         "kind": "LFA (thermal conductivity)",
         "temperature_range_k": [round(float(t.min()), 1), round(float(t.max()), 1)],
         "kappa_range_w_mk": [
-            round(float(np.nanmin(kappa)), 3), round(float(np.nanmax(kappa)), 3),
+            round(float(np.nanmin(kappa)), 3),
+            round(float(np.nanmax(kappa)), 3),
         ],
         "kappa_min_at_k": round(float(t[i_min]), 1),
     }
@@ -149,7 +162,10 @@ def _summarize_lfa(t: np.ndarray, kappa: np.ndarray) -> AnalyzerOutput:
 
 def _warn(field: str, message: str) -> ValidationIssue:
     return ValidationIssue(
-        field=field, severity=Severity.WARNING, message=message, detected_at=utc_now(),
+        field=field,
+        severity=Severity.WARNING,
+        message=message,
+        detected_at=utc_now(),
     )
 
 
@@ -159,8 +175,10 @@ def _error(message: str) -> AnalyzerOutput:
         derived_arrays={},
         issues=(
             ValidationIssue(
-                field="analyze", severity=Severity.ERROR,
-                message=message, detected_at=utc_now(),
+                field="analyze",
+                severity=Severity.ERROR,
+                message=message,
+                detected_at=utc_now(),
             ),
         ),
     )

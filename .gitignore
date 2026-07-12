@@ -115,6 +115,10 @@ docs/figures/latos_architecture*
 node_modules/
 apps/desktop/dist/
 apps/desktop/src-tauri/target/
+# The Python `lib/` rule above (build artifacts) also matches the app's
+# source dir apps/desktop/src/lib/ — the API client + shared helpers. Those
+# are source, not build output; keep them tracked.
+!apps/desktop/src/lib/
 
 # ─── Secrets ─────────────────────────────────────────────────────────
 secrets/

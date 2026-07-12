@@ -105,9 +105,7 @@ class TestApply:
     def test_log_wins_for_named_vars_preserves_others(self, tmp_path: Path):
         project = _project(tmp_path, [("CS-1", ())])
         sid = project.samples[0].id
-        synthesis_store.set_sample_params(
-            tmp_path, sid, {"doping_pct": 9.0, "ball_mill_h": 12.0}
-        )
+        synthesis_store.set_sample_params(tmp_path, sid, {"doping_pct": 9.0, "ball_mill_h": 12.0})
         _write_log(tmp_path, "sample,doping_pct\nCS-1,1\n")
         synthesis_log.apply_log(tmp_path, project)
         params = synthesis_store.load_params(tmp_path)

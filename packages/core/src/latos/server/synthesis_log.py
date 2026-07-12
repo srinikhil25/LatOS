@@ -165,12 +165,16 @@ def apply_log(root: Path, project: Project) -> LogReport | None:
     if unmatched:
         _LOG.warning(
             "synthesis log %s: %d row(s) matched no sample: %s",
-            path.name, len(unmatched), ", ".join(unmatched),
+            path.name,
+            len(unmatched),
+            ", ".join(unmatched),
         )
     for problem in problems:
         _LOG.warning("synthesis log: %s", problem)
     _LOG.info(
         "synthesis log %s applied: %d value(s) across %d sample(s)",
-        path.name, applied, len(matched),
+        path.name,
+        applied,
+        len(matched),
     )
     return report

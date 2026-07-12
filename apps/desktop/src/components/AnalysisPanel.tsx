@@ -9,12 +9,9 @@
 
 import { useEffect, useState } from "react";
 import { getMeasurementAnalysis, type AnalyzerResult } from "../lib/api";
+import { outputKeyLabel } from "../lib/labels";
 
 const ARRAY_PREVIEW = 6;
-
-function humanizeKey(key: string): string {
-  return key.replace(/_/g, " ");
-}
 
 function formatValue(value: unknown): string {
   if (typeof value === "number") {
@@ -79,7 +76,7 @@ export function AnalysisPanel({ measurementId }: { measurementId: string }) {
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
             {Object.entries(r.outputs).map(([key, value]) => (
               <div key={key} className="contents">
-                <dt className="text-secondary">{humanizeKey(key)}</dt>
+                <dt className="text-secondary">{outputKeyLabel(key)}</dt>
                 <dd className="font-medium" data-selectable>
                   {formatValue(value)}
                 </dd>

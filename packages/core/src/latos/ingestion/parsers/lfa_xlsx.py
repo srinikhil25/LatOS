@@ -94,14 +94,16 @@ class LfaXlsxParser(BaseParser):
         try:
             wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
         except Exception as exc:
-            return self._empty([
-                ValidationIssue(
-                    field="file",
-                    severity=Severity.ERROR,
-                    message=f"Could not open workbook: {exc}",
-                    detected_at=utc_now(),
-                ),
-            ])
+            return self._empty(
+                [
+                    ValidationIssue(
+                        field="file",
+                        severity=Severity.ERROR,
+                        message=f"Could not open workbook: {exc}",
+                        detected_at=utc_now(),
+                    ),
+                ]
+            )
         try:
             return self._parse_sheet(wb[wb.sheetnames[0]], path)
         finally:

@@ -104,14 +104,16 @@ class ResistivitySeebeckXlsxParser(BaseParser):
         try:
             wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
         except Exception as exc:
-            return self._empty([
-                ValidationIssue(
-                    field="file",
-                    severity=Severity.ERROR,
-                    message=f"Could not open workbook: {exc}",
-                    detected_at=utc_now(),
-                ),
-            ])
+            return self._empty(
+                [
+                    ValidationIssue(
+                        field="file",
+                        severity=Severity.ERROR,
+                        message=f"Could not open workbook: {exc}",
+                        detected_at=utc_now(),
+                    ),
+                ]
+            )
         try:
             return self._parse_sheet(wb[wb.sheetnames[0]], path)
         finally:
@@ -130,14 +132,16 @@ class ResistivitySeebeckXlsxParser(BaseParser):
             seebeck.append(float(row[3]))
 
         if not temperature_k:
-            return self._empty([
-                ValidationIssue(
-                    field="data",
-                    severity=Severity.ERROR,
-                    message="No resistivity/Seebeck data rows found.",
-                    detected_at=utc_now(),
-                ),
-            ])
+            return self._empty(
+                [
+                    ValidationIssue(
+                        field="data",
+                        severity=Severity.ERROR,
+                        message="No resistivity/Seebeck data rows found.",
+                        detected_at=utc_now(),
+                    ),
+                ]
+            )
 
         arrays = {
             "temperature_k": np.asarray(temperature_k, dtype=np.float64),

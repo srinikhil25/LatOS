@@ -34,12 +34,8 @@ def _meas(sample_id: str, filename: str) -> Measurement:
 
 def _sample(name: str, *filenames: str) -> Sample:
     sid = new_id()
-    measurements = tuple(_meas(sid, fn) for fn in filenames) or (
-        _meas(sid, f"{name}.dat"),
-    )
-    return Sample(
-        id=sid, project_id=new_id(), canonical_name=name, measurements=measurements
-    )
+    measurements = tuple(_meas(sid, fn) for fn in filenames) or (_meas(sid, f"{name}.dat"),)
+    return Sample(id=sid, project_id=new_id(), canonical_name=name, measurements=measurements)
 
 
 class TestMixedSamples:

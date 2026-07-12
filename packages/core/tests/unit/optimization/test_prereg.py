@@ -18,9 +18,7 @@ from latos.optimization import (
 def _result():
     x = np.array([0.0, 1.0, 3.0, 5.0])
     y = np.array([0.587, 0.362, 0.967, 0.482])
-    res = optimize(
-        x, y, bounds=(0.0, 5.0), input_name="doping_pct", target_name="peak_zt", seed=0
-    )
+    res = optimize(x, y, bounds=(0.0, 5.0), input_name="doping_pct", target_name="peak_zt", seed=0)
     return res, x, y
 
 

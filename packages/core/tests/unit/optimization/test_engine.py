@@ -130,9 +130,7 @@ class TestPredictiveCiAndConfig:
 
     def test_fixed_length_scale_is_recorded_as_such(self):
         x, y = _real_te_data()
-        r = optimize(
-            x, y, bounds=(0.0, 5.0), input_name="d", target_name="z", length_scale=2.0
-        )
+        r = optimize(x, y, bounds=(0.0, 5.0), input_name="d", target_name="z", length_scale=2.0)
         assert r.config.length_scale == 2.0
         assert r.config.length_scale_fitted is False
 
@@ -193,7 +191,11 @@ class TestDirection:
         x = _np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         y = (x - 3.0) ** 2 + 0.2  # loss-like curve, minimum at x = 3
         res = _optimize(
-            x, y, bounds=(1.0, 5.0), input_name="d", target_name="loss",
+            x,
+            y,
+            bounds=(1.0, 5.0),
+            input_name="d",
+            target_name="loss",
             direction="minimize",
         )
         assert res.best_x == 3.0
@@ -212,8 +214,11 @@ class TestDirection:
 
         with _pytest.raises(_Err, match="direction"):
             _optimize(
-                _np.array([1.0, 2.0, 3.0]), _np.array([1.0, 2.0, 1.0]),
-                bounds=(1.0, 3.0), input_name="d", target_name="y",
+                _np.array([1.0, 2.0, 3.0]),
+                _np.array([1.0, 2.0, 1.0]),
+                bounds=(1.0, 3.0),
+                input_name="d",
+                target_name="y",
                 direction="upward",
             )
 
@@ -228,7 +233,11 @@ class TestXNormalization:
         x = _np.array([1e19, 3e19, 5e19])
         y = _np.array([0.4, 0.98, 0.5])
         res = _optimize(
-            x, y, bounds=(1e19, 5e19), input_name="n", target_name="zt",
+            x,
+            y,
+            bounds=(1e19, 5e19),
+            input_name="n",
+            target_name="zt",
         )
         assert 1e19 <= res.recommendation.x <= 5e19
         # The GP actually models the hump (an unnormalized fit flat-lines).
@@ -243,12 +252,18 @@ class TestXNormalization:
 
         y = _np.array([0.4, 0.98, 0.5])
         small = _optimize(
-            _np.array([1.0, 3.0, 5.0]), y, bounds=(1.0, 5.0),
-            input_name="d", target_name="zt",
+            _np.array([1.0, 3.0, 5.0]),
+            y,
+            bounds=(1.0, 5.0),
+            input_name="d",
+            target_name="zt",
         )
         big = _optimize(
-            _np.array([1e19, 3e19, 5e19]), y, bounds=(1e19, 5e19),
-            input_name="n", target_name="zt",
+            _np.array([1e19, 3e19, 5e19]),
+            y,
+            bounds=(1e19, 5e19),
+            input_name="n",
+            target_name="zt",
         )
         rel_small = (small.recommendation.x - 1.0) / 4.0
         rel_big = (big.recommendation.x - 1e19) / 4e19
@@ -317,12 +332,20 @@ class TestReliability:
         x = _np.array([1.0, 3.0, 5.0])
         y = _np.array([0.4, 0.98, 0.5])
         skipped = _opt(
-            x, y, bounds=(1.0, 5.0), input_name="d", target_name="zt",
+            x,
+            y,
+            bounds=(1.0, 5.0),
+            input_name="d",
+            target_name="zt",
             with_reliability=False,
         )
         assert skipped.reliability is None
         report = length_scale_robustness(
-            x, y, bounds=(1.0, 5.0), input_name="d", target_name="zt",
+            x,
+            y,
+            bounds=(1.0, 5.0),
+            input_name="d",
+            target_name="zt",
             length_scales=(1.0, 3.0),
         )
         assert len(report.entries) == 2  # sweep still works

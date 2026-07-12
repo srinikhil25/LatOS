@@ -20,12 +20,16 @@ repos:
         args: ["--fix=lf"]
 
   # ─── Ruff (linter + formatter) ─────────────────────────────────────
+  # Keep `rev` in sync with the ruff version CI installs (packages/core[dev]).
+  # A mismatch means the hook can format differently than CI and still fail it.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.3.4
+    rev: v0.15.12
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]
+        files: ^packages/core/.*\.py$
       - id: ruff-format
+        files: ^packages/core/.*\.py$
 
   # ─── MyPy (type checker) ───────────────────────────────────────────
   - repo: https://github.com/pre-commit/mirrors-mypy
@@ -36,8 +40,8 @@ repos:
           - numpy
           - pydantic
           - types-tqdm
-        args: [--config-file=pyproject.toml]
-        files: ^src/
+        args: [--config-file=packages/core/pyproject.toml]
+        files: ^packages/core/src/
 
   # ─── pytest on staged files (fast subset) ──────────────────────────
   # Note: full test suite runs in CI, this is a quick smoke check

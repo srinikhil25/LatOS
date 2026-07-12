@@ -84,12 +84,16 @@ class UvDrsTxtParser(BaseParser):
         try:
             lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
         except OSError as exc:
-            return self._empty([
-                ValidationIssue(
-                    field="file", severity=Severity.ERROR,
-                    message=f"Could not read file: {exc}", detected_at=utc_now(),
-                ),
-            ])
+            return self._empty(
+                [
+                    ValidationIssue(
+                        field="file",
+                        severity=Severity.ERROR,
+                        message=f"Could not read file: {exc}",
+                        detected_at=utc_now(),
+                    ),
+                ]
+            )
 
         sample_name = _sample_from_title(lines[0]) if lines else None
         wavelength: list[float] = []
@@ -101,12 +105,16 @@ class UvDrsTxtParser(BaseParser):
                 reflectance.append(row[1])
 
         if not wavelength:
-            return self._empty([
-                ValidationIssue(
-                    field="data", severity=Severity.ERROR,
-                    message="No (wavelength, reflectance) rows found.", detected_at=utc_now(),
-                ),
-            ])
+            return self._empty(
+                [
+                    ValidationIssue(
+                        field="data",
+                        severity=Severity.ERROR,
+                        message="No (wavelength, reflectance) rows found.",
+                        detected_at=utc_now(),
+                    ),
+                ]
+            )
 
         metadata: dict[str, Any] = {
             "n_points": len(wavelength),

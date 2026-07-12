@@ -496,7 +496,10 @@ class XrdPeakFitAnalyzer(BaseAnalyzer):
         wavelength_a = float(params.get("wavelength_angstrom", 1.5406))
         scherrer_k = float(params.get("scherrer_k", 0.9))
         d_spacings, sizes_nm = _bragg_and_scherrer(
-            centers, fwhms, wavelength_angstrom=wavelength_a, k=scherrer_k,
+            centers,
+            fwhms,
+            wavelength_angstrom=wavelength_a,
+            k=scherrer_k,
         )
         if sizes_nm:
             issues.append(
@@ -521,9 +524,7 @@ class XrdPeakFitAnalyzer(BaseAnalyzer):
             "peak_fractions": fractions,
             "d_spacings_angstrom": d_spacings,
             "scherrer_sizes_nm": sizes_nm,
-            "mean_crystallite_size_nm": (
-                round(float(np.mean(sizes_nm)), 1) if sizes_nm else None
-            ),
+            "mean_crystallite_size_nm": (round(float(np.mean(sizes_nm)), 1) if sizes_nm else None),
             "r_squared": float(r_squared),
             "reduced_chi_square": float(reduced_chi_square),
             "noise_sigma_estimate": float(sigma_noise),

@@ -40,7 +40,9 @@ def _measure_stub(filename: str):
 def _run(arrays, filename="Cu 2p.csv"):
     a = XpsRegionsAnalyzer()
     inputs = AnalyzerInputs(
-        measurement=_measure_stub(filename), arrays=arrays, params=a.merge_params(None),
+        measurement=_measure_stub(filename),
+        arrays=arrays,
+        params=a.merge_params(None),
     )
     return a.analyze(inputs)
 

@@ -49,8 +49,11 @@ class TestComputeZt:
         lfa_t = np.array([400.0])
         kappa = np.array([2.0])
         r = compute_zt(
-            rs_temperature_k=rs_t, resistivity_uohm_m=rho, seebeck_uv_k=S,
-            lfa_temperature_k=lfa_t, thermal_conductivity_w_mk=kappa,
+            rs_temperature_k=rs_t,
+            resistivity_uohm_m=rho,
+            seebeck_uv_k=S,
+            lfa_temperature_k=lfa_t,
+            thermal_conductivity_w_mk=kappa,
         )
         expected = ((2e-5) ** 2 / 2e-7) * 400.0 / 2.0
         assert r.zt[0] == pytest.approx(expected, rel=1e-9)
@@ -59,8 +62,11 @@ class TestComputeZt:
         # LFA grid starts at 300 K but R&S only from 316 K → clamp warning.
         rs_t, rho, S, lfa_t, kappa = _cs_like()
         r = compute_zt(
-            rs_temperature_k=rs_t, resistivity_uohm_m=rho, seebeck_uv_k=S,
-            lfa_temperature_k=lfa_t, thermal_conductivity_w_mk=kappa,
+            rs_temperature_k=rs_t,
+            resistivity_uohm_m=rho,
+            seebeck_uv_k=S,
+            lfa_temperature_k=lfa_t,
+            thermal_conductivity_w_mk=kappa,
         )
         assert any("clamped" in w for w in r.warnings)
 
@@ -72,8 +78,11 @@ class TestComputeZt:
         lfa_t = np.array([400.0, 500.0])
         kappa = np.array([1.0, 1.0])
         r = compute_zt(
-            rs_temperature_k=rs_t, resistivity_uohm_m=rho, seebeck_uv_k=S,
-            lfa_temperature_k=lfa_t, thermal_conductivity_w_mk=kappa,
+            rs_temperature_k=rs_t,
+            resistivity_uohm_m=rho,
+            seebeck_uv_k=S,
+            lfa_temperature_k=lfa_t,
+            thermal_conductivity_w_mk=kappa,
         )
         assert any("exceeds the plausible bound" in w for w in r.warnings)
 
@@ -82,8 +91,10 @@ class TestGuards:
     def test_empty_raises(self):
         with pytest.raises(TransportError):
             compute_zt(
-                rs_temperature_k=np.array([]), resistivity_uohm_m=np.array([]),
-                seebeck_uv_k=np.array([]), lfa_temperature_k=np.array([300.0]),
+                rs_temperature_k=np.array([]),
+                resistivity_uohm_m=np.array([]),
+                seebeck_uv_k=np.array([]),
+                lfa_temperature_k=np.array([300.0]),
                 thermal_conductivity_w_mk=np.array([5.0]),
             )
 

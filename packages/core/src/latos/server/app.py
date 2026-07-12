@@ -612,7 +612,6 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             verdict=_verdict(res),
         )
 
-
     @app.post("/optimize/freeze")
     def optimize_freeze(body: OptimizeRunRequest) -> FreezeResult:
         """Freeze the current recommendation into an auditable pre-registration record.
@@ -634,9 +633,7 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
         """
         if state.root is None:
             raise HTTPException(status_code=404, detail="No project is open")
-        return [
-            _prereg_summary(e) for e in optimization.list_preregistrations(state.root)
-        ]
+        return [_prereg_summary(e) for e in optimization.list_preregistrations(state.root)]
 
     @app.post("/optimize/validate")
     def validate_prereg(body: ValidateOutcomeRequest) -> OutcomeVerdictOut:
@@ -701,9 +698,7 @@ class _AssembledOptimization:
     direction: str  # what the engine runs: "maximize" | "minimize"
 
 
-def _assemble_optimization(
-    state: ServerState, body: OptimizeRunRequest
-) -> _AssembledOptimization:
+def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _AssembledOptimization:
     """Shared assembly for /optimize/run and /optimize/freeze.
 
     Resolves the input variable (synthesis parameter or measured feature),
@@ -754,9 +749,7 @@ def _assemble_optimization(
         direction = "minimize"
     elif body.objective == "target":
         if body.target_value is None:
-            raise HTTPException(
-                status_code=400, detail="objective 'target' requires target_value"
-            )
+            raise HTTPException(status_code=400, detail="objective 'target' requires target_value")
         ys = np.abs(ys - body.target_value)
         target_label = f"|{target_label} - {body.target_value:g}|"
         direction = "minimize"
@@ -791,9 +784,7 @@ def _validate_prereg(state: ServerState, body: ValidateOutcomeRequest) -> Outcom
     except OSError:
         in_dir = False
     if not in_dir or not resolved.is_file():
-        raise HTTPException(
-            status_code=404, detail="Unknown pre-registration for this project"
-        )
+        raise HTTPException(status_code=404, detail="Unknown pre-registration for this project")
     try:
         record = json.loads(resolved.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:

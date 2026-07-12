@@ -20,7 +20,9 @@ def _measure_stub():
 def _run(arrays):
     a = TransportSummaryAnalyzer()
     inputs = AnalyzerInputs(
-        measurement=_measure_stub(), arrays=arrays, params=a.merge_params(None),
+        measurement=_measure_stub(),
+        arrays=arrays,
+        params=a.merge_params(None),
     )
     return a.analyze(inputs)
 
@@ -35,9 +37,7 @@ def _rs_arrays(seebeck_sign=+1.0):
 
 class TestMetadata:
     def test_accepts_thermoelectric_only(self):
-        assert TransportSummaryAnalyzer().accepts_techniques == (
-            Technique.THERMOELECTRIC,
-        )
+        assert TransportSummaryAnalyzer().accepts_techniques == (Technique.THERMOELECTRIC,)
 
 
 class TestResistivitySeebeck:
@@ -65,9 +65,7 @@ class TestResistivitySeebeck:
         arrays = _rs_arrays()
         arrays["seebeck_uv_k"] = np.linspace(-50.0, 150.0, 13)  # crosses zero
         out = _run(arrays)
-        assert any(
-            i.severity is Severity.WARNING and i.field == "seebeck" for i in out.issues
-        )
+        assert any(i.severity is Severity.WARNING and i.field == "seebeck" for i in out.issues)
 
 
 class TestLfa:
@@ -82,10 +80,7 @@ class TestLfa:
         t = np.linspace(300.0, 600.0, 5)
         kappa = np.array([1.0, 2.0, 3.0, 4.0, 900.0])  # unit slip
         out = _run({"temperature_k": t, "thermal_conductivity": kappa})
-        assert any(
-            i.severity is Severity.WARNING and "unit error" in i.message
-            for i in out.issues
-        )
+        assert any(i.severity is Severity.WARNING and "unit error" in i.message for i in out.issues)
 
 
 class TestGuards:

@@ -109,9 +109,7 @@ def compute_zt(
             f"R&S arrays differ in length: T={rs_t.size}, rho={rho.size}, S={S_uv.size}."
         )
     if lfa_t.size != kappa.size:
-        raise TransportError(
-            f"LFA arrays differ in length: T={lfa_t.size}, kappa={kappa.size}."
-        )
+        raise TransportError(f"LFA arrays differ in length: T={lfa_t.size}, kappa={kappa.size}.")
 
     provenance: list[str] = []
     warnings: list[str] = []

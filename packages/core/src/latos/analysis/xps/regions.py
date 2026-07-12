@@ -114,16 +114,18 @@ class XpsRegionsAnalyzer(BaseAnalyzer):
         if _is_c1s(region):
             offset = round(peak_bes[0] - _C1S_REFERENCE_EV, 2)
             outputs["charge_offset_vs_c1s_284p8_ev"] = offset
-            issues.append(ValidationIssue(
-                field="charge_reference",
-                severity=Severity.INFO,
-                message=(
-                    f"C 1s apex at {peak_bes[0]:.2f} eV → {offset:+.2f} eV vs the "
-                    "284.8 eV adventitious-carbon reference; apply as the charge "
-                    "correction for this sample's other regions."
-                ),
-                detected_at=utc_now(),
-            ))
+            issues.append(
+                ValidationIssue(
+                    field="charge_reference",
+                    severity=Severity.INFO,
+                    message=(
+                        f"C 1s apex at {peak_bes[0]:.2f} eV → {offset:+.2f} eV vs the "
+                        "284.8 eV adventitious-carbon reference; apply as the charge "
+                        "correction for this sample's other regions."
+                    ),
+                    detected_at=utc_now(),
+                )
+            )
 
         return AnalyzerOutput(outputs=outputs, derived_arrays={}, issues=tuple(issues))
 
@@ -146,8 +148,10 @@ def _error(message: str) -> AnalyzerOutput:
         derived_arrays={},
         issues=(
             ValidationIssue(
-                field="analyze", severity=Severity.ERROR,
-                message=message, detected_at=utc_now(),
+                field="analyze",
+                severity=Severity.ERROR,
+                message=message,
+                detected_at=utc_now(),
             ),
         ),
     )

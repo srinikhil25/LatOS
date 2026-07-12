@@ -63,8 +63,7 @@ class TestIdentification:
     def test_semiquant_caveat_emitted(self):
         out = _run(_spectrum((8.04, 1000.0)))
         assert any(
-            i.severity is Severity.INFO and "semi-quantitative" in i.message
-            for i in out.issues
+            i.severity is Severity.INFO and "semi-quantitative" in i.message for i in out.issues
         )
 
 
