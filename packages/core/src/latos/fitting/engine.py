@@ -24,6 +24,7 @@ from lmfit.parameter import Parameters
 from numpy.typing import NDArray
 
 from latos.fitting import backgrounds
+from latos.fitting.constraints import Constraint, apply_constraints
 from latos.fitting.peak_shapes import PeakShape, peak_model
 
 __all__ = [
@@ -83,11 +84,16 @@ class PeakInit:
 
 @dataclass(frozen=True)
 class FitSpec:
-    """A complete fit recipe: one shared line shape, N peaks, a background."""
+    """A complete fit recipe: one shared line shape, N peaks, a background.
+
+    `constraints` tie peaks together (spin-orbit splitting, area ratios,
+    shared widths); peaks are referenced by their index in `peaks`.
+    """
 
     peak_shape: PeakShape
     peaks: list[PeakInit]
     background: BackgroundSpec = field(default_factory=BackgroundSpec)
+    constraints: list[Constraint] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -185,6 +191,7 @@ def fit_spectrum(x: NDArray[np.float64], y: NDArray[np.float64], spec: FitSpec) 
         model = model + peak_model(spec.peak_shape, prefix=f"p{i}_")
 
     params = _seed_params(model, x, y_corr, spec)
+    apply_constraints(params, spec.constraints)
     result = model.fit(y_corr, params, x=x)
 
     components: list[FittedComponent] = []

@@ -10,6 +10,13 @@ on its own.
 
 from __future__ import annotations
 
+from latos.fitting.constraints import (
+    Constraint,
+    FixedDelta,
+    FixedRatio,
+    SharedWidth,
+    apply_constraints,
+)
 from latos.fitting.engine import (
     BackgroundKind,
     BackgroundSpec,
@@ -22,17 +29,32 @@ from latos.fitting.engine import (
     fit_spectrum,
 )
 from latos.fitting.peak_shapes import PeakShape, peak_model
+from latos.fitting.presets import (
+    XPS_DOUBLETS,
+    raman_preset,
+    xps_doublet_preset,
+    xrd_preset,
+)
 
 __all__ = [
+    "XPS_DOUBLETS",
     "BackgroundKind",
     "BackgroundSpec",
+    "Constraint",
     "FitError",
     "FitResult",
     "FitSpec",
     "FittedComponent",
+    "FixedDelta",
+    "FixedRatio",
     "PeakInit",
     "PeakShape",
+    "SharedWidth",
+    "apply_constraints",
     "compute_baseline",
     "fit_spectrum",
     "peak_model",
+    "raman_preset",
+    "xps_doublet_preset",
+    "xrd_preset",
 ]
