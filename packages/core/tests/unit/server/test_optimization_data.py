@@ -550,7 +550,9 @@ class TestQualityFlags:
         rows, _ = optimization_data.build_dataset(
             project, store, synthesis_store.load_params(tmp_path), "doping_pct", "mobility_cm2_vs"
         )
-        flags = optimization_data.quality_flags(project, rows, "doping_pct", "mobility_cm2_vs")
+        flags = optimization_data.quality_flags(
+            project, rows, "doping_pct", "mobility_cm2_vs", store
+        )
         flagged = {f.sample_name for f in flags}
         assert "CS-1" in flagged and "CS-3" in flagged  # both sign-disagree
         assert "CS-5" not in flagged  # questionable, not unreliable
@@ -566,7 +568,8 @@ class TestQualityFlags:
             project, store, synthesis_store.load_params(tmp_path), "doping_pct", "conductivity_s_cm"
         )
         assert (
-            optimization_data.quality_flags(project, rows, "doping_pct", "conductivity_s_cm") == []
+            optimization_data.quality_flags(project, rows, "doping_pct", "conductivity_s_cm", store)
+            == []
         )
 
     def test_zt_target_never_flagged(self, tmp_path):
@@ -576,4 +579,81 @@ class TestQualityFlags:
         rows, _ = optimization_data.build_dataset(
             project, store, synthesis_store.load_params(tmp_path), "doping_pct", "zt"
         )
-        assert optimization_data.quality_flags(project, rows, "doping_pct", "zt") == []
+        assert optimization_data.quality_flags(project, rows, "doping_pct", "zt", store) == []
+
+    def test_derived_zt_flags_wiedemann_franz_violation(self, tmp_path):
+        # A sample whose derived zT rests on a metallic σ with an impossibly
+        # low κ (Wiedemann–Franz violation) must be flagged when the target
+        # is the DERIVED zT.
+        store = ArrayStore(tmp_path / ".latos" / "arrays")
+        pid = new_id()
+
+        def _te(sid: str, arrays: dict) -> Measurement:
+            mid = new_id()
+            store.write(
+                mid,
+                ParsedData(
+                    technique=Technique.THERMOELECTRIC,
+                    arrays=arrays,
+                    metadata={},
+                    instrument=None,
+                    measured_at=None,
+                    issues=(),
+                    parser_name="te",
+                    parser_version="1.0.0",
+                ),
+            )
+            return Measurement(
+                id=mid,
+                sample_id=sid,
+                technique=Technique.THERMOELECTRIC,
+                instrument=None,
+                measured_at=None,
+                parsed_at=utc_now(),
+                parser_version="1.0.0",
+                files=(),
+                issues=(),
+                parsed_data_path=None,
+                analysis_results=(),
+            )
+
+        sid = new_id()
+        t = np.array([500.0, 600.0])
+        rs = _te(
+            sid,
+            {
+                "temperature_k": t,
+                "resistivity_uohm_m": np.array([0.28, 0.30]),  # metallic
+                "seebeck_uv_k": np.array([26.0, 30.0]),
+            },
+        )
+        lfa = _te(sid, {"temperature_k": t, "thermal_conductivity": np.array([1.4, 1.5])})
+        sample = Sample(
+            id=sid,
+            project_id=pid,
+            canonical_name="WF-BAD",
+            aliases=(),
+            measurements=(rs, lfa),
+        )
+        project = Project(
+            id=pid,
+            name=tmp_path.name,
+            root_path=tmp_path,
+            created_at=utc_now(),
+            schema_version=4,
+            samples=(sample,),
+            unassigned_files=(),
+        )
+        synthesis_store.set_sample_params(tmp_path, sid, {"doping_pct": 1.0})
+        rows, _ = optimization_data.build_dataset(
+            project,
+            store,
+            synthesis_store.load_params(tmp_path),
+            "doping_pct",
+            optimization_data.DERIVED_ZT,
+        )
+        assert rows, "sample should yield a derived-zT row"
+        flags = optimization_data.quality_flags(
+            project, rows, "doping_pct", optimization_data.DERIVED_ZT, store
+        )
+        assert any("Wiedemann" in f.reason for f in flags)

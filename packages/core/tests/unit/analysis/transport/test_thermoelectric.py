@@ -87,6 +87,64 @@ class TestComputeZt:
         assert any("exceeds the plausible bound" in w for w in r.warnings)
 
 
+class TestWiedemannFranz:
+    def test_consistent_material_no_wf_warning(self):
+        # Semiconductor-like: ρ ~ 10 µΩ·m, κ ~ 1.5 W/m·K. The electronic
+        # floor L·σ·T (~0.6 W/m·K) sits well below κ → no violation.
+        rs_t = np.array([400.0, 500.0])
+        rho = np.array([10.0, 11.0])  # µΩ·m
+        S = np.array([180.0, 200.0])
+        lfa_t = np.array([400.0, 500.0])
+        kappa = np.array([1.5, 1.4])
+        r = compute_zt(
+            rs_temperature_k=rs_t,
+            resistivity_uohm_m=rho,
+            seebeck_uv_k=S,
+            lfa_temperature_k=lfa_t,
+            thermal_conductivity_w_mk=kappa,
+        )
+        assert not any("Wiedemann" in w for w in r.warnings)
+
+    def test_metallic_sigma_with_low_kappa_flags_wf(self):
+        # Metallic ρ ~ 0.3 µΩ·m (σ ~ 3e6 S/m) with κ ~ 1.5 W/m·K: the
+        # electronic floor is ~30 W/m·K, so κ is impossibly low. zT stays
+        # under the plausible bound, so ONLY the WF check should fire.
+        rs_t = np.array([500.0, 600.0])
+        rho = np.array([0.28, 0.30])  # µΩ·m
+        S = np.array([26.0, 30.0])
+        lfa_t = np.array([500.0, 600.0])
+        kappa = np.array([1.4, 1.5])
+        r = compute_zt(
+            rs_temperature_k=rs_t,
+            resistivity_uohm_m=rho,
+            seebeck_uv_k=S,
+            lfa_temperature_k=lfa_t,
+            thermal_conductivity_w_mk=kappa,
+        )
+        wf = [w for w in r.warnings if "Wiedemann" in w]
+        assert wf, "expected a Wiedemann-Franz violation"
+        assert "electronic floor" in wf[0]
+        assert r.peak_zt < 4.0  # plausibility gate did not also fire
+        assert not any("exceeds the plausible bound" in w for w in r.warnings)
+
+    def test_nan_kappa_does_not_crash_or_flag(self):
+        # A NaN-κ point (bad LFA data) must not raise or spuriously trigger
+        # the WF check; the consistent point stays unflagged.
+        rs_t = np.array([400.0, 500.0])
+        rho = np.array([10.0, 11.0])
+        S = np.array([180.0, 200.0])
+        lfa_t = np.array([400.0, 500.0])
+        kappa = np.array([1.5, np.nan])  # second point missing
+        r = compute_zt(
+            rs_temperature_k=rs_t,
+            resistivity_uohm_m=rho,
+            seebeck_uv_k=S,
+            lfa_temperature_k=lfa_t,
+            thermal_conductivity_w_mk=kappa,
+        )
+        assert not any("Wiedemann" in w for w in r.warnings)
+
+
 class TestGuards:
     def test_empty_raises(self):
         with pytest.raises(TransportError):

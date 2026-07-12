@@ -42,6 +42,15 @@ _W_TO_UW = 1e6  # W/m·K² → µW/m·K² (display unit for power factor)
 # under this; a value above it almost always means a unit error upstream.
 _ZT_MAX_PLAUSIBLE = 4.0
 
+# Minimum single-parabolic-band Lorenz number (the non-degenerate limit,
+# L = 2·(k_B/e)²), in W·Ω·K⁻². The electronic thermal conductivity is
+# κ_e = L·σ·T, and total κ can never fall below κ_e. Using the *smallest*
+# physically-attainable single-band Lorenz number makes κ_e·(=L_min·σ·T) a
+# conservative floor: a measured κ below it is impossible for any single
+# band, so it flags only genuine σ/κ inconsistencies, not borderline cases.
+_KB_OVER_E_V_K = 86.173e-6
+_WF_LORENZ_MIN = 2.0 * _KB_OVER_E_V_K**2
+
 
 class TransportError(ValueError):
     """Raised when the transport inputs are empty or inconsistent."""
@@ -155,6 +164,26 @@ def compute_zt(
         warnings.append(
             f"Peak zT = {over:.2f} exceeds the plausible bound "
             f"({_ZT_MAX_PLAUSIBLE}); a unit error upstream is likely."
+        )
+
+    # 4b. Wiedemann–Franz consistency: total κ can never fall below its
+    # electronic part κ_e = L·σ·T. Below the conservative floor L_min·σ·T,
+    # the measured σ and κ are physically incompatible for any single band —
+    # typically a resistivity/κ unit or scale slip, or strong bipolar/multi-
+    # band transport. This is the same physics as the SPB ceiling, stated as
+    # a hard floor the reviewer reads directly.
+    kappa_e_floor = _WF_LORENZ_MIN * sigma * lfa_t_s
+    safe_kappa = np.where(kappa_s > 0, kappa_s, np.nan)
+    floor_ratio = kappa_e_floor / safe_kappa
+    wf_violation = floor_ratio > 1.0  # NaN (κ≤0) compares False
+    if np.any(wf_violation):
+        j = int(np.nanargmax(np.where(wf_violation, floor_ratio, np.nan)))
+        warnings.append(
+            f"Wiedemann–Franz violation: at {lfa_t_s[j]:.0f} K the measured κ "
+            f"({kappa_s[j]:.2f} W/m·K) is below the electronic floor L·σ·T "
+            f"({kappa_e_floor[j]:.1f} W/m·K, x{floor_ratio[j]:.0f}). σ and κ are "
+            f"physically inconsistent — check the resistivity/κ units or scale, "
+            f"or suspect multi-band/bipolar transport. Derived zT is unreliable here."
         )
 
     peak_i = int(np.nanargmax(zt))

@@ -585,7 +585,7 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             result.project, store, params, input_variable, target_property
         )
         flags = optimization_data.quality_flags(
-            result.project, rows, input_variable, target_property
+            result.project, rows, input_variable, target_property, store
         )
         return OptimizationDataset(
             input_variable=input_variable,
@@ -818,7 +818,7 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
     flags = [
         _flag_out(fl)
         for fl in optimization_data.quality_flags(
-            result.project, rows, body.input_variable, body.target_property
+            result.project, rows, body.input_variable, body.target_property, store
         )
     ]
     # Physics layer: choose the fit space + clamp bounds from the property's

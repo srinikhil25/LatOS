@@ -209,18 +209,39 @@ def _flag_reason(sample: Sample, variable: str, value: float) -> str | None:
     return "; ".join(reasons) if reasons else None
 
 
+def _zt_wf_reason(sample: Sample, store: ArrayStore) -> str | None:
+    """Wiedemann–Franz flag for a sample's derived zT, or None.
+
+    A derived zT built from a σ/κ pair that violates Wiedemann–Franz
+    (measured κ below the electronic floor L·σ·T) is physically unreliable
+    no matter how clean it looks — so a zT optimization target should warn.
+    """
+    try:
+        zt = sample_zt(sample, store.load)
+    except TransportError:
+        return None
+    if any("Wiedemann" in w for w in zt.warnings):
+        return (
+            "derived zT is physically unreliable: measured thermal conductivity is "
+            "below the Wiedemann-Franz electronic floor (L * conductivity * T)"
+        )
+    return None
+
+
 def quality_flags(
     project: Project,
     rows: list[DatasetRow],
     input_variable: str,
     target_property: str,
+    store: ArrayStore,
 ) -> list[QualityFlag]:
     """Flag dataset points whose target or axis value can't be trusted.
 
     Checks each row's target (y) and input variable (x) against the Hall
-    reliability of the same sample and against physical plausibility. Returns
-    one flag per (sample, variable) concern, so the UI can warn before the
-    researcher acts on the recommendation.
+    reliability of the same sample and against physical plausibility, and —
+    for a derived-zT target — against Wiedemann–Franz consistency of the
+    underlying transport. Returns one flag per (sample, variable) concern,
+    so the UI can warn before the researcher acts on the recommendation.
     """
     by_id = {s.id: s for s in project.samples}
     flags: list[QualityFlag] = []
@@ -230,6 +251,9 @@ def quality_flags(
             continue
         for variable, value in ((target_property, row.y), (input_variable, row.x)):
             reason = _flag_reason(sample, variable, value)
+            if variable == target_property and target_property == DERIVED_ZT:
+                wf = _zt_wf_reason(sample, store)
+                reason = "; ".join(r for r in (reason, wf) if r) or None
             if reason:
                 flags.append(
                     QualityFlag(
