@@ -20,13 +20,14 @@ never silently correct.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, ClassVar
 
 from latos.analysis.base_analyzer import AnalyzerInputs, AnalyzerOutput, BaseAnalyzer
 from latos.core.enums import Severity, Technique
 from latos.core.models import Measurement, ValidationIssue, utc_now
 
-__all__ = ["HallMetricsAnalyzer"]
+__all__ = ["HallMetricsAnalyzer", "cross_config_reliability"]
 
 # Elementary charge (C). σ [S/cm] = q · n [cm⁻³] · μ [cm²/(V·s)].
 _Q_COULOMB = 1.602176634e-19
@@ -149,50 +150,80 @@ def _restate_metrics(
     return outputs
 
 
+def cross_config_reliability(features: Mapping[str, float]) -> tuple[str, str | None]:
+    """Judge the Hall metrics from the two van der Pauw cross-configurations.
+
+    A van der Pauw Hall measurement records a Hall coefficient from each
+    diagonal (AC and BD). When they disagree in sign the averaged R_H — and
+    the carrier type / concentration / mobility derived from it — is noise.
+
+    Returns ``(level, reason)`` where level is:
+
+    * ``"unreliable"`` — the cross-configs disagree in sign (noise floor);
+    * ``"questionable"`` — same sign but magnitudes differ by > 3×;
+    * ``"good"`` — they agree;
+    * ``"unknown"`` — the cross data isn't present (older exports).
+
+    This is the single source of truth for Hall reliability, shared by the
+    analyzer and the optimizer's data-quality guard.
+    """
+    ac = features.get("hall_ac_cross_cm3_c")
+    bd = features.get("hall_bd_cross_cm3_c")
+    if not ac or not bd:
+        return "unknown", None
+    if ac * bd < 0:
+        return (
+            "unreliable",
+            f"Hall cross-configurations disagree in sign (AC {ac:+.3g}, BD {bd:+.3g} cm³/C) "
+            "— the Hall voltage is at the noise floor",
+        )
+    ratio = max(abs(ac), abs(bd)) / min(abs(ac), abs(bd))
+    if ratio > _CROSS_RATIO_WARN:
+        return (
+            "questionable",
+            f"Hall cross-configurations differ by {ratio:.0f}x (AC {ac:+.3g}, BD {bd:+.3g} cm³/C)",
+        )
+    return "good", None
+
+
 def _cross_configuration_check(
     f: dict[str, float],
     outputs: dict[str, Any],
     issues: list[ValidationIssue],
 ) -> bool:
-    """Do the AC and BD van der Pauw diagonals tell the same story?
+    """Annotate the analyzer outputs with the cross-configuration verdict.
 
-    Returns False when the two cross Hall coefficients disagree in sign —
-    the averaged R_H is then noise, and every quantity derived from it
-    (carrier type, concentration, mobility) is marked unreliable. Missing
-    cross data (older exports) skips the check and counts as reliable.
+    Returns False when the averaged R_H is unreliable (cross-configs
+    disagree in sign) — the caller then knows the carrier-type outputs are
+    not to be trusted. Delegates the judgement to `cross_config_reliability`.
     """
-    ac = f.get("hall_ac_cross_cm3_c")
-    bd = f.get("hall_bd_cross_cm3_c")
-    if not ac or not bd:
+    level, reason = cross_config_reliability(f)
+    if level == "unknown":
         return True
 
-    if ac * bd < 0:
+    if level == "unreliable":
         outputs["carrier_type_reliability"] = "unreliable — cross-configurations disagree in sign"
         if "carrier_type" in outputs:
             outputs["carrier_type"] = f"{outputs['carrier_type']} — UNRELIABLE"
         issues.append(
             _warn(
                 "hall_reliability",
-                f"The two Hall cross-configurations disagree in sign "
-                f"(AC {ac:+.3g}, BD {bd:+.3g} cm³/C) — the Hall voltage is at the noise "
-                "floor. Carrier type, concentration and mobility are unreliable; "
+                f"{reason}. Carrier type, concentration and mobility are unreliable; "
                 "conductivity and resistivity remain valid.",
             )
         )
         return False
 
-    ratio = max(abs(ac), abs(bd)) / min(abs(ac), abs(bd))
-    outputs["hall_cross_ratio"] = round(ratio, 1)
-    if ratio > _CROSS_RATIO_WARN:
+    ac, bd = f["hall_ac_cross_cm3_c"], f["hall_bd_cross_cm3_c"]
+    outputs["hall_cross_ratio"] = round(max(abs(ac), abs(bd)) / min(abs(ac), abs(bd)), 1)
+    if level == "questionable":
         outputs["carrier_type_reliability"] = (
-            f"questionable — cross-configurations differ by {ratio:.0f}x"
+            f"questionable — cross-configurations differ by {outputs['hall_cross_ratio']:.0f}x"
         )
         issues.append(
             _warn(
                 "hall_reliability",
-                f"The two Hall cross-configurations agree in sign but differ by "
-                f"{ratio:.0f}x (AC {ac:+.3g}, BD {bd:+.3g} cm³/C) — treat the carrier "
-                "concentration and mobility as rough estimates.",
+                f"{reason} — treat the carrier concentration and mobility as rough estimates.",
             )
         )
     else:

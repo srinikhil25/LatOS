@@ -277,12 +277,22 @@ export interface Recommendation {
 /** Self-assessed trustworthiness of the model's intervals. */
 export type ReliabilityLevel = "exploratory" | "indicative" | "calibrated" | "unknown";
 
+/** A dataset point whose target/axis value is flagged untrustworthy
+ * (e.g. an unreliable Hall measurement, or a negative mobility). */
+export interface QualityFlag {
+  sample_name: string;
+  variable: string;
+  value: number;
+  reason: string;
+}
+
 export interface OptimizeResult {
   input_variable: string;
   target_property: string; // display label (e.g. "|zT (derived) - 1|" in target mode)
   objective: Objective;
   reliability_level: ReliabilityLevel;
   reliability_note: string;
+  quality_flags: QualityFlag[];
   grid_x: number[];
   grid_mean: number[];
   grid_ci95: number[];

@@ -173,3 +173,38 @@ class TestSeebeckCrossCheck:
     def test_no_seebeck_sign_skips_check(self):
         out = _run_with(dict(_CONSISTENT), seebeck_sign=None)
         assert "carrier_type_from_seebeck" not in out.outputs
+
+
+# ─── Reusable cross-config reliability function (DQ1) ───────────────
+
+
+class TestCrossConfigReliability:
+    def test_sign_disagreement_unreliable(self):
+        from latos.analysis.hall.metrics import cross_config_reliability
+
+        level, reason = cross_config_reliability(
+            {"hall_ac_cross_cm3_c": 0.084, "hall_bd_cross_cm3_c": -0.418}
+        )
+        assert level == "unreliable"
+        assert reason and "disagree in sign" in reason
+
+    def test_large_ratio_questionable(self):
+        from latos.analysis.hall.metrics import cross_config_reliability
+
+        level, _ = cross_config_reliability(
+            {"hall_ac_cross_cm3_c": 0.18, "hall_bd_cross_cm3_c": 0.025}
+        )
+        assert level == "questionable"
+
+    def test_agreement_good(self):
+        from latos.analysis.hall.metrics import cross_config_reliability
+
+        level, reason = cross_config_reliability(
+            {"hall_ac_cross_cm3_c": 0.6, "hall_bd_cross_cm3_c": 0.85}
+        )
+        assert level == "good" and reason is None
+
+    def test_missing_cross_data_unknown(self):
+        from latos.analysis.hall.metrics import cross_config_reliability
+
+        assert cross_config_reliability({})[0] == "unknown"

@@ -470,3 +470,110 @@ class TestDerivedZtAtTemperature:
         sample, store = self._sample(tmp_path)
         assert optimization_data.derived_zt_at(sample, store, 200.0) is None
         assert optimization_data.derived_zt_at(sample, store, 700.0) is None
+
+
+# ─── Optimization data-quality flags (DQ2) ──────────────────────────
+
+
+def _hall_with_cross(sample_id, *, mobility, ac, bd, n=1e19):
+    """A features-only Hall measurement carrying the AC/BD cross coefficients."""
+    return Measurement(
+        id=new_id(),
+        sample_id=sample_id,
+        technique=Technique.HALL,
+        instrument=None,
+        measured_at=None,
+        parsed_at=utc_now(),
+        parser_version="1.2.0",
+        files=(),
+        issues=(),
+        parsed_data_path=None,
+        analysis_results=(),
+        features={
+            "carrier_concentration_cm3": n,
+            "mobility_cm2_vs": mobility,
+            "conductivity_s_cm": 3000.0,
+            "hall_ac_cross_cm3_c": ac,
+            "hall_bd_cross_cm3_c": bd,
+        },
+    )
+
+
+def _project_hall_cross(root):
+    """3 samples: CS-1 & CS-3 unreliable (sign-disagree; CS-3 also negative mobility), CS-5 questionable."""  # noqa: E501
+    store = ArrayStore(root / ".latos" / "arrays")
+    pid = new_id()
+    spec = [
+        ("CS-1", 2494.0, -0.009, 1.71),  # unreliable (sign disagree)
+        ("CS-3", -771.0, 0.084, -0.418),  # unreliable + negative mobility
+        ("CS-5", 327.0, 0.18, 0.025),  # questionable (7x, same sign)
+    ]
+    samples = []
+    ids = {}
+    for name, mob, ac, bd in spec:
+        sid = new_id()
+        ids[name] = sid
+        samples.append(
+            Sample(
+                id=sid,
+                project_id=pid,
+                canonical_name=name,
+                aliases=(),
+                measurements=(
+                    _te_measurement(sid, store, 0.5),
+                    _hall_with_cross(sid, mobility=mob, ac=ac, bd=bd),
+                ),
+            )
+        )
+    project = Project(
+        id=pid,
+        name=root.name,
+        root_path=root,
+        created_at=utc_now(),
+        schema_version=4,
+        samples=tuple(samples),
+        unassigned_files=(),
+    )
+    return project, store, ids
+
+
+class TestQualityFlags:
+    def _rows(self, project, store, target):
+        rows, _ = optimization_data.build_dataset(project, store, {}, "doping_pct", target)
+        return rows
+
+    def test_mobility_flags_unreliable_and_negative(self, tmp_path):
+        project, store, _ = _project_hall_cross(tmp_path)
+        # doping values so build_dataset yields rows
+        for s in project.samples:
+            synthesis_store.set_sample_params(tmp_path, s.id, {"doping_pct": 1.0})
+        rows, _ = optimization_data.build_dataset(
+            project, store, synthesis_store.load_params(tmp_path), "doping_pct", "mobility_cm2_vs"
+        )
+        flags = optimization_data.quality_flags(project, rows, "doping_pct", "mobility_cm2_vs")
+        flagged = {f.sample_name for f in flags}
+        assert "CS-1" in flagged and "CS-3" in flagged  # both sign-disagree
+        assert "CS-5" not in flagged  # questionable, not unreliable
+        cs3 = next(f for f in flags if f.sample_name == "CS-3")
+        assert "mobility cannot be negative" in cs3.reason
+        assert "disagree in sign" in cs3.reason
+
+    def test_conductivity_target_never_flagged(self, tmp_path):
+        project, store, _ = _project_hall_cross(tmp_path)
+        for s in project.samples:
+            synthesis_store.set_sample_params(tmp_path, s.id, {"doping_pct": 1.0})
+        rows, _ = optimization_data.build_dataset(
+            project, store, synthesis_store.load_params(tmp_path), "doping_pct", "conductivity_s_cm"
+        )
+        assert (
+            optimization_data.quality_flags(project, rows, "doping_pct", "conductivity_s_cm") == []
+        )
+
+    def test_zt_target_never_flagged(self, tmp_path):
+        project, store, _ = _project_hall_cross(tmp_path)
+        for s in project.samples:
+            synthesis_store.set_sample_params(tmp_path, s.id, {"doping_pct": 1.0})
+        rows, _ = optimization_data.build_dataset(
+            project, store, synthesis_store.load_params(tmp_path), "doping_pct", "zt"
+        )
+        assert optimization_data.quality_flags(project, rows, "doping_pct", "zt") == []

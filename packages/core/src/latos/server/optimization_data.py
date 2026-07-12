@@ -18,12 +18,15 @@ the UI can tell the user exactly what to fill in.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
 
+from latos.analysis.hall import cross_config_reliability
 from latos.analysis.transport import TransportError
+from latos.core.enums import Technique
 from latos.server.transport_data import sample_zt
 
 if TYPE_CHECKING:
@@ -35,12 +38,22 @@ __all__ = [
     "DERIVED_ZT",
     "DatasetRow",
     "InputVariable",
+    "QualityFlag",
     "SkippedSample",
     "build_dataset",
     "list_input_variables",
     "list_target_properties",
     "peak_target",
+    "quality_flags",
 ]
+
+# Hall-derived features that inherit the Hall measurement's reliability:
+# each is computed from the (possibly noise-floor) Hall coefficient, so an
+# unreliable Hall makes them untrustworthy. Conductivity, resistivity and
+# sheet resistance are NOT here — they stay valid even when R_H is noise.
+_HALL_CARRIER_FEATURES: frozenset[str] = frozenset(
+    {"carrier_concentration_cm3", "mobility_cm2_vs", "hall_coefficient_cm3_c"}
+)
 
 # Special target option: zT that Latos derives in-app from a sample's
 # Resistivity/Seebeck + LFA measurements (provenance-tracked), as opposed
@@ -150,6 +163,83 @@ class InputVariable:
     name: str
     source: str  # "synthesis" | "measured"
     values: dict[str, float]  # sample_id -> value
+
+
+@dataclass(frozen=True, slots=True)
+class QualityFlag:
+    """A point in the optimization dataset whose value is untrustworthy.
+
+    Raised when a target or axis is a Hall-derived carrier metric from a
+    Hall measurement flagged unreliable (cross-configurations disagree), or
+    when the value is physically impossible (e.g. negative mobility). The
+    optimizer still runs — the researcher is warned, not blocked — so the
+    reliability gate and this flag together say *how much* and *why* to
+    distrust the recommendation.
+    """
+
+    sample_name: str
+    variable: str  # the target or input-variable name involved
+    value: float
+    reason: str
+
+
+def _hall_features(sample: Sample) -> Mapping[str, float] | None:
+    """The features of the sample's Hall measurement, or None."""
+    for measurement in sample.measurements:
+        if measurement.technique is Technique.HALL:
+            return measurement.features
+    return None
+
+
+def _flag_reason(sample: Sample, variable: str, value: float) -> str | None:
+    """Why this (variable, value) is a data-quality concern, or None.
+
+    Combines the Hall cross-configuration verdict (for carrier metrics) with
+    a physical-plausibility check (mobility cannot be negative).
+    """
+    reasons: list[str] = []
+    if variable in _HALL_CARRIER_FEATURES:
+        features = _hall_features(sample)
+        if features is not None:
+            level, reason = cross_config_reliability(features)
+            if level == "unreliable" and reason:
+                reasons.append(reason)
+    if variable == "mobility_cm2_vs" and value < 0:
+        reasons.append("mobility cannot be negative")
+    return "; ".join(reasons) if reasons else None
+
+
+def quality_flags(
+    project: Project,
+    rows: list[DatasetRow],
+    input_variable: str,
+    target_property: str,
+) -> list[QualityFlag]:
+    """Flag dataset points whose target or axis value can't be trusted.
+
+    Checks each row's target (y) and input variable (x) against the Hall
+    reliability of the same sample and against physical plausibility. Returns
+    one flag per (sample, variable) concern, so the UI can warn before the
+    researcher acts on the recommendation.
+    """
+    by_id = {s.id: s for s in project.samples}
+    flags: list[QualityFlag] = []
+    for row in rows:
+        sample = by_id.get(row.sample_id)
+        if sample is None:
+            continue
+        for variable, value in ((target_property, row.y), (input_variable, row.x)):
+            reason = _flag_reason(sample, variable, value)
+            if reason:
+                flags.append(
+                    QualityFlag(
+                        sample_name=row.sample_name,
+                        variable=variable,
+                        value=value,
+                        reason=reason,
+                    )
+                )
+    return flags
 
 
 def peak_target(sample: Sample, store: ArrayStore, prop: str) -> float | None:

@@ -343,3 +343,10 @@ class TestLoopCloser:
             json={"prereg_path": str(tmp_path / "evil.json"), "measured_value": 1.0},
         )
         assert resp.status_code == 404
+
+
+class TestQualityFlagsEndpoint:
+    def test_zt_run_has_no_flags(self, tmp_path: Path):
+        # The TE fixture has no Hall data, so a zt run is never flagged.
+        body = _run(_client(tmp_path))
+        assert body["quality_flags"] == []

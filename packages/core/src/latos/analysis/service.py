@@ -324,7 +324,7 @@ class AnalysisService:
         tmp = target.with_suffix(target.suffix + ".tmp")
         table = pa.table({name: pa.array(arr) for name, arr in arrays.items()})
         try:
-            pq.write_table(table, tmp)  # type: ignore[no-untyped-call]
+            pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
         except Exception:
             tmp.unlink(missing_ok=True)
             raise

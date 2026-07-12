@@ -56,7 +56,11 @@ def _windows_recycle(path: Path) -> bool:
     op.pFrom = str(path) + "\x00\x00"
     op.fFlags = fof_allowundo | fof_noconfirmation | fof_silent | fof_noerrorui
 
-    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+    # `windll` is Windows-only (this function is only reached on win32); the
+    # `unused-ignore` keeps type-checking clean on non-Windows CI too, where
+    # typeshed does define the attribute so the ignore would otherwise be unused.
+    shell32 = ctypes.windll.shell32  # type: ignore[attr-defined, unused-ignore]
+    result = shell32.SHFileOperationW(ctypes.byref(op))
     return result == 0 and not op.fAnyOperationsAborted
 
 

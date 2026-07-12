@@ -34,6 +34,13 @@ import { OptimizeChart } from "../components/OptimizeChart";
 /** "etching_time_h" → "etching time h" for on-screen labels. */
 const humanize = (v: string) => v.replace(/_/g, " ").trim() || "variable";
 
+/** Compact numeric formatting spanning doping (~1) to carrier density (~1e21). */
+const fmtVal = (v: number): string => {
+  const a = Math.abs(v);
+  if (a !== 0 && (a >= 1e5 || a < 1e-2)) return v.toExponential(2);
+  return v.toFixed(2);
+};
+
 /** Chip styling for the model's self-assessed reliability level. */
 function reliabilityChipClass(level: string): string {
   const base = "rounded px-2 py-0.5 text-xs font-medium uppercase tracking-wide ";
@@ -252,6 +259,25 @@ export function Optimize({ onBack }: { onBack: () => void }) {
           {/* Verdict + chart */}
           {result && (
             <section className="space-y-3">
+              {result.quality_flags.length > 0 && (
+                <div className="rounded-lg border border-severity-warning bg-[color-mix(in_srgb,var(--latos-severity-warning)_12%,transparent)] px-5 py-4 text-sm">
+                  <div className="font-medium text-severity-warning">
+                    ⚠ Data-quality warning — this run uses values flagged unreliable
+                  </div>
+                  <ul className="mt-2 space-y-1 text-secondary">
+                    {result.quality_flags.map((f) => (
+                      <li key={`${f.sample_name}:${f.variable}`} data-selectable>
+                        <span className="font-medium text-primary">{f.sample_name}</span>{" "}
+                        · {humanize(f.variable)} = {fmtVal(f.value)} — {f.reason}
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="mt-2 text-xs text-secondary">
+                    The recommendation may be meaningless. Check the Hall reliability flag in the
+                    sample's Analysis panel; fix or exclude the affected measurement, then re-run.
+                  </div>
+                </div>
+              )}
               <div
                 className={`rounded-lg border px-5 py-4 text-sm ${
                   result.converged

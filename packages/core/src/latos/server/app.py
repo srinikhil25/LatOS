@@ -71,6 +71,7 @@ from latos.server.schemas import (
     OutcomeVerdictOut,
     PreregSummary,
     ProjectSummary,
+    QualityFlagOut,
     RecommendationOut,
     RemoveMeasurementsRequest,
     RenameSampleRequest,
@@ -566,6 +567,9 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
         rows, skipped = optimization_data.build_dataset(
             result.project, store, params, input_variable, target_property
         )
+        flags = optimization_data.quality_flags(
+            result.project, rows, input_variable, target_property
+        )
         return OptimizationDataset(
             input_variable=input_variable,
             target_property=target_property,
@@ -574,6 +578,7 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
                 for r in rows
             ],
             skipped=[SkippedPoint(sample_name=s.sample_name, reason=s.reason) for s in skipped],
+            quality_flags=[_flag_out(f) for f in flags],
         )
 
     @app.post("/optimize/run")
@@ -598,6 +603,7 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             objective=body.objective,
             reliability_level=res.reliability.level if res.reliability else "unknown",
             reliability_note=res.reliability.note if res.reliability else "",
+            quality_flags=asm.quality_flags,
             grid_x=list(res.grid_x),
             grid_mean=list(res.grid_mean),
             grid_ci95=list(res.grid_ci95),
@@ -696,6 +702,7 @@ class _AssembledOptimization:
     bounds: tuple[float, float]
     target_label: str
     direction: str  # what the engine runs: "maximize" | "minimize"
+    quality_flags: list[QualityFlagOut]  # untrustworthy points (warn, don't block)
 
 
 def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _AssembledOptimization:
@@ -758,6 +765,14 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
         DatasetPoint(sample_id=r.sample_id, sample_name=r.sample_name, x=r.x, y=float(y))
         for r, y in zip(rows, ys.tolist(), strict=True)
     ]
+    # Data-quality flags use the ORIGINAL rows and property (raw values), not
+    # the target-mode transform, so a Hall-derived target is judged correctly.
+    flags = [
+        _flag_out(fl)
+        for fl in optimization_data.quality_flags(
+            result.project, rows, body.input_variable, body.target_property
+        )
+    ]
     bounds = body.bounds or (float(xs.min()), float(xs.max()))
     return _AssembledOptimization(
         points=points,
@@ -766,6 +781,17 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
         bounds=bounds,
         target_label=target_label,
         direction=direction,
+        quality_flags=flags,
+    )
+
+
+def _flag_out(flag: optimization_data.QualityFlag) -> QualityFlagOut:
+    """Map a core QualityFlag to the API shape."""
+    return QualityFlagOut(
+        sample_name=flag.sample_name,
+        variable=flag.variable,
+        value=flag.value,
+        reason=flag.reason,
     )
 
 

@@ -101,6 +101,11 @@ ml = [
 ]
 
 dev = [
+    # The sidecar (fastapi/uvicorn) is technically an optional extra, but the
+    # test suite exercises `latos.server`, so development + CI need it here.
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+
     # Test runners
     "pytest>=8.0",
     "pytest-cov>=4.1",

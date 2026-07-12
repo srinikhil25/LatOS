@@ -114,7 +114,7 @@ class ArrayStore:
         try:
             # `pq.write_table` is untyped in pyarrow's stubs; the runtime
             # behavior is exactly what we want.
-            pq.write_table(table, tmp)  # type: ignore[no-untyped-call]
+            pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
         except Exception:
             tmp.unlink(missing_ok=True)
             raise
@@ -135,7 +135,7 @@ class ArrayStore:
         if not path.is_file():
             return {}
         # `pq.read_table` is untyped in pyarrow's stubs.
-        table = pq.read_table(path)  # type: ignore[no-untyped-call]
+        table = pq.read_table(path)  # type: ignore[no-untyped-call, unused-ignore]
         return {
             name: np.asarray(table.column(name).to_numpy(zero_copy_only=False))
             for name in table.column_names

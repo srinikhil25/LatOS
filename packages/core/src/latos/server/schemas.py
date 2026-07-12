@@ -142,13 +142,28 @@ class SkippedPoint(BaseModel):
     reason: str
 
 
+class QualityFlagOut(BaseModel):
+    """A dataset point whose target/axis value is flagged untrustworthy.
+
+    Raised when a Hall-derived carrier metric comes from an unreliable Hall
+    measurement, or a value is physically impossible (e.g. negative mobility).
+    The run still proceeds — this warns, it does not block.
+    """
+
+    sample_name: str
+    variable: str
+    value: float
+    reason: str
+
+
 class OptimizationDataset(BaseModel):
-    """GET /optimize/dataset — the (x, y) table + what was skipped."""
+    """GET /optimize/dataset — the (x, y) table + what was skipped/flagged."""
 
     input_variable: str
     target_property: str
     points: list[DatasetPoint]
     skipped: list[SkippedPoint]
+    quality_flags: list[QualityFlagOut] = []
 
 
 class OptimizeRunRequest(BaseModel):
@@ -204,6 +219,9 @@ class OptimizeResult(BaseModel):
     # | calibrated.
     reliability_level: str = "unknown"
     reliability_note: str = ""
+    # Points whose target/axis value can't be trusted (e.g. an unreliable
+    # Hall measurement). Non-empty means "warn before acting on this run".
+    quality_flags: list[QualityFlagOut] = []
     # Posterior over the search range, for the curve.
     grid_x: list[float]
     grid_mean: list[float]
