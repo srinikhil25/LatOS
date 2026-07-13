@@ -24,6 +24,7 @@ class Technique(StrEnum):
     SEM = "sem"
     STEM = "stem"
     RAMAN = "raman"
+    SHOCK = "shock"
     UNKNOWN = "unknown"
 
     @property
@@ -43,6 +44,7 @@ _TECHNIQUE_DISPLAY: dict[Technique, str] = {
     Technique.SEM: "Scanning Electron Microscopy",
     Technique.STEM: "Scanning Transmission Electron Microscopy",
     Technique.RAMAN: "Raman Spectroscopy",
+    Technique.SHOCK: "Mechanical Shock (drop test)",
     Technique.UNKNOWN: "Unknown",
 }
 

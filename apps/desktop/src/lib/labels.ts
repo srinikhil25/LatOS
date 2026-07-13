@@ -57,6 +57,9 @@ const AXIS_LABELS: Record<string, string> = {
   peak_thermal_conductivity: "Peak thermal conductivity (W/m·K)",
   // ─ Synthesis variables (common defaults) ─
   doping_pct: "Doping (%)",
+  // ─ Mechanical shock (drop test) ─
+  time_s: "Time (s)",
+  voltage_v: "Sensor voltage (V)",
   // ─ Plot fallbacks ─
   index: "Index",
 };
@@ -130,6 +133,9 @@ const OUTPUT_KEY_LABELS: Record<string, string> = {
   resistivity_range_uohm_m: "Resistivity range (µΩ·m)",
   peak_power_factor_uw_mk2: "Peak power factor (µW/m·K²)",
   peak_power_factor_at_k: "Peak power factor at (K)",
+  // ─ Mechanical shock ─
+  peak_voltage_v: "Peak voltage (V)",
+  peak_time_ms: "Peak time (ms)",
 };
 
 /** The scientific label for an analyzer output key. */

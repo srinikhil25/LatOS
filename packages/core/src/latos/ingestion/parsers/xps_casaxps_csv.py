@@ -60,7 +60,9 @@ class CasaXpsCsvParser(BaseParser):
     """Parser for CasaXPS-exported `.csv` region files."""
 
     name: ClassVar[str] = "casaxps-csv"
-    version: ClassVar[str] = "1.0.1"
+    # 1.0.2: reject Tektronix oscilloscope CSVs (they also have numeric
+    # pairs) so a shock waveform is no longer mislabelled as XPS.
+    version: ClassVar[str] = "1.0.2"
     technique: ClassVar[Technique] = Technique.XPS
     supported_extensions: ClassVar[tuple[str, ...]] = (".csv",)
 
@@ -80,6 +82,11 @@ class CasaXpsCsvParser(BaseParser):
             with path.open("r", encoding="utf-8", errors="replace") as fh:
                 lines = [fh.readline() for _ in range(_SNIFF_LINES)]
         except OSError:
+            return 0.0
+
+        # A Tektronix oscilloscope CSV also has numeric pairs but is not
+        # XPS — reject it so dispatch routes it to the scope parser.
+        if _looks_like_scope_csv(lines):
             return 0.0
 
         consecutive = 0
@@ -207,6 +214,15 @@ class CasaXpsCsvParser(BaseParser):
 
 
 # ─── Module-level helpers ───────────────────────────────────────────
+def _looks_like_scope_csv(lines: list[str]) -> bool:
+    """True if these header lines are a Tektronix oscilloscope export (not XPS)."""
+    first = next((ln for ln in lines if ln.strip()), "")
+    if not first.startswith("Model,"):
+        return False
+    joined = "".join(lines)
+    return "Horizontal Units" in joined and "Vertical Units" in joined
+
+
 def _looks_like_xps_data_row(line: str) -> bool:
     """True if `line` looks like an XPS data row (`<float>,<float>`)."""
     parts = [p.strip() for p in line.split(",")]

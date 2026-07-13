@@ -15,6 +15,7 @@ const TECH_VAR: Record<string, string> = {
   sem: "--latos-tech-sem",
   stem: "--latos-tech-stem",
   raman: "--latos-tech-raman",
+  shock: "--latos-tech-shock",
 };
 
 export function techniqueLabel(technique: string): string {

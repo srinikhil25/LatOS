@@ -199,6 +199,7 @@ def default_registry() -> ParserRegistry:
         ResistivitySeebeckXlsxParser,
         RigakuXrdAscParser,
         RigakuXrdTxtParser,
+        ShockTektronixCsvParser,
         ThermoelectricXlsxParser,
         UvDrsTxtParser,
         UvDrsXlsxParser,
@@ -220,6 +221,10 @@ def default_registry() -> ParserRegistry:
             UvDrsTxtParser(),
             RigakuXrdTxtParser(),
             RigakuXrdAscParser(),
+            # Tektronix oscilloscope waveforms (.csv) — matched on the scope
+            # header, registered before CasaXPS so a shock file never falls
+            # through to it.
+            ShockTektronixCsvParser(),
             # CasaXPS is keyed only on .csv extension + structure; least
             # specific, registered last so it can't beat anything else.
             CasaXpsCsvParser(),
