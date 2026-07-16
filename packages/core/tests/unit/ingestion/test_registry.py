@@ -224,6 +224,8 @@ class TestDefaultRegistry:
             "bruker-eds-spx",
             "eds-emsa",
             "microscopy-tif",
+            "shock-tektronix-csv",
+            "shock-summary-csv",
         }
         actual_names = {p.name for p in r.parsers}
         assert expected_names == actual_names

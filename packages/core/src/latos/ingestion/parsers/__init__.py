@@ -16,6 +16,7 @@ from latos.ingestion.parsers.microscopy_tif import MicroscopyTifParser
 from latos.ingestion.parsers.resistivity_seebeck_xlsx import (
     ResistivitySeebeckXlsxParser,
 )
+from latos.ingestion.parsers.shock_summary_csv import ShockSummaryCsvParser
 from latos.ingestion.parsers.shock_tektronix_csv import ShockTektronixCsvParser
 from latos.ingestion.parsers.thermoelectric_xlsx import ThermoelectricXlsxParser
 from latos.ingestion.parsers.uvdrs_txt import UvDrsTxtParser
@@ -36,6 +37,7 @@ __all__ = [
     "ResistivitySeebeckXlsxParser",
     "RigakuXrdAscParser",
     "RigakuXrdTxtParser",
+    "ShockSummaryCsvParser",
     "ShockTektronixCsvParser",
     "ThermoelectricXlsxParser",
     "UvDrsTxtParser",

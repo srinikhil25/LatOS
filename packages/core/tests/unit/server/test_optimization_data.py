@@ -657,3 +657,108 @@ class TestQualityFlags:
             project, rows, "doping_pct", optimization_data.DERIVED_ZT, store
         )
         assert any("Wiedemann" in f.reason for f in flags)
+
+
+# ─── Shock target wiring (peak_force_n) ─────────────────────────────
+
+
+def _shock_measurement(sample_id: str, *, vol_pct: float, wt_pct: float, peak_force: float):
+    """A features-only shock-summary measurement (peaks only, no arrays)."""
+    return Measurement(
+        id=new_id(),
+        sample_id=sample_id,
+        technique=Technique.SHOCK,
+        instrument="drop test (peak summary)",
+        measured_at=None,
+        parsed_at=utc_now(),
+        parser_version="1.0.0",
+        files=(),
+        issues=(),
+        parsed_data_path=None,
+        analysis_results=(),
+        features={
+            "peak_force_n": peak_force,
+            "peak_voltage_v": peak_force / 50.0,
+            "peak_force_sd_n": 5.0,
+            "particle_vol_pct": vol_pct,
+            "particle_wt_pct": wt_pct,
+        },
+    )
+
+
+def _project_with_shock(root: Path) -> tuple[Project, ArrayStore, dict[str, str]]:
+    """Three shock composites, each one features-only SHOCK measurement."""
+    store = ArrayStore(root / ".latos" / "arrays")
+    pid = new_id()
+    spec = [
+        ("P44vol", 43.84, 40.17, 66.0),
+        ("P54vol", 53.79, 46.21, 36.0),
+        ("P59vol", 58.65, 51.30, 54.0),
+    ]
+    samples = []
+    ids: dict[str, str] = {}
+    for name, vol, wt, force in spec:
+        sid = new_id()
+        ids[name] = sid
+        samples.append(
+            Sample(
+                id=sid,
+                project_id=pid,
+                canonical_name=name,
+                aliases=(),
+                measurements=(_shock_measurement(sid, vol_pct=vol, wt_pct=wt, peak_force=force),),
+            )
+        )
+    project = Project(
+        id=pid,
+        name=root.name,
+        root_path=root,
+        created_at=utc_now(),
+        schema_version=4,
+        samples=tuple(samples),
+        unassigned_files=(),
+    )
+    return project, store, ids
+
+
+class TestShockTarget:
+    def test_peak_force_is_a_target(self, tmp_path: Path):
+        project, store, _ = _project_with_shock(tmp_path)
+        assert "peak_force_n" in optimization_data.list_target_properties(project, store)
+
+    def test_composition_and_diagnostics_not_targets(self, tmp_path: Path):
+        project, store, _ = _project_with_shock(tmp_path)
+        props = optimization_data.list_target_properties(project, store)
+        for name in ("particle_vol_pct", "particle_wt_pct", "peak_voltage_v", "peak_force_sd_n"):
+            assert name not in props
+
+    def test_composition_offered_as_axis(self, tmp_path: Path):
+        project, _store, _ = _project_with_shock(tmp_path)
+        names = {v.name for v in optimization_data.list_input_variables(project, {})}
+        assert {"particle_vol_pct", "particle_wt_pct"} <= names
+
+    def test_outcome_features_excluded_as_axis(self, tmp_path: Path):
+        # The transmitted force and its scatter are objectives/diagnostics,
+        # not composition axes — they must never be offered as an input.
+        project, _store, _ = _project_with_shock(tmp_path)
+        names = {v.name for v in optimization_data.list_input_variables(project, {})}
+        assert names.isdisjoint({"peak_force_n", "peak_voltage_v", "peak_force_sd_n"})
+
+    def test_build_dataset_force_vs_loading(self, tmp_path: Path):
+        project, store, _ = _project_with_shock(tmp_path)
+        rows, skipped = optimization_data.build_dataset(
+            project, store, {}, "particle_vol_pct", "peak_force_n"
+        )
+        assert not skipped
+        by_name = {r.sample_name: (r.x, r.y) for r in rows}
+        assert by_name["P44vol"] == (43.84, 66.0)
+        assert by_name["P54vol"] == (53.79, 36.0)
+
+    def test_targets_endpoint_returns_peak_force(self, tmp_path: Path):
+        project, _store, _ = _project_with_shock(tmp_path)
+        app = create_app()
+        state: ServerState = app.state.latos  # type: ignore[union-attr]
+        state.root = tmp_path
+        state.result = IngestionResult(project=project, outcomes=())
+        client = TestClient(app)
+        assert client.get("/optimize/targets").json()["properties"] == ["peak_force_n"]

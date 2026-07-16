@@ -329,6 +329,7 @@ export const TECHNIQUES = [
   "sem",
   "stem",
   "raman",
+  "shock",
   "unknown",
 ] as const;
 

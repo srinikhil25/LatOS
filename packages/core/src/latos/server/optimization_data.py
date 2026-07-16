@@ -84,6 +84,9 @@ _OBJECTIVE_FEATURES: frozenset[str] = frozenset(
         "carrier_concentration_cm3",
         "mobility_cm2_vs",
         "conductivity_s_cm",
+        # Mechanical shock (drop test): the transmitted peak force is the
+        # objective — minimized for better absorption.
+        "peak_force_n",
     }
 )
 
@@ -94,6 +97,12 @@ _NON_AXIS_FEATURES: frozenset[str] = frozenset(
     {
         "hall_ac_cross_cm3_c",
         "hall_bd_cross_cm3_c",
+        # Shock-test outcomes/diagnostics: the transmitted force is the
+        # objective and its scatter/raw voltage are diagnostics — the
+        # optimization axis is the composition (particle loading), not these.
+        "peak_force_n",
+        "peak_voltage_v",
+        "peak_force_sd_n",
     }
 )
 
