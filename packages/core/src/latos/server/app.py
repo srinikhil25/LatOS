@@ -323,11 +323,18 @@ def _delete_project_store(state: ServerState, root: Path) -> DeleteProjectResult
 
 
 def _json_safe(value: object) -> object:
-    """Replace non-finite floats with None so the payload is valid JSON."""
+    """Replace non-finite floats with None so the payload is valid JSON.
+
+    Recurses through lists, tuples and dicts: a NaN buried in a nested analyzer
+    output (e.g. ``{"peaks": {"fwhm": nan}}``) would otherwise reach the response
+    as a literal ``NaN``, which is invalid JSON and breaks the frontend parse.
+    """
     if isinstance(value, float):
         return value if math.isfinite(value) else None
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
     return value
 
 
@@ -909,7 +916,11 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             max_ei=res.max_ei,
             noise_threshold=res.noise_threshold,
             converged=res.converged,
+            recommendation_kind=res.recommendation_kind,
             verdict=_verdict(res),
+            secondary_variable=asm.secondary_variable,
+            secondary_slope=asm.secondary_slope,
+            secondary_intercept=asm.secondary_intercept,
         )
 
     @app.post("/optimize/freeze")
@@ -1007,6 +1018,56 @@ class _AssembledOptimization:
     y_transform: str  # "identity" | "log"
     y_min: float | None
     y_max: float | None
+    # Optional companion axis: label + linear primary->secondary map, or empty.
+    secondary_variable: str = ""
+    secondary_slope: float | None = None
+    secondary_intercept: float | None = None
+
+
+_MIN_SECONDARY_POINTS = 2  # need at least two paired samples to fit a line
+
+
+def _secondary_axis(
+    body: OptimizeRunRequest,
+    project: Project,
+    params: synthesis_store.SynthesisParams,
+    rows: list[optimization_data.DatasetRow],
+    points: list[DatasetPoint],
+) -> tuple[str, float | None, float | None, list[DatasetPoint]]:
+    """Fit a linear primary->secondary map for an optional companion axis.
+
+    Lets the UI show a second variable alongside the primary (e.g. vol% next to
+    a wt% run): the map is `secondary = slope * primary + intercept`, fit by
+    least squares from the samples that carry both values. Display only — the
+    primary axis is what the engine searches. Returns the label, slope and
+    intercept (or empty/None when unavailable) plus the points with `x2` set.
+    """
+    sec_name = (body.secondary_variable or "").strip()
+    if not sec_name or sec_name == body.input_variable:
+        return "", None, None, points
+    by_id = {s.id: s for s in project.samples}
+    sec_by_sample: dict[str, float] = {}
+    for r in rows:
+        sample = by_id.get(r.sample_id)
+        if sample is None:
+            continue
+        sv = params.get(r.sample_id, {}).get(sec_name)
+        if sv is None:
+            sv = optimization_data.feature_value(sample, sec_name)
+        if sv is not None:
+            sec_by_sample[r.sample_id] = float(sv)
+    paired = [(r.x, sec_by_sample[r.sample_id]) for r in rows if r.sample_id in sec_by_sample]
+    if len(paired) < _MIN_SECONDARY_POINTS:
+        return "", None, None, points
+    px = np.array([p[0] for p in paired], dtype=float)
+    if float(px.max() - px.min()) <= 0:  # a single primary value can't map a line
+        return "", None, None, points
+    slope, intercept = (float(v) for v in np.polyfit(px, [p[1] for p in paired], 1))
+    mapped = [
+        p.model_copy(update={"x2": sec_by_sample.get(p.sample_id, slope * p.x + intercept)})
+        for p in points
+    ]
+    return sec_name, slope, intercept, mapped
 
 
 def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _AssembledOptimization:
@@ -1069,6 +1130,12 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
         DatasetPoint(sample_id=r.sample_id, sample_name=r.sample_name, x=r.x, y=float(y))
         for r, y in zip(rows, ys.tolist(), strict=True)
     ]
+
+    # Optional companion axis (e.g. show vol% alongside a wt% run) — display only.
+    secondary_variable, secondary_slope, secondary_intercept, points = _secondary_axis(
+        body, result.project, params, rows, points
+    )
+
     # Data-quality flags use the ORIGINAL rows and property (raw values), not
     # the target-mode transform, so a Hall-derived target is judged correctly.
     flags = [
@@ -1088,7 +1155,28 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
         if prop.positive:  # only clamp strictly-positive quantities
             y_min, y_max = prop.min_value, prop.max_value
 
+    # The input axis has physics too. The measured span is the default search
+    # range; if a wider one is requested, clip it to what can physically be
+    # prepared (e.g. a particle fraction cannot exceed random close packing) and
+    # say so, rather than proposing an experiment nobody could carry out.
     bounds = body.bounds or (float(xs.min()), float(xs.max()))
+    axis = physics.lookup_axis(body.input_variable)
+    if axis is not None:
+        lo, hi, clamped = axis.clamp(float(bounds[0]), float(bounds[1]))
+        if clamped and hi > lo:
+            bounds = (lo, hi)
+            flags.append(
+                _flag_out(
+                    optimization_data.QualityFlag(
+                        sample_name="—",
+                        variable=body.input_variable,
+                        value=hi,
+                        reason=(
+                            f"Search range clipped to {lo:g}-{hi:g} {axis.unit}: {axis.reason}."
+                        ),
+                    )
+                )
+            )
     return _AssembledOptimization(
         points=points,
         xs=xs,
@@ -1100,6 +1188,9 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
         y_transform=y_transform,
         y_min=y_min,
         y_max=y_max,
+        secondary_variable=secondary_variable,
+        secondary_slope=secondary_slope,
+        secondary_intercept=secondary_intercept,
     )
 
 
@@ -1161,7 +1252,14 @@ def _validate_prereg(state: ServerState, body: ValidateOutcomeRequest) -> Outcom
         record = json.loads(resolved.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"Could not read the record: {exc}") from exc
-    verdict = optimization.validate_outcome(record, body.measured_value)
+    try:
+        verdict = optimization.validate_outcome(record, body.measured_value)
+    except (KeyError, TypeError, ValueError) as exc:
+        # A hand-edited / old-format record is a client-side data problem, not a
+        # server fault: return 400, not an unhandled 500.
+        raise HTTPException(
+            status_code=400, detail=f"Malformed pre-registration record: {exc}"
+        ) from exc
     optimization.write_outcome(resolved, verdict)
     return _verdict_out(verdict)
 
@@ -1202,23 +1300,30 @@ def _verdict_out(verdict: optimization.OutcomeVerdict) -> OutcomeVerdictOut:
 
 
 def _verdict_out_from_dict(data: dict[str, object]) -> OutcomeVerdictOut:
-    """Rebuild an OutcomeVerdictOut from a persisted outcome payload."""
+    """Rebuild an OutcomeVerdictOut from a persisted outcome payload.
+
+    Tolerant of a missing key: a single malformed/old-format outcome file must
+    not take down the whole ``/optimize/prereg`` listing with a KeyError. Absent
+    numeric fields default to 0.0, flags to False.
+    """
+
+    def _num(key: str) -> float:
+        v = data.get(key)
+        return float(v) if isinstance(v, (int, float)) else 0.0
+
     interval = data.get("predictive_interval_95") or [0.0, 0.0]
+    rel = data.get("relative_error")
     return OutcomeVerdictOut(
-        measured=float(data["measured"]),  # type: ignore[arg-type]
-        predicted_mean=float(data["predicted_mean"]),  # type: ignore[arg-type]
+        measured=_num("measured"),
+        predicted_mean=_num("predicted_mean"),
         predictive_interval_95=(float(interval[0]), float(interval[1])),  # type: ignore[index]
-        prior_best=float(data["prior_best"]),  # type: ignore[arg-type]
+        prior_best=_num("prior_best"),
         direction=str(data.get("direction", "maximize")),
-        within_interval=bool(data["within_interval"]),
-        improved=bool(data["improved"]),
-        signed_error=float(data["signed_error"]),  # type: ignore[arg-type]
-        absolute_error=float(data["absolute_error"]),  # type: ignore[arg-type]
-        relative_error=(
-            float(data["relative_error"])  # type: ignore[arg-type]
-            if data.get("relative_error") is not None
-            else None
-        ),
+        within_interval=bool(data.get("within_interval", False)),
+        improved=bool(data.get("improved", False)),
+        signed_error=_num("signed_error"),
+        absolute_error=_num("absolute_error"),
+        relative_error=float(rel) if isinstance(rel, (int, float)) else None,
         summary=str(data.get("summary", "")),
         validated_at=str(data.get("validated_at", "")),
     )
@@ -1253,6 +1358,22 @@ def _verdict(res: OptimizationResult) -> str:
             f"{best_word.capitalize()} so far: {res.best_y:.3f} at "
             f"{res.input_name} = {res.best_x:g}. "
             f"A confirmatory run at {rec.x:.3g} is optional but unlikely to improve."
+        )
+    if res.recommendation_kind == "explore":
+        # Expected improvement has flat-lined, but on too few points to trust that
+        # signal: the model is exploratory and may be over-confident in regions it
+        # never sampled. Send the next run to the least-sampled point instead of
+        # calling the campaign done.
+        return (
+            f"Not enough data to call this optimized. The model is still "
+            f"exploratory, so a flat improvement signal can't be trusted. "
+            f"Measure the least-sampled point next: {res.input_name} = {rec.x:.3g} "
+            f"(predicted {res.target_name} {rec.predicted_mean:.2f} "
+            f"+/- {rec.ci95_predictive:.2f}, 95% predictive). It sits in the widest "
+            f"gap between measurements, where a better result could still be hiding; "
+            f"one run there will sharpen the model the most. "
+            f"{best_word.capitalize()} so far: {res.best_y:.3f} at "
+            f"{res.input_name} = {res.best_x:g}."
         )
     return (
         f"Recommended next experiment: {res.input_name} = {rec.x:.3g} "

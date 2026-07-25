@@ -19,6 +19,7 @@ import {
 } from "../lib/api";
 import { axisLabel } from "../lib/labels";
 import { AnalysisLoader } from "../components/AnalysisLoader";
+import { LinePlot } from "../components/LinePlot";
 
 const SHAPES: { value: PeakShape; label: string }[] = [
   { value: "pseudo_voigt", label: "Pseudo-Voigt" },
@@ -41,6 +42,9 @@ const BACKGROUNDS: { value: BackgroundKind; label: string }[] = [
 // Techniques that produce a peak-fittable spectrum (excludes images like
 // TEM/SEM and scalar/curve techniques like Hall and thermoelectric).
 const FITTABLE = new Set(["xrd", "xps", "raman", "uv_drs", "eds"]);
+// Also viewable here (not fitted): a shock/drop-impact waveform is a transient
+// trace whose analysis is peak extraction, not multi-peak fitting.
+const VIEWABLE = new Set([...FITTABLE, "shock"]);
 
 /** The real steps runFit runs through, shown while a fit is in flight. */
 const FIT_STAGES = [
@@ -51,12 +55,13 @@ const FIT_STAGES = [
 ];
 
 // Preferred x / y column names, most specific first.
-const X_HINTS = ["two_theta", "binding_energy", "raman_shift", "wavelength_nm", "energy_ev"];
-const Y_HINTS = ["intensity", "cps", "counts", "reflectance_pct", "absorbance"];
+const X_HINTS = ["two_theta", "binding_energy", "raman_shift", "wavelength_nm", "energy_ev", "time_s"];
+const Y_HINTS = ["intensity", "cps", "counts", "reflectance_pct", "absorbance", "voltage_v"];
 
 interface MeasOption {
   id: string;
   label: string;
+  technique: string;
 }
 
 function pickDefault(names: string[], hints: string[], fallbackIdx: number): string {
@@ -116,12 +121,21 @@ export function Fit({ onBack }: { onBack: () => void }) {
     const out: MeasOption[] = [];
     for (const s of samples) {
       for (const m of s.measurements) {
-        if (!FITTABLE.has(m.technique)) continue;
-        out.push({ id: m.id, label: `${s.name} · ${m.technique}${m.filename ? ` · ${m.filename}` : ""}` });
+        if (!VIEWABLE.has(m.technique)) continue;
+        out.push({
+          id: m.id,
+          technique: m.technique,
+          label: `${s.name} · ${m.technique}${m.filename ? ` · ${m.filename}` : ""}`,
+        });
       }
     }
     return out;
   }, [samples]);
+
+  // A shock/drop-impact trace is viewed, not fitted: show the waveform with its
+  // peak marked instead of the lmfit peak-fitting controls.
+  const tech = useMemo(() => options.find((o) => o.id === measId)?.technique ?? "", [options, measId]);
+  const isShock = tech === "shock";
 
   const chooseMeasurement = useCallback((id: string) => {
     setMeasId(id);
@@ -147,6 +161,14 @@ export function Fit({ onBack }: { onBack: () => void }) {
   }, []);
 
   const xy = useMemo(() => cleanXY(arrays, xName, yName), [arrays, xName, yName]);
+
+  // The extracted peak of a shock waveform: the sample of largest magnitude.
+  const shockPeak = useMemo(() => {
+    if (!isShock || xy.x.length === 0) return null;
+    let bi = 0;
+    for (let i = 1; i < xy.y.length; i++) if (Math.abs(xy.y[i]) > Math.abs(xy.y[bi])) bi = i;
+    return { x: xy.x[bi], y: xy.y[bi] };
+  }, [isShock, xy]);
 
   const autoDetect = useCallback(() => {
     if (xy.x.length < 5) return;
@@ -251,7 +273,7 @@ export function Fit({ onBack }: { onBack: () => void }) {
               </div>
             )}
 
-            {names.length > 0 && (
+            {!isShock && names.length > 0 && (
               <div className="grid grid-cols-2 gap-4">
                 <label className="block text-sm">
                   <span className="mb-1 block text-xs uppercase tracking-wide text-secondary">Peak shape</span>
@@ -284,7 +306,7 @@ export function Fit({ onBack }: { onBack: () => void }) {
               </div>
             )}
 
-            {names.length > 0 && (
+            {!isShock && names.length > 0 && (
               <div className="space-y-2">
                 <div className="flex items-center gap-2">
                   <span className="text-xs uppercase tracking-wide text-secondary">
@@ -338,6 +360,43 @@ export function Fit({ onBack }: { onBack: () => void }) {
             )}
           </section>
 
+          {/* Shock / drop-impact waveform: view the transient with its peak marked. */}
+          {isShock &&
+            (xy.x.length > 0 ? (
+              <section className="space-y-3">
+                <div className="rounded-lg border border-edge bg-surface p-4">
+                  <LinePlot
+                    x={xy.x}
+                    y={xy.y}
+                    xLabel={axisLabel(xName)}
+                    yLabel={axisLabel(yName)}
+                    peak={shockPeak}
+                  />
+                </div>
+                {shockPeak && (
+                  <div className="flex flex-wrap gap-4 rounded-lg border border-edge bg-surface px-5 py-3 text-sm" data-selectable>
+                    <span>
+                      Peak magnitude: <strong>{Math.abs(shockPeak.y).toFixed(3)} V</strong>
+                    </span>
+                    <span className="text-secondary">
+                      at{" "}
+                      {xName.includes("time")
+                        ? `${(shockPeak.x * 1000).toFixed(1)} ms`
+                        : fmt(shockPeak.x)}
+                    </span>
+                    <span className="text-secondary">
+                      Transient trace — the analysis is peak extraction, not multi-peak fitting.
+                    </span>
+                  </div>
+                )}
+              </section>
+            ) : (
+              <div className="rounded-md border border-edge bg-muted p-4 text-sm text-secondary">
+                This shock record has no waveform (a peak-summary file). Open the raw
+                scope trace (Tektronix .CSV) to view the drop-impact waveform.
+              </div>
+            ))}
+
           {phase === "fitting" && (
             <AnalysisLoader title="Running the fit" stages={FIT_STAGES} />
           )}
@@ -352,6 +411,7 @@ export function Fit({ onBack }: { onBack: () => void }) {
                 baseline={result.baseline}
                 peaks={result.components.map((c) => c.center)}
                 xLabel={axisLabel(xName)}
+                yLabel={axisLabel(yName)}
               />
 
               <div className="flex flex-wrap gap-4 rounded-lg border border-edge bg-surface px-5 py-3 text-sm" data-selectable>
@@ -376,7 +436,7 @@ export function Fit({ onBack }: { onBack: () => void }) {
                   </thead>
                   <tbody>
                     {result.components.map((c, i) => (
-                      <tr key={c.center} className="border-b border-edge last:border-0">
+                      <tr key={i} className="border-b border-edge last:border-0">
                         <td className="px-4 py-2">{i + 1}</td>
                         <td className="px-4 py-2 text-right">{fmt(c.center)}</td>
                         <td className="px-4 py-2 text-right">{fmt(c.amplitude)}</td>
@@ -419,6 +479,7 @@ function SpectrumPlot({
   baseline,
   peaks,
   xLabel,
+  yLabel,
 }: {
   x: number[];
   y: number[];
@@ -426,6 +487,7 @@ function SpectrumPlot({
   baseline: number[];
   peaks: number[];
   xLabel: string;
+  yLabel: string;
 }) {
   const W = 720;
   const H = 300;
@@ -456,9 +518,9 @@ function SpectrumPlot({
         {/* fit */}
         <path d={path(fit, syTop)} fill="none" stroke="var(--latos-accent)" strokeWidth={1.6} />
         {/* peak markers */}
-        {peaks.map((p) => (
+        {peaks.map((p, i) => (
           <line
-            key={p}
+            key={i}
             x1={sx(p)}
             x2={sx(p)}
             y1={pad}
@@ -473,11 +535,61 @@ function SpectrumPlot({
         <line x1={pad} x2={W - pad} y1={H + RH / 2} y2={H + RH / 2} stroke="var(--latos-edge)" strokeWidth={0.5} />
         <path d={path(resid, syRes)} fill="none" stroke="var(--latos-text-secondary)" strokeWidth={0.75} opacity={0.7} />
         <text x={pad} y={H + RH + 18} fontSize="11" fill="var(--latos-text-secondary)">
-          residual
+          residual (measured - fit)
         </text>
         <text x={W - pad} y={H + RH + 18} fontSize="11" textAnchor="end" fill="var(--latos-text-secondary)">
           {xLabel}
         </text>
+        {/* y-axis label */}
+        <text
+          x={12}
+          y={pad + (H - 2 * pad) / 2}
+          fontSize="11"
+          fill="var(--latos-text-secondary)"
+          textAnchor="middle"
+          transform={`rotate(-90 12 ${pad + (H - 2 * pad) / 2})`}
+        >
+          {yLabel}
+        </text>
+        {/* legend — identifies each curve so the plot is self-explanatory */}
+        <g transform={`translate(${W - pad - 128}, ${pad + 8})`} fontSize="10">
+          <rect
+            x={-8}
+            y={-9}
+            width={132}
+            height={68}
+            rx={4}
+            fill="var(--latos-surface)"
+            opacity={0.9}
+            stroke="var(--latos-edge)"
+            strokeWidth={0.5}
+          />
+          <line x1={0} x2={18} y1={3} y2={3} stroke="var(--latos-text-secondary)" strokeWidth={1.5} />
+          <text x={24} y={6} fill="var(--latos-text-secondary)">Measured</text>
+          <line x1={0} x2={18} y1={18} y2={18} stroke="var(--latos-accent)" strokeWidth={1.8} />
+          <text x={24} y={21} fill="var(--latos-text-secondary)">Fit</text>
+          <line
+            x1={0}
+            x2={18}
+            y1={33}
+            y2={33}
+            stroke="var(--latos-edge)"
+            strokeWidth={1.2}
+            strokeDasharray="4 3"
+          />
+          <text x={24} y={36} fill="var(--latos-text-secondary)">Baseline</text>
+          <line
+            x1={7}
+            x2={7}
+            y1={45}
+            y2={55}
+            stroke="var(--latos-accent)"
+            strokeWidth={1}
+            strokeDasharray="2 3"
+            opacity={0.7}
+          />
+          <text x={24} y={53} fill="var(--latos-text-secondary)">Peak centres</text>
+        </g>
       </svg>
     </div>
   );

@@ -85,8 +85,8 @@ export function AnalysisPanel({ measurementId }: { measurementId: string }) {
           </dl>
           {r.issues.length > 0 && (
             <ul className="mt-2 space-y-0.5 border-t border-edge pt-2 text-xs">
-              {r.issues.map((issue) => (
-                <li key={issue} className={issueClass(issue)} data-selectable>
+              {r.issues.map((issue, i) => (
+                <li key={i} className={issueClass(issue)} data-selectable>
                   {issue}
                 </li>
               ))}

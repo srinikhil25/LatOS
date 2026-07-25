@@ -127,10 +127,14 @@ class LfaXlsxParser(BaseParser):
             # 3 = conductivity, 4 = Cp.
             if len(row) < _MIN_DATA_COLS or not isinstance(row[0], int | float):
                 continue
-            if not isinstance(row[3], int | float):
+            # Diffusivity is the primary LFA measurement and conductivity is
+            # derived from it; gate the row on BOTH being numeric so a blank or
+            # text cell drops the row instead of silently seeding a NaN into the
+            # arrays (which stay the same length and would corrupt downstream fits).
+            if not isinstance(row[2], int | float) or not isinstance(row[3], int | float):
                 continue
             col["temperature_k"].append(float(row[0]))
-            col["diffusivity_mm2_s"].append(_num(row[2]))
+            col["diffusivity_mm2_s"].append(float(row[2]))
             col["thermal_conductivity"].append(float(row[3]))
             col["cp_j_gk"].append(_num(row[4] if len(row) > _MIN_DATA_COLS else None))
 

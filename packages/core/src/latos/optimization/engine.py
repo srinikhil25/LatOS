@@ -268,6 +268,13 @@ class OptimizationResult:
     # How trustworthy the intervals are, from the data itself. None only
     # when the caller skipped the assessment (e.g. the robustness sweep).
     reliability: ReliabilityReport | None = None
+    # Why this point was recommended:
+    #   "exploit" — highest expected improvement (the normal EI pick), or
+    #   "explore" — the least-sampled region (max posterior uncertainty),
+    #     chosen when EI would otherwise stop the campaign on data too thin
+    #     to trust. A guard against declaring "optimum reached" over a gap
+    #     the model never sampled (see `optimize`).
+    recommendation_kind: str = "exploit"
 
 
 def _noise_std(y_work: np.ndarray, rel_noise: float, transform: str) -> float:
@@ -325,6 +332,10 @@ def _expected_improvement(
     mu: np.ndarray, sigma: np.ndarray, f_best: float, xi: float
 ) -> np.ndarray:
     """Expected improvement over `f_best` (maximization)."""
+    # A non-finite posterior std (ill-conditioned GP) must not slip through:
+    # np.maximum(nan, x) returns nan, which would silently poison EI and the
+    # recommendation. Replace non-finite std with the positive floor first.
+    sigma = np.where(np.isfinite(sigma), sigma, 1e-9)
     sigma = np.maximum(sigma, 1e-9)
     improvement = mu - f_best - xi
     z = improvement / sigma
@@ -365,6 +376,31 @@ def _recommend(
         ci95_predictive=(hi_pred - lo_pred) / 2.0,
         predictive_interval_95=(lo_pred, hi_pred),
     )
+
+
+def _decide_recommendation(
+    *,
+    ei_i: int,
+    std: np.ndarray,
+    converged_by_ei: bool,
+    reliability: ReliabilityReport | None,
+) -> tuple[int, bool, str]:
+    """Pick the recommended grid index, the convergence flag, and why.
+
+    Normally the recommendation is the EI-optimal point (exploit) and the
+    convergence flag is the raw EI verdict. But an EI "converged" signal on an
+    *exploratory* model is not trustworthy — that verdict rests on intervals we
+    have just flagged as over-confident, and the GP is blindest in the gaps it
+    never sampled, exactly where a real optimum can hide. So instead of stopping
+    we keep the loop open (`converged=False`) and steer the next experiment to
+    the least-sampled point (max posterior uncertainty): the one measurement that
+    most sharpens the model and would expose a hidden optimum in an unsampled gap.
+    `max_ei`/`noise_threshold` in the caller still report the honest EI stat.
+    """
+    exploratory = reliability is not None and reliability.level == "exploratory"
+    if converged_by_ei and exploratory:
+        return int(np.argmax(std)), False, "explore"
+    return ei_i, converged_by_ei, "exploit"
 
 
 def _assess_reliability(
@@ -437,6 +473,34 @@ def _assess_reliability(
     )
 
 
+def _prepare_inputs(
+    x: np.ndarray, y: np.ndarray, direction: str, bounds: tuple[float, float]
+) -> tuple[np.ndarray, np.ndarray, float, float]:
+    """Validate and coerce optimizer inputs; return ``(x, y, lo, hi)``.
+
+    Guards, in order: matching shapes; all-finite values (a stray NaN/Inf would
+    otherwise propagate silently to a NaN recommendation — the tool's whole point
+    is not to over-claim); enough points; a known direction; a non-degenerate
+    bound range.
+    """
+    x = np.asarray(x, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+    if x.shape != y.shape:
+        raise OptimizationError(f"x and y length mismatch: {x.shape} vs {y.shape}")
+    if not (np.isfinite(x).all() and np.isfinite(y).all()):
+        raise OptimizationError("x and y must be finite; got NaN or Inf in the input data")
+    if x.size < _MIN_POINTS:
+        raise OptimizationError(
+            f"Need at least {_MIN_POINTS} measured points to optimize; got {x.size}"
+        )
+    if direction not in _DIRECTIONS:
+        raise OptimizationError(f"direction must be one of {_DIRECTIONS}; got {direction!r}")
+    lo, hi = bounds
+    if not hi > lo:
+        raise OptimizationError(f"bounds must have high > low; got {bounds}")
+    return x, y, float(lo), float(hi)
+
+
 def optimize(
     x: np.ndarray,
     y: np.ndarray,
@@ -506,19 +570,7 @@ def optimize(
         OptimizationError: Fewer than 3 points, mismatched shapes, or a
             degenerate (zero-width) bound range.
     """
-    x = np.asarray(x, dtype=float).ravel()
-    y = np.asarray(y, dtype=float).ravel()
-    if x.shape != y.shape:
-        raise OptimizationError(f"x and y length mismatch: {x.shape} vs {y.shape}")
-    if x.size < _MIN_POINTS:
-        raise OptimizationError(
-            f"Need at least {_MIN_POINTS} measured points to optimize; got {x.size}"
-        )
-    if direction not in _DIRECTIONS:
-        raise OptimizationError(f"direction must be one of {_DIRECTIONS}; got {direction!r}")
-    lo, hi = bounds
-    if not hi > lo:
-        raise OptimizationError(f"bounds must have high > low; got {bounds}")
+    x, y, lo, hi = _prepare_inputs(x, y, direction, bounds)
 
     # Normalize x so the search span maps to _SPAN_UNITS regardless of the
     # variable's magnitude. The RBF is stationary, so the shift is free; the
@@ -566,7 +618,46 @@ def optimize(
     grid_upper = _clamp(_inverse(mean_work + _CI95 * std, transform), y_min, y_max)
     grid_ci95 = (grid_upper - grid_lower) / 2.0
 
-    rec_i = int(np.argmax(ei))
+    # The EI-optimal point and the noise-aware stopping signal. `max_ei` is the
+    # genuine best expected improvement anywhere on the grid — the statistic the
+    # stopping rule compares against the measurement-noise floor. When the best
+    # possible improvement is below what we can even measure, no experiment can
+    # *reliably* do better, so EI reads as converged (a heuristic, not a proof).
+    ei_i = int(np.argmax(ei))
+    max_ei = float(ei[ei_i])
+    noise_threshold = noise_std
+    converged_by_ei = max_ei < noise_threshold
+
+    fitted_ls = float(length_scale) if length_scale is not None else _fitted_length_scale(gp)
+    # If kernel extraction failed (`_fitted_length_scale` → NaN), substitute the
+    # init value ONCE here so the frozen config records the same length scale the
+    # LOO self-check actually used — otherwise the audit record is inconsistent.
+    if not np.isfinite(fitted_ls):
+        fitted_ls = _LS_INIT
+
+    # Assess reliability BEFORE finalizing the recommendation, so data too thin to
+    # trust can veto a premature "optimum reached". With only a handful of points
+    # the GP is over-confident in the gaps it never sampled — exactly where a real
+    # optimum can hide (Adachi's shear-thickening fluid: drop the true 50 wt%
+    # minimum and EI still reads ~0 across the over-smoothed fit, which would
+    # wrongly end the campaign). See `_assess_reliability`.
+    reliability: ReliabilityReport | None = None
+    if with_reliability:
+        reliability = _assess_reliability(
+            x_norm,
+            y_int,
+            noise_std=noise_std,
+            length_scale=fitted_ls,
+            seed=seed,
+        )
+
+    rec_i, converged, recommendation_kind = _decide_recommendation(
+        ei_i=ei_i,
+        std=std,
+        converged_by_ei=converged_by_ei,
+        reliability=reliability,
+    )
+
     recommendation = _recommend(
         grid,
         rec_i,
@@ -578,12 +669,6 @@ def optimize(
         y_min=y_min,
         y_max=y_max,
     )
-    max_ei = float(ei[rec_i])
-    # Stopping rule: when the best expected improvement is smaller than the
-    # measurement noise floor (in fit space), no experiment can *reliably* do
-    # better. A noise-aware heuristic for "stop and publish", not a guarantee.
-    noise_threshold = noise_std
-    converged = max_ei < noise_threshold
 
     config = BoConfig(
         objective=target_name,
@@ -594,9 +679,7 @@ def optimize(
         bounds=(float(lo), float(hi)),
         kernel="ConstantKernel * RBF",
         x_scale=float(x_scale),
-        length_scale=(
-            float(length_scale) if length_scale is not None else _fitted_length_scale(gp)
-        ),
+        length_scale=fitted_ls,
         length_scale_fitted=length_scale is None,
         length_scale_bounds=_LS_BOUNDS,
         xi=xi,
@@ -607,16 +690,6 @@ def optimize(
         seed=seed,
         created_at=created_at if created_at is not None else datetime.now(UTC),
     )
-
-    reliability: ReliabilityReport | None = None
-    if with_reliability:
-        reliability = _assess_reliability(
-            x_norm,
-            y_int,
-            noise_std=noise_std,
-            length_scale=config.length_scale,
-            seed=seed,
-        )
 
     return OptimizationResult(
         input_name=input_name,
@@ -637,6 +710,7 @@ def optimize(
         converged=converged,
         config=config,
         reliability=reliability,
+        recommendation_kind=recommendation_kind,
     )
 
 

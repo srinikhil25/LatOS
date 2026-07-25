@@ -133,6 +133,7 @@ class DatasetPoint(BaseModel):
     sample_name: str
     x: float
     y: float
+    x2: float | None = None  # companion (secondary-axis) value, when requested
 
 
 class SkippedPoint(BaseModel):
@@ -212,6 +213,11 @@ class OptimizeRunRequest(BaseModel):
     objective: str = "maximize"  # "maximize" | "minimize" | "target"
     target_value: float | None = None  # required when objective == "target"
     at_temperature_k: float | None = None  # derived-zT only
+    # Optional companion axis to display alongside the primary (e.g. show vol%
+    # next to a wt% run). Only shown, never optimized; the primary axis is what
+    # the engine searches. A linear primary->secondary map is fit from the paired
+    # sample values, so it works for any two related measured features.
+    secondary_variable: str | None = None
 
 
 class InputVariableOut(BaseModel):
@@ -267,7 +273,17 @@ class OptimizeResult(BaseModel):
     max_ei: float
     noise_threshold: float
     converged: bool
+    # Why the recommended point was chosen: "exploit" (highest expected
+    # improvement) or "explore" (least-sampled region — picked when the data
+    # is too thin to trust an "optimum reached" verdict).
+    recommendation_kind: str = "exploit"
     verdict: str  # plain-language summary for the UI
+    # Optional companion axis (e.g. vol% shown next to a wt% run). When set,
+    # `secondary = secondary_slope * primary + secondary_intercept` maps the
+    # primary axis to the companion units, for a second axis / dual-unit labels.
+    secondary_variable: str = ""
+    secondary_slope: float | None = None
+    secondary_intercept: float | None = None
 
 
 class FreezeResult(BaseModel):

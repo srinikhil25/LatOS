@@ -130,12 +130,23 @@ def apply_log(root: Path, project: Project) -> LogReport | None:
     if path is None:
         return None
     rows, variables, problems = parse_log(path)
+    problems = list(problems)  # make appendable so we can flag name collisions
 
     # Normalized name (canonical + aliases) -> sample id.
     name_to_id: dict[str, str] = {}
     for sample in project.samples:
         for candidate in (sample.canonical_name, *sample.aliases):
             key = normalize(candidate) or candidate.strip().lower()
+            existing = name_to_id.get(key)
+            if existing is not None and existing != sample.id:
+                # Two distinct samples normalize to the same name (e.g. "S-1"
+                # and "S_1"). setdefault keeps the first, so log rows for this
+                # name would silently land on the wrong sample — warn instead.
+                problems.append(
+                    f"two samples share the normalized name {key!r}; "
+                    "synthesis-log rows for it are applied to the first only"
+                )
+                continue
             name_to_id.setdefault(key, sample.id)
 
     params = synthesis_store.load_params(root)

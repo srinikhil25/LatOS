@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from latos.core.physics import lookup
+from latos.core.physics import lookup, lookup_axis
 
 
 def test_log_natural_positive_transport():
@@ -33,3 +33,42 @@ def test_target_mode_distance_has_no_physics():
 
 def test_unknown_returns_none():
     assert lookup("etching_time_h") is None
+
+
+# ─── Mechanical shock: a transmitted force cannot be negative ────────────
+def test_peak_force_is_strictly_positive():
+    p = lookup("peak_force_n")
+    assert p is not None and p.positive and not p.log_natural
+    assert p.min_value == 0.0 and p.max_value is None
+
+
+def test_peak_voltage_is_strictly_positive():
+    p = lookup("peak_voltage_v")
+    assert p is not None and p.positive and p.min_value == 0.0
+
+
+# ─── Input-axis physics: the packing limit ──────────────────────────────
+def test_particle_volume_axis_is_capped_at_close_packing():
+    ax = lookup_axis("particle_vol_pct")
+    assert ax is not None
+    assert ax.max_value == 64.0  # random close packing of spheres
+    assert ax.min_value == 40.0
+
+
+def test_axis_clamp_leaves_a_feasible_request_untouched():
+    ax = lookup_axis("particle_vol_pct")
+    assert ax is not None
+    assert ax.clamp(43.8, 58.7) == (43.8, 58.7, False)
+
+
+def test_axis_clamp_cuts_an_unpreparable_request_back():
+    ax = lookup_axis("particle_vol_pct")
+    assert ax is not None
+    lo, hi, clamped = ax.clamp(20.0, 80.0)
+    assert (lo, hi, clamped) == (40.0, 64.0, True)
+
+
+def test_axis_without_known_physics_returns_none():
+    # wt% has no universal ceiling: it depends on the particle/liquid densities.
+    assert lookup_axis("particle_wt_pct") is None
+    assert lookup_axis("doping_pct") is None

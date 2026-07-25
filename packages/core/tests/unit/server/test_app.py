@@ -28,7 +28,7 @@ from latos.ingestion.orchestrator import (
     IngestionResult,
     Outcome,
 )
-from latos.server.app import create_app
+from latos.server.app import _json_safe, _verdict_out_from_dict, create_app
 from latos.server.state import ServerState
 
 if TYPE_CHECKING:
@@ -603,3 +603,17 @@ class TestMeasurementAnalysis:
         response = client.get(f"/measurements/{mid}/analysis")
         assert response.status_code == 200
         assert isinstance(response.json(), list)
+
+
+# ─── Regression: JSON safety + verdict tolerance (bug assessment 2026-07) ─
+def test_json_safe_sanitises_nan_inside_nested_dict():
+    out = _json_safe({"peaks": {"fwhm": float("nan"), "n": 3}, "xs": [1.0, float("inf")]})
+    assert out == {"peaks": {"fwhm": None, "n": 3}, "xs": [1.0, None]}
+
+
+def test_verdict_out_tolerates_missing_keys():
+    # A malformed / old-format outcome file must not crash the prereg listing.
+    v = _verdict_out_from_dict({"predicted_mean": 44.3})
+    assert v.measured == 0.0
+    assert v.within_interval is False
+    assert v.predicted_mean == 44.3

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from latos.core.enums import ReviewStatus, Technique
@@ -96,15 +97,19 @@ def _confirmed_te_project(root: Path) -> tuple[Project, dict[str, float]]:
     return project, doping_by_id
 
 
-def _client(root: Path, *, confirmed: bool = True) -> TestClient:
+def _client(root: Path, *, confirmed: bool = True, companion: bool = False) -> TestClient:
     project, doping_by_id = _confirmed_te_project(root)
     if not confirmed:
         from dataclasses import replace
 
         project = replace(project, review_status=ReviewStatus.NEEDS_REVIEW, confirmed_at=None)
-    # Persist each sample's doping value.
+    # Persist each sample's doping value; optionally a linear companion axis
+    # (doping_x2 = 2*doping + 1) to exercise the secondary-axis mapping.
     for sid, doping in doping_by_id.items():
-        synthesis_store.set_sample_params(root, sid, {"doping_pct": doping})
+        params = {"doping_pct": doping}
+        if companion:
+            params["doping_x2"] = 2.0 * doping + 1.0
+        synthesis_store.set_sample_params(root, sid, params)
     app = create_app()
     state: ServerState = app.state.latos  # type: ignore[union-attr]
     state.root = root
@@ -131,9 +136,13 @@ class TestGate:
 
 
 class TestRun:
-    def test_recommends_near_peak(self, tmp_path: Path):
+    def test_explores_a_gap_on_four_points(self, tmp_path: Path):
+        # Four points is exploratory, so the endpoint recommends probing an
+        # unmeasured gap rather than declaring the measured 3% peak final.
         body = _run(_client(tmp_path))
-        assert 2.5 <= body["recommendation"]["x"] <= 4.0
+        assert body["recommendation_kind"] == "explore"
+        assert body["converged"] is False
+        assert 0.0 < body["recommendation"]["x"] < 5.0
 
     def test_best_is_3pct(self, tmp_path: Path):
         body = _run(_client(tmp_path))
@@ -161,6 +170,47 @@ class TestRun:
         assert "ci95_predictive" in rec
         lo, hi = rec["predictive_interval_95"]
         assert lo <= rec["predicted_mean"] <= hi
+
+    def test_no_secondary_axis_by_default(self, tmp_path: Path):
+        body = _run(_client(tmp_path))
+        assert body["secondary_variable"] == ""
+        assert body["secondary_slope"] is None
+        assert all(p.get("x2") is None for p in body["points"])
+
+    def test_secondary_axis_maps_primary_to_companion(self, tmp_path: Path):
+        # doping_x2 = 2*doping + 1, so the fitted map is slope 2, intercept 1.
+        body = (
+            _client(tmp_path, companion=True)
+            .post(
+                "/optimize/run",
+                json={
+                    "input_variable": "doping_pct",
+                    "target_property": "zt",
+                    "secondary_variable": "doping_x2",
+                },
+            )
+            .json()
+        )
+        assert body["secondary_variable"] == "doping_x2"
+        assert body["secondary_slope"] == pytest.approx(2.0, abs=1e-6)
+        assert body["secondary_intercept"] == pytest.approx(1.0, abs=1e-6)
+        for pt in body["points"]:
+            assert pt["x2"] == pytest.approx(2.0 * pt["x"] + 1.0, abs=1e-6)
+
+    def test_secondary_same_as_primary_is_ignored(self, tmp_path: Path):
+        body = (
+            _client(tmp_path, companion=True)
+            .post(
+                "/optimize/run",
+                json={
+                    "input_variable": "doping_pct",
+                    "target_property": "zt",
+                    "secondary_variable": "doping_pct",
+                },
+            )
+            .json()
+        )
+        assert body["secondary_variable"] == ""
 
 
 class TestFreeze:

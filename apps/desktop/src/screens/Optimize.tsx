@@ -10,6 +10,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { axisUnit } from "../lib/labels";
 import {
   freezeRecommendation,
   getOptimizeInputs,
@@ -76,6 +77,7 @@ export function Optimize({ onBack }: { onBack: () => void }) {
   const [params, setParams] = useState<SampleParams>({});
   const [inputInfos, setInputInfos] = useState<InputVariableInfo[]>([]);
   const [inputVar, setInputVar] = useState<string>("");
+  const [secondaryVar, setSecondaryVar] = useState<string>(""); // "" = none
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const [targets, setTargets] = useState<string[]>([]);
   const [target, setTarget] = useState<string>("");
@@ -139,9 +141,15 @@ export function Optimize({ onBack }: { onBack: () => void }) {
         setSamples(tree);
         setParams(p);
         setInputInfos(infos);
-        // Backward-compatible default; first available axis for a new project.
+        // Default to the controlled knob. A *_wt_pct loading is a quantity the
+        // researcher actually weighs out, whereas *_vol_pct is derived from
+        // assumed densities; prefer the weighed one so the recommendation is
+        // stated in the unit the lab can set (falls back to the first axis).
         const first =
-          infos.find((v) => v.name === "doping_pct")?.name ?? infos[0]?.name ?? "";
+          infos.find((v) => v.name === "doping_pct")?.name ??
+          infos.find((v) => v.name.endsWith("_wt_pct"))?.name ??
+          infos[0]?.name ??
+          "";
         setInputVar(first);
         setInputs(valuesFor(first, p, infos, tree));
         setTargets(props);
@@ -195,8 +203,9 @@ export function Optimize({ onBack }: { onBack: () => void }) {
       const tk = Number.parseFloat(atTempK);
       if (Number.isFinite(tk)) o.atTemperatureK = tk;
     }
+    if (secondaryVar && secondaryVar !== inputVar) o.secondaryVariable = secondaryVar;
     return o;
-  }, [objective, targetValue, atTempK, target]);
+  }, [objective, targetValue, atTempK, target, secondaryVar, inputVar]);
 
   const targetValueMissing = objective === "target" && opts.targetValue === undefined;
 
@@ -361,7 +370,11 @@ export function Optimize({ onBack }: { onBack: () => void }) {
               >
                 <div className="flex items-center gap-2">
                   <span className="font-medium">
-                    {result.converged ? "✓ Optimum reached" : "↑ Improvement still possible"}
+                    {result.converged
+                      ? "✓ Optimum reached"
+                      : result.recommendation_kind === "explore"
+                        ? "🔍 Explore the biggest gap next"
+                        : "↑ Improvement still possible"}
                   </span>
                   {result.reliability_level !== "unknown" && (
                     <span
@@ -384,6 +397,25 @@ export function Optimize({ onBack }: { onBack: () => void }) {
               <div className="rounded-lg border border-edge bg-surface p-3">
                 <OptimizeChart result={result} />
               </div>
+              {result.secondary_variable &&
+                result.secondary_slope != null &&
+                result.secondary_intercept != null && (
+                  <div className="rounded-lg border border-edge bg-surface px-4 py-2 text-sm text-secondary">
+                    Recommended{" "}
+                    <span className="font-medium text-primary">
+                      {result.recommendation.x.toFixed(2)}
+                    </span>{" "}
+                    {axisUnit(result.input_variable)}
+                    {"  ≈  "}
+                    <span className="font-medium text-primary">
+                      {(
+                        result.secondary_slope * result.recommendation.x +
+                        result.secondary_intercept
+                      ).toFixed(2)}
+                    </span>{" "}
+                    {axisUnit(result.secondary_variable)}
+                  </div>
+                )}
 
               <div className="flex flex-wrap items-center gap-3">
                 <button
@@ -461,6 +493,24 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                   <option key={v} value={v} />
                 ))}
               </datalist>
+            </label>
+            <label className="text-sm">
+              <span className="mb-1 block text-secondary">Secondary axis</span>
+              <select
+                value={secondaryVar}
+                onChange={(e) => setSecondaryVar(e.target.value)}
+                className="rounded-md border border-edge bg-surface px-2 py-1.5 outline-none focus:border-accent"
+                title="Show a second variable alongside the primary axis (e.g. vol% next to wt%)"
+              >
+                <option value="">— none —</option>
+                {knownVars
+                  .filter((v) => v !== inputVar.trim())
+                  .map((v) => (
+                    <option key={v} value={v}>
+                      {humanize(v)}
+                    </option>
+                  ))}
+              </select>
             </label>
             <label className="text-sm">
               <span className="mb-1 block text-secondary">Objective</span>

@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from latos.optimization import OptimizationError, length_scale_robustness, optimize
+from latos.optimization.engine import _expected_improvement
 
 
 def _real_te_data() -> tuple[np.ndarray, np.ndarray]:
@@ -59,10 +60,14 @@ class TestRealTeCase:
         assert result.best_x == 3.0
         assert result.best_y == pytest.approx(0.967, abs=1e-3)
 
-    def test_recommends_near_the_peak(self, result):
-        # The recommendation should refine near the 3% optimum, not wander
-        # off to an endpoint.
-        assert 2.5 <= result.recommendation.x <= 4.0
+    def test_explores_a_gap_on_four_points(self, result):
+        # Four points is exploratory: rather than lock onto the measured 3%
+        # peak and stop, the engine recommends probing an unmeasured gap (here
+        # ~4%), and never wanders to a bound. See TestConvergence for why a
+        # thin-data "optimum reached" is not trusted.
+        assert result.recommendation_kind == "explore"
+        assert result.converged is False
+        assert 0.0 < result.recommendation.x < 5.0
 
     def test_recommendation_has_uncertainty(self, result):
         assert result.recommendation.ci95 > 0
@@ -86,22 +91,62 @@ class TestRealTeCase:
 
 
 class TestConvergence:
-    def test_converges_when_improvement_below_noise(self):
-        # Real TE case at default 8% noise: best expected improvement
-        # (~0.02) is below the measurement-noise floor (~0.05) -> the tool
-        # reports it has reached the optimum within measurement precision.
-        x, y = _real_te_data()
-        result = optimize(x, y, bounds=(0.0, 5.0), input_name="doping_pct", target_name="peak_zt")
+    def test_calibrated_data_converges_when_improvement_below_noise(self):
+        # A densely-sampled smooth hump (calibrated tier): once the best
+        # expected improvement drops below the measurement-noise floor AND the
+        # model is trustworthy, the tool reports the optimum is reached.
+        x = np.linspace(1.0, 5.0, 30)
+        y = 1.0 - 0.1 * (x - 3.0) ** 2
+        result = optimize(x, y, bounds=(1.0, 5.0), input_name="d", target_name="zt")
+        assert result.reliability is not None
+        assert result.reliability.level == "calibrated"
         assert result.max_ei < result.noise_threshold
         assert result.converged is True
+        assert result.recommendation_kind == "exploit"
+
+    def test_exploratory_data_explores_instead_of_declaring_convergence(self):
+        # The trap: expected improvement has flat-lined (max_ei < noise), but on
+        # only four points the model is exploratory and over-confident in the
+        # gaps it never sampled. Declaring "optimum reached" there is unsafe, so
+        # the engine keeps the loop open (converged=False) and switches to an
+        # exploration recommendation instead of stopping.
+        x, y = _real_te_data()
+        result = optimize(x, y, bounds=(0.0, 5.0), input_name="doping_pct", target_name="peak_zt")
+        assert result.max_ei < result.noise_threshold  # EI itself has stalled...
+        assert result.reliability is not None
+        assert result.reliability.level == "exploratory"
+        assert result.converged is False  # ...but we do not trust it to stop
+        assert result.recommendation_kind == "explore"
+
+    def test_explore_probe_lands_in_the_largest_unmeasured_gap(self):
+        # The point of the guard: drop the interior optimum and the exploration
+        # recommendation must fall in the resulting gap -- exposing a hidden
+        # optimum the sparse fit smoothed over. (Adachi's shear-thickening fluid
+        # with the 50 wt% minimum removed: the tool sends you back to ~50 wt%.)
+        x = np.array([40.17, 44.95, 54.96])
+        y = np.array([66.0, 57.0, 54.667])
+        result = optimize(
+            x,
+            y,
+            bounds=(40.0, 55.0),
+            input_name="particle_wt_pct",
+            target_name="peak_force_n",
+            direction="minimize",
+        )
+        assert result.recommendation_kind == "explore"
+        assert result.converged is False
+        # The widest gap is 45 -> 55 wt%; the probe should land inside it, ~50.
+        assert 47.0 <= result.recommendation.x <= 53.0
 
     def test_not_converged_when_improvement_beats_noise(self):
         # Low measurement noise + a clear rising trend with headroom: a new
-        # experiment can reliably improve, so keep going.
+        # experiment can reliably improve, so keep going. EI still points the
+        # way (exploit), not an exploration fallback.
         x = np.array([0.0, 1.0, 2.0])
         y = np.array([0.2, 0.5, 0.9])
         result = optimize(x, y, bounds=(0, 4), input_name="x", target_name="y", rel_noise=0.02)
         assert result.converged is False
+        assert result.recommendation_kind == "exploit"
 
 
 class TestPredictiveCiAndConfig:
@@ -252,16 +297,18 @@ class TestXNormalization:
 
         from latos.optimization.engine import optimize as _optimize
 
+        # Asymmetric spacing so the most-informative spot is unique at both
+        # scales (equal gaps would tie and the pick could flip between them).
         y = _np.array([0.4, 0.98, 0.5])
         small = _optimize(
-            _np.array([1.0, 3.0, 5.0]),
+            _np.array([1.0, 2.0, 5.0]),
             y,
             bounds=(1.0, 5.0),
             input_name="d",
             target_name="zt",
         )
         big = _optimize(
-            _np.array([1e19, 3e19, 5e19]),
+            _np.array([1e19, 2e19, 5e19]),
             y,
             bounds=(1e19, 5e19),
             input_name="n",
@@ -433,9 +480,14 @@ class TestPhysicsLayer:
 
     def test_log_recommendation_is_monotonic(self):
 
+        import numpy as _np
+
         from latos.optimization.engine import optimize
 
-        x = self._x()
+        # Densely sampled so the fit is calibrated and the recommendation
+        # refines toward the peak (exploit), isolating the log transform from
+        # the thin-data exploration fallback.
+        x = _np.linspace(0.0, 5.0, 30)
         y = 1.0 - 0.1 * (x - 3.0) ** 2 + 3.0  # positive hump, peak at x=3
         r = optimize(
             x,
@@ -446,10 +498,16 @@ class TestPhysicsLayer:
             y_transform="log",
             y_min=0.0,
         )
+        assert r.recommendation_kind == "exploit"
         assert 2.0 <= r.recommendation.x <= 4.0
 
     def test_identity_default_unchanged(self):
-        """Regression: default (identity, no bounds) matches the pre-physics run."""
+        """Regression: the physics layer leaves the default identity fit alone.
+
+        The transform stays identity and the posterior band is unchanged; only
+        the separate convergence policy makes four points explore rather than
+        stop.
+        """
         import numpy as _np
 
         from latos.optimization.engine import optimize
@@ -458,4 +516,28 @@ class TestPhysicsLayer:
         y = _np.array([0.607, 0.373, 0.985, 0.496])
         r = optimize(x, y, bounds=(0, 5), input_name="d", target_name="zt")
         assert r.config.y_transform == "identity"
-        assert 2.5 <= r.recommendation.x <= 4.0  # peak near 3% doping
+        assert r.best_x == 3.0  # the identity fit still finds the 3% peak
+        assert 0.0 < r.recommendation.x < 5.0  # exploratory probe, interior
+
+
+# ─── Regression: NaN/Inf hardening (bug assessment 2026-07) ─────────────
+def test_nan_input_raises_instead_of_silent_nan_recommendation():
+    x = np.array([1.0, 2.0, 3.0, 4.0])
+    y = np.array([1.0, np.nan, 3.0, 4.0])
+    with pytest.raises(OptimizationError, match="finite"):
+        optimize(x, y, bounds=(1.0, 4.0), input_name="w", target_name="f", direction="minimize")
+
+
+def test_inf_input_raises():
+    x = np.array([1.0, np.inf, 3.0, 4.0])
+    y = np.array([1.0, 2.0, 3.0, 4.0])
+    with pytest.raises(OptimizationError, match="finite"):
+        optimize(x, y, bounds=(1.0, 4.0), input_name="w", target_name="f", direction="minimize")
+
+
+def test_nan_sigma_does_not_poison_expected_improvement():
+    # A non-finite posterior std must be floored, not propagated as NaN.
+    mu = np.array([1.0, 2.0])
+    sigma = np.array([np.nan, 0.5])
+    ei = _expected_improvement(mu, sigma, f_best=0.0, xi=0.0)
+    assert np.isfinite(ei).all()

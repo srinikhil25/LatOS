@@ -9,7 +9,7 @@
  */
 
 import type { OptimizeResult } from "../lib/api";
-import { axisLabel } from "../lib/labels";
+import { axisLabel, axisUnit } from "../lib/labels";
 
 const W = 720;
 const H = 470;
@@ -34,6 +34,10 @@ export function OptimizeChart({ result }: { result: OptimizeResult }) {
   const gx = result.grid_x;
   const xMin = gx[0];
   const xMax = gx[gx.length - 1];
+
+  // Optional companion value (e.g. vol% for a wt% run), shown as a small second
+  // line under each point — a single clean x-axis, no competing top axis.
+  const secUnit = result.secondary_variable ? axisUnit(result.secondary_variable) : "";
 
   // Explicit physical band from the engine — asymmetric for a log-space fit and
   // clamped to the property's domain, so it never dips below zero for a
@@ -90,6 +94,7 @@ export function OptimizeChart({ result }: { result: OptimizeResult }) {
         </text>
       ))}
 
+
       {/* 95% band + mean */}
       <path d={bandPath} fill={ACCENT} fillOpacity={0.16} />
       <path d={meanPath} fill="none" stroke={ACCENT} strokeWidth={2} />
@@ -100,13 +105,18 @@ export function OptimizeChart({ result }: { result: OptimizeResult }) {
         ★
       </text>
 
-      {/* observed points */}
+      {/* observed points (sample name above; companion value below, if any) */}
       {result.points.map((p) => (
         <g key={p.sample_id}>
           <circle cx={X(p.x)} cy={Y(p.y)} r={5} fill={POINT} />
           <text x={X(p.x)} y={Y(p.y) - 9} textAnchor="middle" fontSize="10" fill={POINT}>
             {p.sample_name}
           </text>
+          {secUnit && p.x2 != null && (
+            <text x={X(p.x)} y={Y(p.y) + 16} textAnchor="middle" fontSize="9" fill={GRID}>
+              {p.x2.toFixed(1)} {secUnit}
+            </text>
+          )}
         </g>
       ))}
 

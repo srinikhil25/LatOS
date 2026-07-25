@@ -415,6 +415,7 @@ export interface DatasetPoint {
   sample_name: string;
   x: number;
   y: number;
+  x2?: number | null; // companion (secondary-axis) value, when requested
 }
 
 export interface Recommendation {
@@ -457,7 +458,16 @@ export interface OptimizeResult {
   max_ei: number;
   noise_threshold: number;
   converged: boolean;
+  /** "exploit" (highest expected improvement) or "explore" (least-sampled
+   * region — chosen when the data is too thin to trust an "optimum" verdict). */
+  recommendation_kind: "exploit" | "explore";
   verdict: string;
+  /** Optional companion axis (e.g. vol% shown next to a wt% run). When
+   * `secondary_variable` is set, `secondary_slope * x + secondary_intercept`
+   * maps the primary axis to the companion units. */
+  secondary_variable: string;
+  secondary_slope: number | null;
+  secondary_intercept: number | null;
 }
 
 export function getParameters(): Promise<SampleParams> {
@@ -518,6 +528,7 @@ export interface OptimizeOptions {
   objective?: Objective;
   targetValue?: number; // required when objective === "target"
   atTemperatureK?: number; // derived-zT only: zT at this T instead of the peak
+  secondaryVariable?: string; // companion axis to display alongside the primary
 }
 
 function optimizeBody(
@@ -531,6 +542,7 @@ function optimizeBody(
     objective: opts.objective ?? "maximize",
     target_value: opts.targetValue ?? null,
     at_temperature_k: opts.atTemperatureK ?? null,
+    secondary_variable: opts.secondaryVariable ?? null,
   };
 }
 

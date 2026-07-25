@@ -50,6 +50,9 @@ const AXIS_LABELS: Record<string, string> = {
   sheet_resistance_ohm_sq: "Sheet resistance (Ω/□)",
   // ─ Optical / band structure ─
   band_gap_ev: "Band gap (eV)",
+  // ─ Composition (shock / STF and general BO axes) ─
+  particle_wt_pct: "Particle loading (wt%)",
+  particle_vol_pct: "Particle loading (vol%)",
   // ─ Cross-sample features (Correlate page) ─
   crystallite_size_nm: "Crystallite size (nm)",
   peak_zt: "Peak zT",
@@ -59,7 +62,7 @@ const AXIS_LABELS: Record<string, string> = {
   doping_pct: "Doping (%)",
   // ─ Mechanical shock (drop test) ─
   time_s: "Time (s)",
-  voltage_v: "Sensor voltage (V)",
+  voltage_v: "Force-sensor voltage (V)",
   // ─ Plot fallbacks ─
   index: "Index",
 };
@@ -73,6 +76,15 @@ export function axisLabel(name: string): string {
   const known = AXIS_LABELS[name];
   if (known) return known;
   return name.includes("_") ? name.replace(/_/g, " ").trim() : name;
+}
+
+/** Compact unit for an axis — the text in parentheses (e.g. "wt%" from
+ * "Particle loading (wt%)"), or the full label when it carries no unit. Handy
+ * for tight spots like a dual-unit recommendation or per-point annotations. */
+export function axisUnit(name: string): string {
+  const label = axisLabel(name);
+  const m = label.match(/\(([^)]+)\)/);
+  return m ? m[1] : label;
 }
 
 /** Scientific labels for analyzer *output* keys (shown in the analysis panel).

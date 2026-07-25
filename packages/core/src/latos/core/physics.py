@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-__all__ = ["PhysicalProperty", "lookup"]
+__all__ = ["PhysicalAxis", "PhysicalProperty", "lookup", "lookup_axis"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +80,64 @@ _PROPERTIES: dict[str, PhysicalProperty] = {
     "sheet_resistance_ohm_sq": PhysicalProperty(
         "sheet resistance", "Ω/□", "positive", True, 0.0, None
     ),
+    # Mechanical shock (drop-impact). A transmitted force cannot be negative:
+    # without this the surrogate happily extrapolates below zero.
+    "peak_force_n": PhysicalProperty("peak transmitted force", "N", "positive", False, 0.0, None),
+    "peak_voltage_v": PhysicalProperty("peak sensor voltage", "V", "positive", False, 0.0, None),
 }
+
+
+# ─── Physics of the INPUT axis ──────────────────────────────────────────
+# The target is not the only quantity with a physical domain: a composition
+# axis has one too. A particle volume fraction cannot exceed the packing limit
+# — beyond it the particles cannot be dispersed at all and there is no fluid to
+# test — so the optimizer must never propose an experiment there, however
+# attractive the acquisition function finds it.
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalAxis:
+    """The physically preparable range of one input (synthesis) variable."""
+
+    name: str
+    unit: str
+    min_value: float | None = None
+    max_value: float | None = None
+    reason: str = ""
+
+    def clamp(self, lo: float, hi: float) -> tuple[float, float, bool]:
+        """Clip a requested search range to what can physically be made.
+
+        Returns ``(lo, hi, clamped)``; `clamped` is True when the request
+        reached outside the physical domain and was cut back.
+        """
+        new_lo = lo if self.min_value is None else max(lo, self.min_value)
+        new_hi = hi if self.max_value is None else min(hi, self.max_value)
+        return new_lo, new_hi, (new_lo != lo or new_hi != hi)
+
+
+# Random close packing of monodisperse spheres, phi ~ 0.64, is the hard ceiling
+# on a particle volume fraction; ~0.74 only for an ordered (crystalline) lattice,
+# which a poured suspension does not form. Below ~0.40 the suspension no longer
+# shear-thickens appreciably, so it is the floor of the useful window.
+_RANDOM_CLOSE_PACKING_VOL_PCT = 64.0
+_SHEAR_THICKENING_FLOOR_VOL_PCT = 40.0
+
+_AXES: dict[str, PhysicalAxis] = {
+    "particle_vol_pct": PhysicalAxis(
+        "particle volume fraction",
+        "vol%",
+        _SHEAR_THICKENING_FLOOR_VOL_PCT,
+        _RANDOM_CLOSE_PACKING_VOL_PCT,
+        "random close packing (phi~0.64) is the maximum dispersible fraction",
+    ),
+}
+
+
+def lookup_axis(name: str) -> PhysicalAxis | None:
+    """Physics for an input axis, or None when the axis has no known domain."""
+    return _AXES.get(name.strip())
+
 
 # Property labels can arrive decorated: "zT (derived) @ 600 K", or a target-mode
 # distance "|zT (derived) - 1.0|". The base lookup strips the temperature suffix
