@@ -139,3 +139,4 @@ test_output/
 .cache/
 .claude/
 proposal/
+BUG_ASSESSMENT.md
