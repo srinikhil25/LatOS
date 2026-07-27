@@ -131,9 +131,11 @@ class TestGate:
 
 
 class TestRun:
-    def test_recommends_near_peak(self, tmp_path: Path):
+    def test_recommends_gap_when_sparse(self, tmp_path: Path):
+        # 4 exploratory points with an exhausted signal -> explore the largest
+        # unmeasured gap (interior, not an endpoint), not exploit near the best.
         body = _run(_client(tmp_path))
-        assert 2.5 <= body["recommendation"]["x"] <= 4.0
+        assert 3.0 <= body["recommendation"]["x"] <= 4.5
 
     def test_best_is_3pct(self, tmp_path: Path):
         body = _run(_client(tmp_path))

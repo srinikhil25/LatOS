@@ -566,24 +566,14 @@ def optimize(
     grid_upper = _clamp(_inverse(mean_work + _CI95 * std, transform), y_min, y_max)
     grid_ci95 = (grid_upper - grid_lower) / 2.0
 
-    rec_i = int(np.argmax(ei))
-    recommendation = _recommend(
-        grid,
-        rec_i,
-        mean_int,
-        std,
-        sign=sign,
-        noise_std=noise_std,
-        transform=transform,
-        y_min=y_min,
-        y_max=y_max,
-    )
-    max_ei = float(ei[rec_i])
-    # Stopping rule: when the best expected improvement is smaller than the
-    # measurement noise floor (in fit space), no experiment can *reliably* do
-    # better. A noise-aware heuristic for "stop and publish", not a guarantee.
+    ei_i = int(np.argmax(ei))
+    max_ei = float(ei[ei_i])
+    # Stopping rule (in fit space): the improvement signal is *exhausted* when
+    # the best expected improvement is smaller than the measurement-noise floor
+    # — no experiment can then reliably do better. This is necessary for
+    # convergence but not sufficient (see the reliability gate below).
     noise_threshold = noise_std
-    converged = max_ei < noise_threshold
+    signal_exhausted = max_ei < noise_threshold
 
     config = BoConfig(
         objective=target_name,
@@ -617,6 +607,32 @@ def optimize(
             length_scale=config.length_scale,
             seed=seed,
         )
+
+    # Reliability-aware convergence and exploration. When the improvement
+    # signal is exhausted but the data is still exploratory, a flat EI does not
+    # mean "optimum found" — the surrogate is simply uninformative in the gaps
+    # it never sampled. Two consequences: (1) do not report convergence (a
+    # false stop), and (2) recommend the point of greatest posterior
+    # uncertainty (the largest unmeasured gap), which is the most informative
+    # next experiment, rather than the max-EI point sitting beside the current
+    # best. Otherwise recommend the max-EI (exploit) point. When reliability
+    # was not assessed (the robustness sweep, which reads neither field), fall
+    # back to the plain max-EI pick.
+    is_exploratory = reliability is not None and reliability.level == "exploratory"
+    converged = signal_exhausted and not is_exploratory
+    explore = signal_exhausted and is_exploratory
+    rec_i = int(np.argmax(std)) if explore else ei_i
+    recommendation = _recommend(
+        grid,
+        rec_i,
+        mean_int,
+        std,
+        sign=sign,
+        noise_std=noise_std,
+        transform=transform,
+        y_min=y_min,
+        y_max=y_max,
+    )
 
     return OptimizationResult(
         input_name=input_name,

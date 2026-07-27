@@ -59,10 +59,13 @@ class TestRealTeCase:
         assert result.best_x == 3.0
         assert result.best_y == pytest.approx(0.967, abs=1e-3)
 
-    def test_recommends_near_the_peak(self, result):
-        # The recommendation should refine near the 3% optimum, not wander
-        # off to an endpoint.
-        assert 2.5 <= result.recommendation.x <= 4.0
+    def test_explores_largest_gap_when_sparse(self, result):
+        # With only 4 points the model is exploratory and the improvement
+        # signal is exhausted, so the tool explores the largest unmeasured gap
+        # (the 3-5 interval) rather than exploiting near the current best, and
+        # it does not report convergence.
+        assert result.converged is False
+        assert 3.0 <= result.recommendation.x <= 4.5
 
     def test_recommendation_has_uncertainty(self, result):
         assert result.recommendation.ci95 > 0
@@ -86,12 +89,27 @@ class TestRealTeCase:
 
 
 class TestConvergence:
-    def test_converges_when_improvement_below_noise(self):
-        # Real TE case at default 8% noise: best expected improvement
-        # (~0.02) is below the measurement-noise floor (~0.05) -> the tool
-        # reports it has reached the optimum within measurement precision.
+    def test_exhausted_signal_but_exploratory_does_not_converge(self):
+        # Real TE case at default 8% noise: best expected improvement (~0.02)
+        # is below the measurement-noise floor (~0.05), so the improvement
+        # signal is exhausted -- but with only 4 points the model is
+        # exploratory, so the tool must NOT declare convergence. Reporting an
+        # optimum on so few points would be a false stop (reliability-aware
+        # convergence).
         x, y = _real_te_data()
         result = optimize(x, y, bounds=(0.0, 5.0), input_name="doping_pct", target_name="peak_zt")
+        assert result.max_ei < result.noise_threshold  # signal exhausted
+        assert result.reliability.level == "exploratory"
+        assert result.converged is False
+
+    def test_converges_when_signal_exhausted_and_data_sufficient(self):
+        # A densely, evenly sampled gentle peak: enough points to leave the
+        # "exploratory" tier AND a flat, well-covered surface so the best
+        # expected improvement is below the noise floor -> genuine convergence.
+        x = np.linspace(0.0, 5.0, 15)
+        y = 1.0 - 0.01 * (x - 2.5) ** 2
+        result = optimize(x, y, bounds=(0.0, 5.0), input_name="doping_pct", target_name="peak_zt")
+        assert result.reliability.level != "exploratory"
         assert result.max_ei < result.noise_threshold
         assert result.converged is True
 
@@ -252,16 +270,19 @@ class TestXNormalization:
 
         from latos.optimization.engine import optimize as _optimize
 
+        # Asymmetric spacing so the max-uncertainty (explore) pick is unique;
+        # perfectly symmetric x would tie the two gaps and make argmax(std)
+        # degenerate at float scale.
         y = _np.array([0.4, 0.98, 0.5])
         small = _optimize(
-            _np.array([1.0, 3.0, 5.0]),
+            _np.array([1.0, 2.0, 5.0]),
             y,
             bounds=(1.0, 5.0),
             input_name="d",
             target_name="zt",
         )
         big = _optimize(
-            _np.array([1e19, 3e19, 5e19]),
+            _np.array([1e19, 2e19, 5e19]),
             y,
             bounds=(1e19, 5e19),
             input_name="n",
@@ -446,7 +467,8 @@ class TestPhysicsLayer:
             y_transform="log",
             y_min=0.0,
         )
-        assert 2.0 <= r.recommendation.x <= 4.0
+        # Sparse + exhausted -> explores the largest gap (the 3-5 interval).
+        assert 3.0 <= r.recommendation.x <= 4.5
 
     def test_identity_default_unchanged(self):
         """Regression: default (identity, no bounds) matches the pre-physics run."""
@@ -458,4 +480,5 @@ class TestPhysicsLayer:
         y = _np.array([0.607, 0.373, 0.985, 0.496])
         r = optimize(x, y, bounds=(0, 5), input_name="d", target_name="zt")
         assert r.config.y_transform == "identity"
-        assert 2.5 <= r.recommendation.x <= 4.0  # peak near 3% doping
+        # Sparse + exhausted -> explores the largest gap (the 3-5 interval).
+        assert 3.0 <= r.recommendation.x <= 4.5

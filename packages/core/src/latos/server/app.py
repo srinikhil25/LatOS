@@ -1254,6 +1254,19 @@ def _verdict(res: OptimizationResult) -> str:
             f"{res.input_name} = {res.best_x:g}. "
             f"A confirmatory run at {rec.x:.3g} is optional but unlikely to improve."
         )
+    # Not converged. If the improvement signal is already within measurement
+    # noise but the model is still exploratory, the honest verdict is "too few
+    # points to confirm an optimum" — not a promise of improvement.
+    exploratory = res.reliability is not None and res.reliability.level == "exploratory"
+    if res.max_ei < res.noise_threshold and exploratory:
+        return (
+            f"Not enough data to confirm an optimum: the improvement signal is "
+            f"within measurement noise, but with only "
+            f"{res.reliability.n_observations} points the model is still exploratory. "
+            f"The most informative next experiment is the least-sampled composition: "
+            f"{res.input_name} = {rec.x:.3g} (predicted {res.target_name} "
+            f"{rec.predicted_mean:.2f} +/- {rec.ci95_predictive:.2f}, 95% predictive)."
+        )
     return (
         f"Recommended next experiment: {res.input_name} = {rec.x:.3g} "
         f"(predicted {res.target_name} {rec.predicted_mean:.2f} "

@@ -361,7 +361,12 @@ export function Optimize({ onBack }: { onBack: () => void }) {
               >
                 <div className="flex items-center gap-2">
                   <span className="font-medium">
-                    {result.converged ? "✓ Optimum reached" : "↑ Improvement still possible"}
+                    {result.converged
+                      ? "✓ Optimum reached"
+                      : result.max_ei < result.noise_threshold &&
+                          result.reliability_level === "exploratory"
+                        ? "🔍 Explore the biggest gap next"
+                        : "↑ Improvement still possible"}
                   </span>
                   {result.reliability_level !== "unknown" && (
                     <span
