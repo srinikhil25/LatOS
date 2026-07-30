@@ -226,10 +226,25 @@ class PreregEntry:
     prior_best: float
     reliability_level: str
     outcome: dict[str, Any] | None  # the recorded verdict, or None
+    # The range this freeze committed to searching. None for records written
+    # before it was read out; campaign drift scales its moves against it.
+    search_bounds: tuple[float, float] | None = None
 
 
 def _prereg_dir(root: Path) -> Path:
     return root / ".latos" / "prereg"
+
+
+def _search_bounds(objective: dict[str, Any]) -> tuple[float, float] | None:
+    """The frozen search range, or None if the record predates the field."""
+    raw = objective.get("search_bounds")
+    if not isinstance(raw, list | tuple):
+        return None
+    try:
+        low, high = (float(v) for v in raw)
+    except (TypeError, ValueError):
+        return None
+    return (low, high)
 
 
 def list_preregistrations(root: Path) -> list[PreregEntry]:
@@ -270,6 +285,7 @@ def list_preregistrations(root: Path) -> list[PreregEntry]:
                     prior_best=float(record.get("prior_best", float("nan"))),
                     reliability_level=str(record.get("reliability", {}).get("level", "unknown")),
                     outcome=outcome,
+                    search_bounds=_search_bounds(obj),
                 )
             )
         except (KeyError, ValueError, OSError):

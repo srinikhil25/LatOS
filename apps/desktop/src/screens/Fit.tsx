@@ -18,6 +18,7 @@ import {
   type SampleSummary,
 } from "../lib/api";
 import { axisLabel } from "../lib/labels";
+import { ChartFrame } from "../components/ChartFrame";
 import { AnalysisLoader } from "../components/AnalysisLoader";
 
 const SHAPES: { value: PeakShape; label: string }[] = [
@@ -446,6 +447,7 @@ function SpectrumPlot({
 
   return (
     <div className="overflow-x-auto rounded-lg border border-edge bg-surface p-3">
+      <ChartFrame basename="latos-peak-fit" label="peak-fit figure">
       <svg viewBox={`0 0 ${W} ${H + RH + 24}`} className="w-full" role="img" aria-label="fit overlay">
         {/* frames */}
         <rect x={pad} y={pad} width={W - 2 * pad} height={H - 2 * pad} fill="none" stroke="var(--latos-edge)" />
@@ -479,6 +481,7 @@ function SpectrumPlot({
           {xLabel}
         </text>
       </svg>
+      </ChartFrame>
     </div>
   );
 }

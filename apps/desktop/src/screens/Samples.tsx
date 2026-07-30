@@ -16,6 +16,7 @@ import {
   type SampleSummary,
 } from "../lib/api";
 import { LinePlot } from "../components/LinePlot";
+import { ChartFrame } from "../components/ChartFrame";
 import { axisLabel } from "../lib/labels";
 import { ImageViewer } from "../components/ImageViewer";
 import { AnalysisPanel } from "../components/AnalysisPanel";
@@ -87,12 +88,14 @@ function ArrayDetail({ measurement }: { measurement: MeasurementSummary }) {
   }
   return (
     <div className="rounded-lg border border-edge bg-surface p-4">
-      <LinePlot
-        x={plot.x}
-        y={plot.y}
-        xLabel={axisLabel(plot.xName)}
-        yLabel={axisLabel(plot.yName)}
-      />
+      <ChartFrame basename="latos-trace" label="measurement trace">
+        <LinePlot
+          x={plot.x}
+          y={plot.y}
+          xLabel={axisLabel(plot.xName)}
+          yLabel={axisLabel(plot.yName)}
+        />
+      </ChartFrame>
     </div>
   );
 }

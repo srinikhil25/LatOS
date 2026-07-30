@@ -65,13 +65,22 @@ from latos.optimization import (
     freeze,
     length_scale_robustness,
     optimize,
+    recommendation_drift,
 )
 from latos.reporting.correlation import correlate
-from latos.server import edits, features, optimization_data, synthesis_store, transport_data
+from latos.server import (
+    edits,
+    features,
+    optimization_data,
+    synthesis_store,
+    transport_data,
+    trust_store,
+)
 from latos.server.edits import EditError
 from latos.server.imaging import render_to_png
 from latos.server.schemas import (
     AnalyzerResultOut,
+    CampaignDriftOut,
     CorrelationOut,
     CorrelationsOut,
     DatasetPoint,
@@ -79,6 +88,8 @@ from latos.server.schemas import (
     DeleteProjectResult,
     DetectPeaksRequest,
     DetectPeaksResult,
+    DistrustRequest,
+    DriftStepOut,
     FeatureCellOut,
     FeatureRowOut,
     FeatureTableOut,
@@ -261,7 +272,11 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
         return _project_summary(result)
 
     _register_review_routes(app, state)
+    # Registered before the /samples/{sample_id}/... routes so the literal
+    # /samples/distrusted path is matched ahead of the parameterized ones.
+    _register_trust_routes(app, state)
     _register_optimization_data_routes(app, state)
+    _register_prereg_routes(app, state)
     _register_fit_routes(app)
     _register_report_routes(app, state)
 
@@ -787,6 +802,38 @@ def _register_review_routes(app: FastAPI, state: ServerState) -> None:
         return _apply(state, lambda p: edits.remove_measurements(p, body.measurement_ids))
 
 
+def _register_trust_routes(app: FastAPI, state: ServerState) -> None:
+    """The researcher's own data-quality calls (HL1).
+
+    Separate from the physics checks on purpose: those are automatic and see
+    only the exported numbers. This is the half that knows the powder clumped
+    or the sonicator was skipped, which no score computed from the data can.
+    """
+
+    @app.get("/samples/distrusted")
+    def get_distrusted() -> list[str]:
+        """Sample ids the researcher has marked untrusted, for this project."""
+        if state.root is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        return sorted(trust_store.load_distrusted(state.root))
+
+    @app.post("/samples/{sample_id}/distrust")
+    def set_distrust(sample_id: str, body: DistrustRequest) -> list[str]:
+        """Record the researcher's own quality call on one sample.
+
+        A distrusted sample is fitted with larger assumed noise, exactly like
+        one a physics check rejected. It is never removed from the dataset:
+        the model still sees it, it just stops chasing it. Silently dropping
+        data would leave no trace of the judgement.
+        """
+        if state.result is None or state.root is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        known = {s.id for s in state.result.project.samples}
+        if sample_id not in known:
+            raise HTTPException(status_code=404, detail="Unknown sample")
+        return sorted(trust_store.set_distrusted(state.root, sample_id, body.distrusted))
+
+
 def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None:
     """Synthesis-parameter storage + the (x, y) dataset assembly (BO2)."""
 
@@ -916,7 +963,17 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             prob_within_epsilon=res.prob_within_epsilon,
             epsilon_delta_met=res.epsilon_delta_met,
             n_unreliable=res.n_unreliable,
+            n_distrusted=asm.n_distrusted,
         )
+
+
+def _register_prereg_routes(app: FastAPI, state: ServerState) -> None:
+    """The closed loop: freeze a prediction, list the record, score the outcome.
+
+    Split from the run/dataset routes because these all read and write the
+    pre-registration files on disk rather than the live model — including
+    `/optimize/drift`, which judges convergence purely from that history.
+    """
 
     @app.post("/optimize/freeze")
     def optimize_freeze(body: OptimizeRunRequest) -> FreezeResult:
@@ -940,6 +997,17 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
         if state.root is None:
             raise HTTPException(status_code=404, detail="No project is open")
         return [_prereg_summary(e) for e in optimization.list_preregistrations(state.root)]
+
+    @app.get("/optimize/drift")
+    def optimize_drift() -> list[CampaignDriftOut]:
+        """How far the recommendation has moved between successive freezes.
+
+        A convergence check taken from outside the model. Everything in
+        `/optimize/run` that says "done" is the model judging itself, so it
+        all fails together when the model is wrong. This reads only the
+        frozen records on disk, which no later run can retune.
+        """
+        return _campaign_drift(state)
 
     @app.post("/optimize/validate")
     def validate_prereg(body: ValidateOutcomeRequest) -> OutcomeVerdictOut:
@@ -986,7 +1054,7 @@ def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> Free
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     stamp = res.config.created_at.strftime("%Y%m%dT%H%M%SZ")
-    out_path = state.root / ".latos" / "prereg" / f"prereg_{stamp}.json"
+    out_path = _unused_prereg_path(state.root / ".latos" / "prereg", stamp)
     freeze(res, out_path, prior_best=res.best_y, robustness=robustness)
     return FreezeResult(
         path=str(out_path),
@@ -997,6 +1065,22 @@ def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> Free
         reliability_level=res.reliability.level if res.reliability else "unknown",
         reliability_note=res.reliability.note if res.reliability else "",
     )
+
+
+def _unused_prereg_path(directory: Path, stamp: str) -> Path:
+    """`prereg_<stamp>.json`, suffixed if that second already has a record.
+
+    The stamp resolves to one second, so two freezes in the same second would
+    land on the same filename. A pre-registration is meant to be an immutable
+    commitment, and campaign drift reads the sequence of them, so overwriting
+    one would destroy exactly the history the record exists to preserve.
+    """
+    candidate = directory / f"prereg_{stamp}.json"
+    suffix = 2
+    while candidate.exists():
+        candidate = directory / f"prereg_{stamp}_{suffix}.json"
+        suffix += 1
+    return candidate
 
 
 @dataclass(frozen=True)
@@ -1010,7 +1094,8 @@ class _AssembledOptimization:
     target_label: str
     direction: str  # what the engine runs: "maximize" | "minimize"
     quality_flags: list[QualityFlagOut]  # untrustworthy points (warn, don't block)
-    unreliable: np.ndarray  # per-point mask matching xs/ys, True where flagged
+    unreliable: np.ndarray  # per-point mask matching xs/ys, True where down-weighted
+    n_distrusted: int  # how much of `unreliable` came from the researcher, not physics
     # Physics layer: the fit space + physical clamp bounds for the target.
     y_transform: str  # "identity" | "log"
     y_min: float | None
@@ -1097,10 +1182,18 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
             y_min, y_max = prop.min_value, prop.max_value
 
     bounds = body.bounds or (float(xs.min()), float(xs.max()))
-    # One boolean per point: did any physics check reject this sample? The
-    # engine down-weights those rather than fitting them at full confidence.
+    # One boolean per point: is there any reason not to fit this sample at full
+    # confidence? Two independent sources feed it, and neither drops a point.
+    #   - a physics check rejected the value (automatic, sees only the numbers)
+    #   - the researcher marked the sample untrusted (they were in the room)
+    # The second exists because the first cannot be complete: a score computed
+    # from the data cannot know the powder clumped or the sonicator was skipped.
     flagged_names = {fl.sample_name for fl in flags}
-    unreliable = np.array([r.sample_name in flagged_names for r in rows], dtype=bool)
+    distrusted_ids = trust_store.load_distrusted(state.root)
+    distrusted_mask = np.array([r.sample_id in distrusted_ids for r in rows], dtype=bool)
+    unreliable = (
+        np.array([r.sample_name in flagged_names for r in rows], dtype=bool) | distrusted_mask
+    )
     return _AssembledOptimization(
         points=points,
         xs=xs,
@@ -1110,6 +1203,7 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
         direction=direction,
         quality_flags=flags,
         unreliable=unreliable,
+        n_distrusted=int(distrusted_mask.sum()),
         y_transform=y_transform,
         y_min=y_min,
         y_max=y_max,
@@ -1177,6 +1271,39 @@ def _validate_prereg(state: ServerState, body: ValidateOutcomeRequest) -> Outcom
     verdict = optimization.validate_outcome(record, body.measured_value)
     optimization.write_outcome(resolved, verdict)
     return _verdict_out(verdict)
+
+
+def _campaign_drift(state: ServerState) -> list[CampaignDriftOut]:
+    """Read the frozen records off disk and measure the movement between them."""
+    if state.root is None:
+        raise HTTPException(status_code=404, detail="No project is open")
+    entries = optimization.list_preregistrations(state.root)
+    return [_drift_out(d) for d in recommendation_drift(entries)]
+
+
+def _drift_out(drift: optimization.CampaignDrift) -> CampaignDriftOut:
+    """Map a core CampaignDrift to the API shape."""
+    return CampaignDriftOut(
+        input_variable=drift.input_variable,
+        property_name=drift.property_name,
+        direction=drift.direction,
+        n_freezes=drift.n_freezes,
+        steps=[
+            DriftStepOut(
+                from_created_at=s.from_created_at,
+                to_created_at=s.to_created_at,
+                from_x=s.from_x,
+                to_x=s.to_x,
+                distance=s.distance,
+                fraction_of_span=s.fraction_of_span,
+            )
+            for s in drift.steps
+        ],
+        search_span=drift.search_span,
+        latest_fraction=drift.latest_fraction,
+        settled=drift.settled,
+        note=drift.note,
+    )
 
 
 def _prereg_summary(entry: optimization.PreregEntry) -> PreregSummary:

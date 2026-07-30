@@ -465,7 +465,8 @@ export interface OptimizeResult {
   delta: number;
   prob_within_epsilon: number;
   epsilon_delta_met: boolean;
-  n_unreliable: number; // observations down-weighted by the physics checks
+  n_unreliable: number; // observations down-weighted before fitting
+  n_distrusted: number; // how many of those the researcher marked, not physics
 }
 
 export function getParameters(): Promise<SampleParams> {
@@ -477,6 +478,16 @@ export function setSampleParameters(
   parameters: Record<string, number>,
 ): Promise<{ status: string }> {
   return post<{ status: string }>(`/samples/${sampleId}/parameters`, { parameters });
+}
+
+/** Sample ids the researcher has marked untrusted. */
+export function getDistrusted(): Promise<string[]> {
+  return request<string[]>("/samples/distrusted");
+}
+
+/** The researcher's own quality call: down-weight this sample, don't drop it. */
+export function setDistrusted(sampleId: string, distrusted: boolean): Promise<string[]> {
+  return post<string[]>(`/samples/${sampleId}/distrust`, { distrusted });
 }
 
 export function getOptimizeTargets(): Promise<string[]> {
@@ -607,6 +618,39 @@ export interface PreregSummary {
 
 export function listPreregistrations(): Promise<PreregSummary[]> {
   return request<PreregSummary[]>("/optimize/prereg");
+}
+
+/** One move of the recommendation between two consecutive freezes. */
+export interface DriftStep {
+  from_created_at: string;
+  to_created_at: string;
+  from_x: number;
+  to_x: number;
+  distance: number; // in the input variable's own units
+  fraction_of_span: number; // the same move, relative to the search range
+}
+
+/**
+ * Is the campaign still changing its mind?
+ *
+ * A convergence check from outside the model: how far the recommendation moved
+ * between successive frozen pre-registrations. `settled` is null with fewer
+ * than two freezes, because a single point cannot show movement.
+ */
+export interface CampaignDrift {
+  input_variable: string;
+  property_name: string;
+  direction: "maximize" | "minimize";
+  n_freezes: number;
+  steps: DriftStep[];
+  search_span: number | null;
+  latest_fraction: number | null;
+  settled: boolean | null;
+  note: string;
+}
+
+export function getCampaignDrift(): Promise<CampaignDrift[]> {
+  return request<CampaignDrift[]>("/optimize/drift");
 }
 
 /** Score a measured value against a frozen record; persists the verdict. */
