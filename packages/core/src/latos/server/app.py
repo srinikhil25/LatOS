@@ -1270,8 +1270,14 @@ def _verdict(res: OptimizationResult) -> str:
     # Not converged. If the improvement signal is already within measurement
     # noise but the model is still exploratory, the honest verdict is "too few
     # points to confirm an optimum" — not a promise of improvement.
-    exploratory = res.reliability is not None and res.reliability.level == "exploratory"
-    if res.max_ei < res.noise_threshold and exploratory:
+    # Bind the report before testing it: this branch quotes the observation
+    # count, so it must only be reachable when a report actually exists.
+    reliability = res.reliability
+    if (
+        res.max_ei < res.noise_threshold
+        and reliability is not None
+        and reliability.level == "exploratory"
+    ):
         # Diminishing returns: lead with "you can stop" (the resource-saving
         # signal), then offer ONE optional confirmation. Do not imply a long
         # campaign — the tool's job is the fewest experiments to a good answer.
@@ -1279,7 +1285,7 @@ def _verdict(res: OptimizationResult) -> str:
             f"Likely done. The best expected improvement ({res.max_ei:.2g}) is already "
             f"below the measurement noise ({res.noise_threshold:.2g}), so another experiment "
             f"is unlikely to beat the current {best_word} ({res.best_y:.3f} at "
-            f"{res.input_name} = {res.best_x:g}). With only {res.reliability.n_observations} "
+            f"{res.input_name} = {res.best_x:g}). With only {reliability.n_observations} "
             f"measured points this is not yet certified; for more confidence the single most "
             f"informative check is {res.input_name} = {rec.x:.3g} (predicted {res.target_name} "
             f"{rec.predicted_mean:.2f} +/- {rec.ci95_predictive:.2f}, 95% predictive). "

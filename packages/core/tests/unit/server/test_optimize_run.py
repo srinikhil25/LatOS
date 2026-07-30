@@ -352,3 +352,41 @@ class TestQualityFlagsEndpoint:
         # The TE fixture has no Hall data, so a zt run is never flagged.
         body = _run(_client(tmp_path))
         assert body["quality_flags"] == []
+
+
+class TestVerdictWithoutReliability:
+    """The verdict must not assume a reliability report exists.
+
+    `OptimizationResult.reliability` is None whenever the caller skipped the
+    assessment (the robustness sweep passes `with_reliability=False`). The
+    "likely done" branch quotes the observation count, so reaching it without
+    a report used to raise AttributeError.
+    """
+
+    @staticmethod
+    def _result_without_reliability():
+        import numpy as np
+
+        from latos.optimization.engine import optimize
+
+        # Flat data: the improvement signal is exhausted immediately, which is
+        # the branch that reads the observation count.
+        x = np.array([0.0, 1.0, 2.0, 3.0])
+        y = np.array([1.0, 1.0, 1.0, 1.0])
+        return optimize(
+            x,
+            y,
+            bounds=(0.0, 3.0),
+            input_name="d",
+            target_name="zt",
+            with_reliability=False,
+        )
+
+    def test_verdict_is_a_sentence_not_a_crash(self):
+        from latos.server.app import _verdict
+
+        res = self._result_without_reliability()
+        assert res.reliability is None
+        text = _verdict(res)
+        assert isinstance(text, str)
+        assert text  # non-empty
