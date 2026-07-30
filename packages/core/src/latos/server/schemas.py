@@ -282,6 +282,10 @@ class OptimizeResult(BaseModel):
     # How many of those the researcher marked by hand, rather than a physics
     # check. Shown back so a ticked box visibly changes the run.
     n_distrusted: int = 0
+    # Whether `noise_threshold` is the observed repeatability of repeat
+    # measurements, or the assumed relative noise. The verdict is "the expected
+    # gain is below the noise", so which one it is changes what that means.
+    noise_measured: bool = False
 
 
 class FreezeResult(BaseModel):

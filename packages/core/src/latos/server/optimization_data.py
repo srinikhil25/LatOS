@@ -18,7 +18,7 @@ the UI can tell the user exactly what to fill in.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -142,6 +142,19 @@ def feature_value(sample: Sample, name: str) -> float | None:
     return None
 
 
+# Targets whose parser also records the scatter of repeat measurements on the
+# same sample. That scatter IS the measurement noise, so where it exists it
+# should be used instead of an assumed percentage. Mapped explicitly rather
+# than guessed from the name, so this only ever claims what actually exists.
+_TARGET_SD_FEATURE: dict[str, str] = {
+    "peak_force_n": "peak_force_sd_n",
+}
+
+# Fewer samples than this and the pooled scatter is one sample's spread, which
+# is not a repeatability estimate for the campaign.
+_MIN_SAMPLES_FOR_NOISE = 2
+
+
 @dataclass(frozen=True, slots=True)
 class DatasetRow:
     """One usable (input, target) point for optimization."""
@@ -150,6 +163,9 @@ class DatasetRow:
     sample_name: str
     x: float
     y: float
+    # Scatter of the repeat measurements behind `y`, in the target's units, or
+    # None when the technique records a single value per sample.
+    y_sd: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,12 +419,32 @@ def build_dataset(
         elif y is None:
             skipped.append(SkippedSample(sample.canonical_name, missing_reason))
         else:
+            sd_feature = _TARGET_SD_FEATURE.get(target_property)
             rows.append(
                 DatasetRow(
                     sample_id=sample.id,
                     sample_name=sample.canonical_name,
                     x=float(x),
                     y=float(y),
+                    y_sd=feature_value(sample, sd_feature) if sd_feature else None,
                 )
             )
     return rows, skipped
+
+
+def measured_noise(rows: Sequence[DatasetRow]) -> float | None:
+    """Pooled repeatability of a single measurement, or None if unrecorded.
+
+    Each row may carry the scatter of its own repeats. Pooling them (the root
+    mean of the variances) estimates how far one measurement moves for reasons
+    that have nothing to do with the composition, which is exactly the floor an
+    improvement has to clear.
+
+    Returns None unless at least two samples carry a usable scatter: a floor
+    inferred from a single sample is not a repeatability estimate, and falling
+    back to the assumed relative noise is the honest outcome.
+    """
+    variances = [float(r.y_sd) ** 2 for r in rows if r.y_sd is not None and r.y_sd > 0]
+    if len(variances) < _MIN_SAMPLES_FOR_NOISE:
+        return None
+    return float(np.sqrt(sum(variances) / len(variances)))

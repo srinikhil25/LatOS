@@ -933,6 +933,7 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
                 y_min=asm.y_min,
                 y_max=asm.y_max,
                 unreliable=asm.unreliable,
+                measured_noise=asm.measured_noise,
             )
         except OptimizationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -964,6 +965,7 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             epsilon_delta_met=res.epsilon_delta_met,
             n_unreliable=res.n_unreliable,
             n_distrusted=asm.n_distrusted,
+            noise_measured=res.noise_measured,
         )
 
 
@@ -1037,6 +1039,7 @@ def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> Free
             y_min=asm.y_min,
             y_max=asm.y_max,
             unreliable=asm.unreliable,
+            measured_noise=asm.measured_noise,
         )
         robustness = length_scale_robustness(
             asm.xs,
@@ -1096,6 +1099,9 @@ class _AssembledOptimization:
     quality_flags: list[QualityFlagOut]  # untrustworthy points (warn, don't block)
     unreliable: np.ndarray  # per-point mask matching xs/ys, True where down-weighted
     n_distrusted: int  # how much of `unreliable` came from the researcher, not physics
+    # Repeatability pooled from repeat measurements, in the target's units,
+    # or None when the technique records one value per sample.
+    measured_noise: float | None
     # Physics layer: the fit space + physical clamp bounds for the target.
     y_transform: str  # "identity" | "log"
     y_min: float | None
@@ -1204,6 +1210,7 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
         quality_flags=flags,
         unreliable=unreliable,
         n_distrusted=int(distrusted_mask.sum()),
+        measured_noise=optimization_data.measured_noise(rows),
         y_transform=y_transform,
         y_min=y_min,
         y_max=y_max,
@@ -1414,9 +1421,15 @@ def _verdict(res: OptimizationResult) -> str:
         # Diminishing returns: lead with "you can stop" (the resource-saving
         # signal), then offer ONE optional confirmation. Do not imply a long
         # campaign — the tool's job is the fewest experiments to a good answer.
+        # Name where the noise came from. "The gain is below the noise" is the
+        # entire basis for stopping, so whether that floor was measured from
+        # repeats or assumed as a percentage changes what the sentence is worth.
+        noise_origin = (
+            "measured repeatability" if res.noise_measured else "assumed measurement noise"
+        )
         return (
             f"Likely done. The best expected improvement ({res.max_ei:.2g}) is already "
-            f"below the measurement noise ({res.noise_threshold:.2g}), so another experiment "
+            f"below the {noise_origin} ({res.noise_threshold:.3g}), so another experiment "
             f"is unlikely to beat the current {best_word} ({res.best_y:.3f} at "
             f"{res.input_name} = {res.best_x:g}). With only {reliability.n_observations} "
             f"measured points this is not yet certified; for more confidence the single most "

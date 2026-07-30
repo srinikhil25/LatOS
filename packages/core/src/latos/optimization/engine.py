@@ -285,6 +285,10 @@ class OptimizationResult:
     # How many observations the physics checks flagged as unreliable, and so
     # were down-weighted in the fit.
     n_unreliable: int = 0
+    # Whether `noise_threshold` came from repeat measurements or from the
+    # assumed relative noise. The whole convergence verdict is "the expected
+    # gain is below the noise", so a reader is entitled to know which.
+    noise_measured: bool = False
 
 
 def _physical_band(
@@ -358,13 +362,33 @@ def _prob_within_epsilon(
     return float(np.mean(regret <= epsilon))
 
 
-def _noise_std(y_work: np.ndarray, rel_noise: float, transform: str) -> float:
-    """Absolute measurement-noise std in the GP's fit space.
+def _noise_std(
+    y_work: np.ndarray,
+    rel_noise: float,
+    transform: str,
+    measured_noise: float | None = None,
+    y_linear: np.ndarray | None = None,
+) -> float:
+    """Measurement-noise std in the GP's fit space.
 
     In log space a *relative* measurement error becomes a constant *additive*
     error (d(ln y) = dy/y), so the noise floor is simply `rel_noise`; in linear
     space it scales with the data magnitude.
+
+    `measured_noise` is an observed repeatability in the property's own units,
+    typically the scatter of repeat measurements on one sample. When the caller
+    has that, it beats any assumed percentage, so it wins. It still has to be
+    carried into the fit space: an absolute scatter is already right for a
+    linear fit, but a log fit needs it as a fraction of the signal.
     """
+    if measured_noise is not None and measured_noise > 0:
+        if transform != _LOG:
+            return float(measured_noise)
+        scale = float(np.mean(np.abs(y_linear))) if y_linear is not None else 0.0
+        if scale > 0:
+            return float(measured_noise) / scale
+        # Nothing sane to divide by; fall through to the assumption rather
+        # than inventing a scale.
     if transform == _LOG:
         return rel_noise
     return rel_noise * float(np.mean(np.abs(y_work)))
@@ -549,6 +573,7 @@ def optimize(
     y_max: float | None = None,
     length_scale: float | None = None,
     rel_noise: float = _REL_NOISE,
+    measured_noise: float | None = None,
     xi: float = _XI,
     grid_size: int = _GRID_SIZE,
     seed: int = 0,
@@ -589,6 +614,12 @@ def optimize(
             sets the convergence floor: when the best expected improvement
             falls below this noise level, no experiment can *reliably* do
             better, so we report converged (a heuristic, not a guarantee).
+            Only consulted when `measured_noise` is absent.
+        measured_noise: Observed repeatability of the measurement, in the
+            target's own units, typically the pooled scatter of repeats on the
+            same sample. Overrides `rel_noise` when given: a measured noise
+            floor is evidence, a percentage is a guess, and the convergence
+            verdict rests entirely on this number.
         xi: Exploration sweetener in EI.
         grid_size: Resolution of the posterior curve.
         seed: RNG seed for the GP restarts — makes the fit reproducible.
@@ -645,7 +676,7 @@ def optimize(
     if transform == _LOG and bool(np.any(y <= 0)):
         transform = _IDENTITY
     y_work = _forward(y, transform)
-    noise_std = _noise_std(y_work, rel_noise, transform)
+    noise_std = _noise_std(y_work, rel_noise, transform, measured_noise, y)
 
     # Minimization is exact negation in the (possibly log) fit space.
     sign = 1.0 if direction == "maximize" else -1.0
@@ -775,6 +806,7 @@ def optimize(
         prob_within_epsilon=prob_within,
         epsilon_delta_met=prob_within >= 1.0 - delta,
         n_unreliable=n_unreliable,
+        noise_measured=bool(measured_noise is not None and measured_noise > 0),
     )
 
 
