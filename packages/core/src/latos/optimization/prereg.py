@@ -71,9 +71,26 @@ def build_record(
         },
         "prior_best": prior_best,
         "converged": result.converged,
+        # The stopping claim, committed with everything else. Without this the
+        # tool could assert "94% sure you are already done", the researcher
+        # could stop on it, and nobody could later check what was claimed.
+        # `probability` is conditional on the frozen model, which is exactly
+        # why `reliability` below is recorded beside it.
+        "stopping_claim": {
+            "epsilon": result.epsilon,
+            "delta": result.delta,
+            "probability_within_epsilon": result.prob_within_epsilon,
+            "met": result.epsilon_delta_met,
+            "best_measured": result.best_y,
+            "n_unreliable_observations": result.n_unreliable,
+        },
         "validation_criteria": {
             "calibration": "measured value falls within predictive_interval_95",
             "improvement": "measured value exceeds prior_best",
+            "stopping_claim": (
+                "the best value found over the campaign improves on the frozen "
+                "best_measured by no more than epsilon"
+            ),
         },
     }
     if robustness is not None:
@@ -129,6 +146,29 @@ def _to_markdown(record: dict[str, Any]) -> str:
         "- **Calibration:** the measured value falls within the 95% predictive interval.",
         "- **Improvement:** the measured value exceeds the prior best.",
     ]
+    claim = record.get("stopping_claim")
+    if claim:
+        pct = claim["probability_within_epsilon"] * 100.0
+        bar = (1.0 - claim["delta"]) * 100.0
+        lines += [
+            "",
+            "## Stopping claim (committed in advance)",
+            f"- Best measured at freeze time: **{claim['best_measured']:.4g}**",
+            f"- Under the frozen model, that is within **{claim['epsilon']:.4g}** of the "
+            f"optimum with probability **{pct:.0f}%** "
+            f"({'meets' if claim['met'] else 'below'} the {bar:.0f}% bar).",
+            "- **Falsifiable by:** finding a value that beats the frozen best by more "
+            f"than {claim['epsilon']:.4g}.",
+        ]
+        if claim.get("n_unreliable_observations"):
+            lines.append(
+                f"- {claim['n_unreliable_observations']} observation(s) were "
+                "down-weighted because a physics check rejected them."
+            )
+        lines.append(
+            "- This probability is conditional on the frozen model; read it with "
+            "the reliability level below."
+        )
     if "robustness" in record:
         rob = record["robustness"]
         verdict = (

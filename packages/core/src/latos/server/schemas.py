@@ -321,6 +321,10 @@ class OutcomeVerdictOut(BaseModel):
     relative_error: float | None
     summary: str
     validated_at: str
+    # Whether the frozen "we are already within epsilon of the optimum" claim
+    # survived this measurement. None for records frozen before the claim
+    # existed, so an older pre-registration still validates cleanly.
+    stopping_claim_held: bool | None = None
 
 
 class PreregSummary(BaseModel):

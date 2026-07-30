@@ -1211,6 +1211,7 @@ def _verdict_out(verdict: optimization.OutcomeVerdict) -> OutcomeVerdictOut:
         relative_error=verdict.relative_error,
         summary=verdict.summary,
         validated_at=verdict.validated_at,
+        stopping_claim_held=verdict.stopping_claim_held,
     )
 
 
@@ -1234,6 +1235,11 @@ def _verdict_out_from_dict(data: dict[str, object]) -> OutcomeVerdictOut:
         ),
         summary=str(data.get("summary", "")),
         validated_at=str(data.get("validated_at", "")),
+        stopping_claim_held=(
+            bool(data["stopping_claim_held"])
+            if data.get("stopping_claim_held") is not None
+            else None
+        ),
     )
 
 
