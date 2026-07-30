@@ -458,6 +458,14 @@ export interface OptimizeResult {
   noise_threshold: number;
   converged: boolean;
   verdict: string;
+  // Probabilistic regret bound: the chance the best measured point is already
+  // within `epsilon` of the true optimum, *under this model*. Read it next to
+  // reliability_level, which says how far the model itself can be trusted.
+  epsilon: number;
+  delta: number;
+  prob_within_epsilon: number;
+  epsilon_delta_met: boolean;
+  n_unreliable: number; // observations down-weighted by the physics checks
 }
 
 export function getParameters(): Promise<SampleParams> {

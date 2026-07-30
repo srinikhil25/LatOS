@@ -32,6 +32,7 @@ import {
   type SpbCheckResult,
 } from "../lib/api";
 import { OptimizeChart } from "../components/OptimizeChart";
+import { ChartFrame } from "../components/ChartFrame";
 import { AnalysisLoader } from "../components/AnalysisLoader";
 
 /** "etching_time_h" → "etching time h" for on-screen labels. */
@@ -354,7 +355,9 @@ export function Optimize({ onBack }: { onBack: () => void }) {
               )}
               <div
                 className={`rounded-lg border px-5 py-4 text-sm ${
-                  result.converged
+                  result.converged ||
+                  (result.max_ei < result.noise_threshold &&
+                    result.reliability_level === "exploratory")
                     ? "border-[color:var(--latos-tech-eds)] bg-[color-mix(in_srgb,var(--latos-tech-eds)_10%,transparent)]"
                     : "border-accent bg-[color-mix(in_srgb,var(--latos-accent)_8%,transparent)]"
                 }`}
@@ -365,7 +368,7 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                       ? "✓ Optimum reached"
                       : result.max_ei < result.noise_threshold &&
                           result.reliability_level === "exploratory"
-                        ? "🔍 Explore the biggest gap next"
+                        ? "◑ Likely done — one optional check"
                         : "↑ Improvement still possible"}
                   </span>
                   {result.reliability_level !== "unknown" && (
@@ -380,6 +383,29 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                 <div className="mt-1 text-secondary" data-selectable>
                   {result.verdict}
                 </div>
+                {/* How likely we are already done, as a number rather than a
+                    yes/no. Stated as "under this model" on purpose: the
+                    reliability grade beside it says how far to trust that. */}
+                <div className="mt-1.5 text-secondary" data-selectable>
+                  Under this model, the best measured point is within{" "}
+                  <span className="font-medium text-primary">
+                    {fmtVal(result.epsilon)}
+                  </span>{" "}
+                  of the optimum with probability{" "}
+                  <span className="font-medium text-primary">
+                    {(result.prob_within_epsilon * 100).toFixed(0)}%
+                  </span>
+                  {result.epsilon_delta_met
+                    ? ` (meets the ${((1 - result.delta) * 100).toFixed(0)}% bar).`
+                    : ` (below the ${((1 - result.delta) * 100).toFixed(0)}% bar).`}
+                </div>
+                {result.n_unreliable > 0 && (
+                  <div className="mt-1 text-xs text-secondary" data-selectable>
+                    {result.n_unreliable} measurement
+                    {result.n_unreliable === 1 ? " was" : "s were"} down-weighted in the fit
+                    because a physics check rejected {result.n_unreliable === 1 ? "it" : "them"}.
+                  </div>
+                )}
                 {result.reliability_note && (
                   <div className="mt-1.5 text-xs text-secondary" data-selectable>
                     {result.reliability_note}
@@ -387,7 +413,9 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                 )}
               </div>
               <div className="rounded-lg border border-edge bg-surface p-3">
-                <OptimizeChart result={result} />
+                <ChartFrame basename="latos-optimization" label="optimization figure">
+                  <OptimizeChart result={result} />
+                </ChartFrame>
               </div>
 
               <div className="flex flex-wrap items-center gap-3">
