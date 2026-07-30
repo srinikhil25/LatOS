@@ -385,20 +385,28 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                 </div>
                 {/* How likely we are already done, as a number rather than a
                     yes/no. Stated as "under this model" on purpose: the
-                    reliability grade beside it says how far to trust that. */}
-                <div className="mt-1.5 text-secondary" data-selectable>
-                  Under this model, the best measured point is within{" "}
-                  <span className="font-medium text-primary">
-                    {fmtVal(result.epsilon)}
-                  </span>{" "}
-                  of the optimum with probability{" "}
-                  <span className="font-medium text-primary">
-                    {(result.prob_within_epsilon * 100).toFixed(0)}%
-                  </span>
-                  {result.epsilon_delta_met
-                    ? ` (meets the ${((1 - result.delta) * 100).toFixed(0)}% bar).`
-                    : ` (below the ${((1 - result.delta) * 100).toFixed(0)}% bar).`}
-                </div>
+                    reliability grade beside it says how far to trust that.
+
+                    Guarded because the sidecar is a separate process: in
+                    development the UI hot-reloads while the Python server does
+                    not, so a newer screen can be handed an older payload. A
+                    missing field should cost this one line, not the screen. */}
+                {Number.isFinite(result.epsilon) &&
+                  Number.isFinite(result.prob_within_epsilon) && (
+                    <div className="mt-1.5 text-secondary" data-selectable>
+                      Under this model, the best measured point is within{" "}
+                      <span className="font-medium text-primary">
+                        {fmtVal(result.epsilon)}
+                      </span>{" "}
+                      of the optimum with probability{" "}
+                      <span className="font-medium text-primary">
+                        {(result.prob_within_epsilon * 100).toFixed(0)}%
+                      </span>
+                      {result.epsilon_delta_met
+                        ? ` (meets the ${((1 - result.delta) * 100).toFixed(0)}% bar).`
+                        : ` (below the ${((1 - result.delta) * 100).toFixed(0)}% bar).`}
+                    </div>
+                  )}
                 {result.n_unreliable > 0 && (
                   <div className="mt-1 text-xs text-secondary" data-selectable>
                     {result.n_unreliable} measurement
