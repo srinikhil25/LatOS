@@ -106,6 +106,13 @@ _LOO_FORCE_EXPLORATORY = 0.5
 # span as the kernel length-scale is varied (one-line kernel-artifact defense).
 _ROBUSTNESS_TOL_FRAC = 0.1
 _CI95 = 1.96  # 95% Gaussian half-width in standard deviations
+# A measurement our physics checks reject is treated as this many times
+# noisier rather than deleted: the GP still sees it, but stops chasing it.
+_UNRELIABLE_NOISE_FACTOR = 3.0
+# Posterior draws behind the (epsilon, delta) statement. 512 puts the standard
+# error of the reported probability near 2%, which is finer than we quote it.
+_N_POSTERIOR_DRAWS = 512
+_DEFAULT_DELTA = 0.1  # report "within epsilon" at 90% confidence by default
 
 # y-space transforms (the physics layer). Strictly-positive order-of-magnitude
 # quantities (mobility, conductivity, …) are fit in log space so the surrogate
@@ -268,6 +275,87 @@ class OptimizationResult:
     # How trustworthy the intervals are, from the data itself. None only
     # when the caller skipped the assessment (e.g. the robustness sweep).
     reliability: ReliabilityReport | None = None
+    # Probabilistic regret bound: how likely it is, under this model, that the
+    # best measured point is already within `epsilon` of the true optimum.
+    # `epsilon` is in fit-space units (the same scale as `noise_threshold`).
+    epsilon: float = 0.0
+    delta: float = _DEFAULT_DELTA
+    prob_within_epsilon: float = 0.0
+    epsilon_delta_met: bool = False
+    # How many observations the physics checks flagged as unreliable, and so
+    # were down-weighted in the fit.
+    n_unreliable: int = 0
+
+
+def _physical_band(
+    mean_work: np.ndarray,
+    std: np.ndarray,
+    transform: str,
+    y_min: float | None,
+    y_max: float | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Map the fit-space posterior back to physical units, clamped.
+
+    Returns `(mean, lower, upper, ci95)`. The band is exact even when the log
+    inverse makes it asymmetric; `ci95` is the symmetric half-width kept for
+    compatibility with older payloads.
+    """
+    mean = _clamp(_inverse(mean_work, transform), y_min, y_max)
+    lower = _clamp(_inverse(mean_work - _CI95 * std, transform), y_min, y_max)
+    upper = _clamp(_inverse(mean_work + _CI95 * std, transform), y_min, y_max)
+    return mean, lower, upper, (upper - lower) / 2.0
+
+
+def _noise_scale(
+    unreliable: np.ndarray | None, n_observations: int
+) -> tuple[np.ndarray | None, int]:
+    """Per-observation noise multipliers from the physics-check verdicts.
+
+    Returns `(scale, n_flagged)`. `scale` is None when nothing was flagged,
+    which keeps the single shared noise level and so reproduces earlier runs
+    exactly.
+    """
+    if unreliable is None:
+        return None, 0
+    flags = np.asarray(unreliable, dtype=bool).reshape(-1)
+    if flags.size != n_observations:
+        raise ValueError("unreliable must have one entry per observation")
+    n_flagged = int(flags.sum())
+    if not n_flagged:
+        return None, 0
+    return np.where(flags, _UNRELIABLE_NOISE_FACTOR, 1.0), n_flagged
+
+
+def _prob_within_epsilon(
+    gp: GaussianProcessRegressor,
+    grid_norm: np.ndarray,
+    best_x_norm: float,
+    epsilon: float,
+    seed: int,
+    n_draws: int = _N_POSTERIOR_DRAWS,
+) -> float:
+    """P(the best measured point is within `epsilon` of the true optimum).
+
+    This is the probabilistic-regret-bound criterion of Wilson (NeurIPS 2024),
+    estimated by Monte Carlo. We draw joint sample paths from the posterior;
+    for each path the regret of the incumbent is `max(f) - f(x_best)`, and the
+    answer is the fraction of paths where that regret is at most `epsilon`.
+
+    Everything here is in the engine's internal space, where larger is always
+    better, so `epsilon` is in the same units as `noise_std`.
+
+    Wilson evaluates this with a random-feature approximation because exact
+    sampling is cubic in the number of points. Our grid is small and 1-D, so
+    we sample exactly and skip the approximation. Note his own caveat: the
+    probability is conditional *on the model*. That is precisely why Latos
+    reports it alongside the data-sufficiency grade rather than instead of it.
+    """
+    points = np.concatenate([grid_norm, [best_x_norm]]).reshape(-1, 1)
+    draws = gp.sample_y(points, n_samples=n_draws, random_state=seed)
+    incumbent = draws[-1, :]
+    best_possible = draws[:-1, :].max(axis=0)
+    regret = best_possible - incumbent
+    return float(np.mean(regret <= epsilon))
 
 
 def _noise_std(y_work: np.ndarray, rel_noise: float, transform: str) -> float:
@@ -283,7 +371,11 @@ def _noise_std(y_work: np.ndarray, rel_noise: float, transform: str) -> float:
 
 
 def _build_gp(
-    y: np.ndarray, noise_std: float, length_scale: float | None, seed: int
+    y: np.ndarray,
+    noise_std: float,
+    length_scale: float | None,
+    seed: int,
+    noise_scale: np.ndarray | None = None,
 ) -> GaussianProcessRegressor:
     """A GP with a smooth RBF trend and a realistic measurement-noise floor.
 
@@ -291,8 +383,15 @@ def _build_gp(
     computes it via `_noise_std` so log-space fits get the right floor. When
     `length_scale` is None it is fitted by marginal likelihood (within
     `_LS_BOUNDS`); a fixed value is what `length_scale_robustness()` sweeps.
+
+    `noise_scale` (shape (n,)) multiplies the assumed measurement noise of
+    individual observations. A point our physics checks flagged as
+    implausible is not discarded — discarding data silently is its own kind
+    of dishonesty — it is simply trusted less, which is what a larger error
+    bar means. `None` keeps the single shared noise level, exactly as before.
     """
-    alpha = (noise_std / max(float(np.std(y)), 1e-9)) ** 2
+    alpha_scalar = (noise_std / max(float(np.std(y)), 1e-9)) ** 2
+    alpha = alpha_scalar if noise_scale is None else alpha_scalar * noise_scale**2
     if length_scale is None:
         rbf = RBF(length_scale=_LS_INIT, length_scale_bounds=_LS_BOUNDS)
         n_restarts = _N_RESTARTS
@@ -456,6 +555,9 @@ def optimize(
     objective_aggregation: str = "peak",
     created_at: datetime | None = None,
     with_reliability: bool = True,
+    unreliable: np.ndarray | None = None,
+    epsilon: float | None = None,
+    delta: float = _DEFAULT_DELTA,
 ) -> OptimizationResult:
     """Run one round of Bayesian optimization over a 1-D parameter.
 
@@ -497,6 +599,15 @@ def optimize(
             attach a `ReliabilityReport` (default). The robustness sweep
             passes False — n extra GP fits per swept length-scale would
             buy nothing there.
+        unreliable: Optional bool mask, shape (n,), True where a physics
+            check rejected that measurement. Flagged points are fitted with
+            a larger assumed noise rather than dropped, so the recommendation
+            stops chasing numbers the physics layer does not believe.
+        epsilon: Tolerance for the "already good enough" statement, in
+            fit-space units. Defaults to the measurement-noise floor, i.e.
+            "within one measurement noise of the optimum".
+        delta: Risk level for that statement; `epsilon_delta_met` is True
+            when the probability reaches 1 - delta.
 
     Returns:
         An `OptimizationResult` with the posterior, the recommendation,
@@ -540,7 +651,8 @@ def optimize(
     sign = 1.0 if direction == "maximize" else -1.0
     y_int = sign * y_work
 
-    gp = _build_gp(y_int, noise_std, length_scale, seed)
+    noise_scale, n_unreliable = _noise_scale(unreliable, y_int.size)
+    gp = _build_gp(y_int, noise_std, length_scale, seed, noise_scale=noise_scale)
     # We deliberately bound the length-scale to keep a handful of points
     # from overfitting; sklearn then warns when the optimizer sits on that
     # bound. That's expected, not a problem — suppress it locally.
@@ -561,10 +673,9 @@ def optimize(
     # clamped to the property's domain. The band [lower, upper] is exact even
     # when the log inverse makes it asymmetric.
     mean_work = sign * mean_int
-    grid_mean = _clamp(_inverse(mean_work, transform), y_min, y_max)
-    grid_lower = _clamp(_inverse(mean_work - _CI95 * std, transform), y_min, y_max)
-    grid_upper = _clamp(_inverse(mean_work + _CI95 * std, transform), y_min, y_max)
-    grid_ci95 = (grid_upper - grid_lower) / 2.0
+    grid_mean, grid_lower, grid_upper, grid_ci95 = _physical_band(
+        mean_work, std, transform, y_min, y_max
+    )
 
     ei_i = int(np.argmax(ei))
     max_ei = float(ei[ei_i])
@@ -574,6 +685,12 @@ def optimize(
     # convergence but not sufficient (see the reliability gate below).
     noise_threshold = noise_std
     signal_exhausted = max_ei < noise_threshold
+
+    # How likely it is that we are already done, stated as a probability
+    # rather than as a yes/no. "Within one measurement noise of the optimum"
+    # is the natural tolerance for an experimentalist, so that is the default.
+    eps = float(epsilon) if epsilon is not None else noise_std
+    prob_within = _prob_within_epsilon(gp, grid_norm, float(x_norm[best_i]), eps, seed)
 
     config = BoConfig(
         objective=target_name,
@@ -653,6 +770,11 @@ def optimize(
         converged=converged,
         config=config,
         reliability=reliability,
+        epsilon=eps,
+        delta=delta,
+        prob_within_epsilon=prob_within,
+        epsilon_delta_met=prob_within >= 1.0 - delta,
+        n_unreliable=n_unreliable,
     )
 
 

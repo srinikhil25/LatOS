@@ -885,6 +885,7 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
                 y_transform=asm.y_transform,
                 y_min=asm.y_min,
                 y_max=asm.y_max,
+                unreliable=asm.unreliable,
             )
         except OptimizationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -910,6 +911,11 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             noise_threshold=res.noise_threshold,
             converged=res.converged,
             verdict=_verdict(res),
+            epsilon=res.epsilon,
+            delta=res.delta,
+            prob_within_epsilon=res.prob_within_epsilon,
+            epsilon_delta_met=res.epsilon_delta_met,
+            n_unreliable=res.n_unreliable,
         )
 
     @app.post("/optimize/freeze")
@@ -962,6 +968,7 @@ def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> Free
             y_transform=asm.y_transform,
             y_min=asm.y_min,
             y_max=asm.y_max,
+            unreliable=asm.unreliable,
         )
         robustness = length_scale_robustness(
             asm.xs,
@@ -1003,6 +1010,7 @@ class _AssembledOptimization:
     target_label: str
     direction: str  # what the engine runs: "maximize" | "minimize"
     quality_flags: list[QualityFlagOut]  # untrustworthy points (warn, don't block)
+    unreliable: np.ndarray  # per-point mask matching xs/ys, True where flagged
     # Physics layer: the fit space + physical clamp bounds for the target.
     y_transform: str  # "identity" | "log"
     y_min: float | None
@@ -1089,6 +1097,10 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
             y_min, y_max = prop.min_value, prop.max_value
 
     bounds = body.bounds or (float(xs.min()), float(xs.max()))
+    # One boolean per point: did any physics check reject this sample? The
+    # engine down-weights those rather than fitting them at full confidence.
+    flagged_names = {fl.sample_name for fl in flags}
+    unreliable = np.array([r.sample_name in flagged_names for r in rows], dtype=bool)
     return _AssembledOptimization(
         points=points,
         xs=xs,
@@ -1097,6 +1109,7 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
         target_label=target_label,
         direction=direction,
         quality_flags=flags,
+        unreliable=unreliable,
         y_transform=y_transform,
         y_min=y_min,
         y_max=y_max,
@@ -1259,13 +1272,18 @@ def _verdict(res: OptimizationResult) -> str:
     # points to confirm an optimum" — not a promise of improvement.
     exploratory = res.reliability is not None and res.reliability.level == "exploratory"
     if res.max_ei < res.noise_threshold and exploratory:
+        # Diminishing returns: lead with "you can stop" (the resource-saving
+        # signal), then offer ONE optional confirmation. Do not imply a long
+        # campaign — the tool's job is the fewest experiments to a good answer.
         return (
-            f"Not enough data to confirm an optimum: the improvement signal is "
-            f"within measurement noise, but with only "
-            f"{res.reliability.n_observations} points the model is still exploratory. "
-            f"The most informative next experiment is the least-sampled composition: "
-            f"{res.input_name} = {rec.x:.3g} (predicted {res.target_name} "
-            f"{rec.predicted_mean:.2f} +/- {rec.ci95_predictive:.2f}, 95% predictive)."
+            f"Likely done. The best expected improvement ({res.max_ei:.2g}) is already "
+            f"below the measurement noise ({res.noise_threshold:.2g}), so another experiment "
+            f"is unlikely to beat the current {best_word} ({res.best_y:.3f} at "
+            f"{res.input_name} = {res.best_x:g}). With only {res.reliability.n_observations} "
+            f"measured points this is not yet certified; for more confidence the single most "
+            f"informative check is {res.input_name} = {rec.x:.3g} (predicted {res.target_name} "
+            f"{rec.predicted_mean:.2f} +/- {rec.ci95_predictive:.2f}, 95% predictive). "
+            f"Otherwise you can stop here."
         )
     return (
         f"Recommended next experiment: {res.input_name} = {rec.x:.3g} "

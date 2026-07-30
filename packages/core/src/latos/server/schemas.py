@@ -268,6 +268,17 @@ class OptimizeResult(BaseModel):
     noise_threshold: float
     converged: bool
     verdict: str  # plain-language summary for the UI
+    # Probabilistic regret bound (Wilson, NeurIPS 2024): the chance that the
+    # best measured point is already within `epsilon` of the true optimum,
+    # *under this model*. Read it next to `reliability_level`, which says how
+    # far the model itself can be trusted.
+    epsilon: float = 0.0
+    delta: float = 0.1
+    prob_within_epsilon: float = 0.0
+    epsilon_delta_met: bool = False
+    # Observations down-weighted in the fit because a physics check rejected
+    # them (they are never silently dropped).
+    n_unreliable: int = 0
 
 
 class FreezeResult(BaseModel):
