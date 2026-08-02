@@ -495,24 +495,32 @@ def _assess_reliability(
     y: np.ndarray,
     *,
     noise_std: float,
-    length_scale: float,
     seed: int,
 ) -> ReliabilityReport:
     """Count-tier + leave-one-out reliability of the model's intervals.
 
     Runs in the GP's fit space (`y` and `noise_std` are already transformed),
-    so the coverage check is consistent with a log-space fit. Each LOO fold
-    refits with the full fit's length-scale held FIXED — the cheap, standard
-    approximation. The check asks the only question that matters: does the
-    model's own 95% predictive interval contain the point it didn't see?
+    so the coverage check is consistent with a log-space fit. The check asks
+    the only question that matters: does the model's own 95% predictive
+    interval contain the point it didn't see?
+
+    Each fold refits the length-scale from scratch on the n-1 points it is
+    allowed to see. Earlier this reused the length-scale fitted on the FULL
+    series, which is cheaper but leaks: the held-out point helped choose the
+    hyper-parameter that the fold then predicts it with, so the fold has
+    partly seen the answer. That biases coverage OPTIMISTIC, which is the one
+    direction a check against over-confidence must not be biased in. On the
+    five-sample drop-impact series the leak was worth a whole fold, 4/5
+    against 3/5.
+
+    The cost is n hyper-parameter fits instead of n cheap ones. That is real
+    but small, and correctness of this particular number is the product.
     """
-    if not np.isfinite(length_scale):
-        length_scale = _LS_INIT
     n = int(x_norm.size)
     inside = 0
     for i in range(n):
         mask = np.arange(n) != i
-        gp = _build_gp(y[mask], noise_std, length_scale, seed)
+        gp = _build_gp(y[mask], noise_std, None, seed)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", ConvergenceWarning)
             gp.fit(x_norm[mask].reshape(-1, 1), y[mask])
@@ -752,7 +760,6 @@ def optimize(
             x_norm,
             y_int,
             noise_std=noise_std,
-            length_scale=config.length_scale,
             seed=seed,
         )
 
