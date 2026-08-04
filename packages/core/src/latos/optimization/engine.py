@@ -123,6 +123,13 @@ _RELIABILITY_CALIBRATED_N = 25  # at or above this: "calibrated"
 _FILL_INDICATIVE = _SPAN_UNITS / (2 * (_RELIABILITY_INDICATIVE_N - 1))
 _FILL_CALIBRATED = _SPAN_UNITS / (2 * (_RELIABILITY_CALIBRATED_N - 1))
 _FILL_PROBE = 2**14  # probe points for the multi-dimensional fill estimate
+# Boundary slack. Because the limits are derived to agree with the counts
+# exactly, n evenly spaced points land precisely ON their own threshold, and
+# float arithmetic then settles the tier on the last bit of the mantissa —
+# ten evenly spaced points would fail the tier they define. Comparing against
+# (1 + tol) makes the two rules agree at the boundary instead of fighting over
+# one ULP.
+_FILL_TOL = 1e-6
 # A leave-one-out coverage this poor forces "exploratory" regardless of n —
 # the model demonstrably cannot predict its own data points.
 _LOO_FORCE_EXPLORATORY = 0.5
@@ -667,7 +674,7 @@ def _assess_reliability(
     # the same asymmetry the leave-one-out gate above uses.
     fill = _fill_distance(x_mat)
     fill_limit = _FILL_CALIBRATED if level == "calibrated" else _FILL_INDICATIVE
-    if fill > _FILL_INDICATIVE and level != "exploratory":
+    if fill > _FILL_INDICATIVE * (1 + _FILL_TOL) and level != "exploratory":
         level = "exploratory"
         note = (
             f"Exploratory: {n} points over {d} "
@@ -676,7 +683,7 @@ def _assess_reliability(
             f"search range spans {_SPAN_UNITS:g}). The count is not the problem — "
             f"the points do not cover the space."
         )
-    elif fill > _FILL_CALIBRATED and level == "calibrated":
+    elif fill > _FILL_CALIBRATED * (1 + _FILL_TOL) and level == "calibrated":
         level = "indicative"
         note = (
             f"Indicative: {n} points would grade calibrated on count, but the "

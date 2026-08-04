@@ -165,7 +165,10 @@ class TestTwoDimensional:
         fast, flat = r.config.length_scales
         assert fast < flat
 
-    def test_reliability_flags_the_dimension_and_its_caveat(self):
+    def test_reliability_is_dimension_aware(self):
+        """40 points would grade calibrated on count alone. Spread over a
+        plane they leave holes far bigger than the limit, and the fill-distance
+        gate is what notices."""
         x, y = _grid_2d()
         r = optimize_nd(
             x, y, bounds=[(0, 5), (300, 600)], input_names=("doping", "temp"), target_name="zt"
@@ -173,7 +176,8 @@ class TestTwoDimensional:
         assert r.reliability is not None
         assert r.reliability.n_dims == 2
         assert r.reliability.loo_total == x.shape[0]
-        assert "do not yet scale with dimension" in r.reliability.note
+        assert r.reliability.fill_distance > r.reliability.fill_limit
+        assert r.reliability.level == "exploratory"
 
     def test_candidate_set_is_a_power_of_two_and_inside_bounds(self):
         x, y = _grid_2d()
