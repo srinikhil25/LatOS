@@ -21,14 +21,18 @@ from latos.optimization.campaign import (
 )
 from latos.optimization.engine import (
     BoConfig,
+    BoConfigND,
     OptimizationError,
     OptimizationResult,
+    OptimizationResultND,
     Recommendation,
+    RecommendationND,
     ReliabilityReport,
     RobustnessEntry,
     RobustnessReport,
     length_scale_robustness,
     optimize,
+    optimize_nd,
 )
 from latos.optimization.prereg import build_record, freeze, write_record
 from latos.optimization.validate import (
@@ -42,6 +46,10 @@ from latos.optimization.validate import (
 
 __all__ = [
     "BoConfig",
+    "optimize_nd",
+    "RecommendationND",
+    "OptimizationResultND",
+    "BoConfigND",
     "CampaignDrift",
     "DriftStep",
     "OptimizationError",

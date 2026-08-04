@@ -49,6 +49,7 @@ from __future__ import annotations
 import math
 import os
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -58,7 +59,8 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import numpy as np
-from scipy.stats import norm
+from scipy.spatial import cKDTree
+from scipy.stats import norm, qmc
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel
@@ -99,6 +101,28 @@ _DIRECTIONS = ("maximize", "minimize")
 # exploratory, not settled.
 _RELIABILITY_INDICATIVE_N = 10  # below this: "exploratory"
 _RELIABILITY_CALIBRATED_N = 25  # at or above this: "calibrated"
+
+# The count tiers above are dimension-blind, and counting is the wrong measure
+# the moment there is more than one axis: ten points along a line is sparse,
+# ten points scattered over a plane is very much sparser, and ten points
+# clustered in one corner tells you nothing about the rest of the box however
+# many there are.
+#
+# Fill distance is the quantity that actually governs it — the largest distance
+# from anywhere in the search box to the nearest observation, i.e. the radius of
+# the biggest unsampled hole. It is what bounds interpolation error in scattered
+# data theory, it is insensitive to how the points are counted, and it scales
+# with dimension on its own: filling a box to a given radius needs a number of
+# points that grows as the volume does.
+#
+# The two limits below are the *same* thresholds as the counts, restated
+# geometrically. n evenly spaced points spanning _SPAN_UNITS (endpoints
+# included) leave a fill distance of half the gap, _SPAN_UNITS / (2(n-1)), so
+# in one dimension with well-spread data this rule and the count rule agree by
+# construction. In higher dimensions they diverge, which is the point.
+_FILL_INDICATIVE = _SPAN_UNITS / (2 * (_RELIABILITY_INDICATIVE_N - 1))
+_FILL_CALIBRATED = _SPAN_UNITS / (2 * (_RELIABILITY_CALIBRATED_N - 1))
+_FILL_PROBE = 2**14  # probe points for the multi-dimensional fill estimate
 # A leave-one-out coverage this poor forces "exploratory" regardless of n —
 # the model demonstrably cannot predict its own data points.
 _LOO_FORCE_EXPLORATORY = 0.5
@@ -237,6 +261,16 @@ class ReliabilityReport:
     loo_total: int
     loo_coverage: float
     note: str  # plain-language explanation for the UI / prereg record
+    # Input dimensionality the grade was computed over.
+    n_dims: int = 1
+    # Radius of the largest unsampled hole in the search box, in normalized
+    # units where every search range spans `_SPAN_UNITS`. This is what makes
+    # the grade dimension-aware: counting points cannot tell a well-covered
+    # plane from a line of points inside one, and `fill_distance` can.
+    # `fill_limit` is the threshold the level was held to, so a reader can see
+    # how far off the data is without knowing the constants.
+    fill_distance: float = 0.0
+    fill_limit: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,7 +388,10 @@ def _prob_within_epsilon(
     probability is conditional *on the model*. That is precisely why Latos
     reports it alongside the data-sufficiency grade rather than instead of it.
     """
-    points = np.concatenate([grid_norm, [best_x_norm]]).reshape(-1, 1)
+    grid = np.asarray(grid_norm, dtype=float)
+    grid = grid.reshape(grid.shape[0], -1)
+    best = np.asarray(best_x_norm, dtype=float).reshape(1, -1)
+    points = np.vstack([grid, best])
     draws = gp.sample_y(points, n_samples=n_draws, random_state=seed)
     incumbent = draws[-1, :]
     best_possible = draws[:-1, :].max(axis=0)
@@ -400,6 +437,7 @@ def _build_gp(
     length_scale: float | None,
     seed: int,
     noise_scale: np.ndarray | None = None,
+    n_dims: int = 1,
 ) -> GaussianProcessRegressor:
     """A GP with a smooth RBF trend and a realistic measurement-noise floor.
 
@@ -413,14 +451,22 @@ def _build_gp(
     implausible is not discarded — discarding data silently is its own kind
     of dishonesty — it is simply trusted less, which is what a larger error
     bar means. `None` keeps the single shared noise level, exactly as before.
+
+    `n_dims` > 1 switches the RBF to ARD: one length-scale per input axis
+    instead of one shared value. That is what lets the model say *which*
+    variable the property actually responds to, and an isotropic kernel
+    cannot express it. `n_dims == 1` reproduces the scalar kernel exactly, so
+    every existing caller is bit-for-bit unaffected.
     """
     alpha_scalar = (noise_std / max(float(np.std(y)), 1e-9)) ** 2
     alpha = alpha_scalar if noise_scale is None else alpha_scalar * noise_scale**2
     if length_scale is None:
-        rbf = RBF(length_scale=_LS_INIT, length_scale_bounds=_LS_BOUNDS)
+        init = _LS_INIT if n_dims == 1 else [_LS_INIT] * n_dims
+        rbf = RBF(length_scale=init, length_scale_bounds=_LS_BOUNDS)
         n_restarts = _N_RESTARTS
     else:
-        rbf = RBF(length_scale=length_scale, length_scale_bounds="fixed")
+        fixed = length_scale if n_dims == 1 else [length_scale] * n_dims
+        rbf = RBF(length_scale=fixed, length_scale_bounds="fixed")
         n_restarts = 0
     kernel = ConstantKernel(1.0, (1e-2, 1e2)) * rbf
     return GaussianProcessRegressor(
@@ -433,15 +479,26 @@ def _build_gp(
 
 
 def _fitted_length_scale(gp: GaussianProcessRegressor) -> float:
-    """Read the RBF length-scale back out of a fitted GP kernel."""
+    """Read the RBF length-scale back out of a fitted GP kernel.
+
+    Scalar for an isotropic kernel. An ARD kernel holds one per axis; this
+    returns the first so the 1-D contract is unchanged — `_fitted_length_scales`
+    is what multi-dimensional callers want.
+    """
+    scales = _fitted_length_scales(gp)
+    return scales[0] if scales else float("nan")
+
+
+def _fitted_length_scales(gp: GaussianProcessRegressor) -> tuple[float, ...]:
+    """Every fitted RBF length-scale, one per input axis (ARD) or one total."""
     rbf = getattr(gp.kernel_, "k2", None)
     length_scale = getattr(rbf, "length_scale", None)
     if length_scale is None:
-        return float("nan")
+        return ()
     try:
-        return float(length_scale)
+        return tuple(float(v) for v in np.atleast_1d(length_scale))
     except (TypeError, ValueError):
-        return float("nan")
+        return ()
 
 
 def _expected_improvement(
@@ -490,6 +547,47 @@ def _recommend(
     )
 
 
+def _fill_distance(x_mat: np.ndarray) -> float:
+    """Radius of the largest unsampled hole in the search box.
+
+    `x_mat` is (n, d) in normalized coordinates, where every axis spans
+    [0, _SPAN_UNITS] by construction. Returns the largest distance from any
+    point of that box to its nearest observation.
+
+    Exact in one dimension — the answer is half the widest interior gap, or the
+    distance from an end of the box to the nearest point, whichever is larger.
+    Estimated from a Sobol probe set above that, since the exact value is the
+    radius of the largest empty ball and is not worth computing exactly for a
+    grade. The probe seed is fixed rather than taken from the caller: this is a
+    property of where the samples sit, and it should not shift because someone
+    changed the RNG seed of the fit.
+
+    Deliberately *not* scaled by the fitted length-scales. Dividing by the
+    length-scale would look more principled, but it would let a model that
+    over-smooths — the exact failure this grade exists to catch — report a small
+    fill distance and earn a better grade for being more wrong. The geometry has
+    to be measured independently of the model being judged.
+    """
+    pts = np.asarray(x_mat, dtype=float)
+    pts = pts.reshape(pts.shape[0], -1)
+    if pts.shape[0] == 0:
+        return float(_SPAN_UNITS)
+    if pts.shape[1] == 1:
+        s = np.sort(pts[:, 0])
+        gaps = np.diff(s)
+        widest_interior = float(gaps.max()) / 2.0 if gaps.size else 0.0
+        return float(max(widest_interior, s[0] - 0.0, _SPAN_UNITS - s[-1], 0.0))
+
+    d = pts.shape[1]
+    probe = (
+        qmc.Sobol(d=d, scramble=True, seed=0).random_base2(int(np.ceil(np.log2(_FILL_PROBE))))
+        * _SPAN_UNITS
+    )
+    tree = cKDTree(pts)
+    nearest, _ = tree.query(probe, k=1)
+    return float(np.max(nearest))
+
+
 def _assess_reliability(
     x_norm: np.ndarray,
     y: np.ndarray,
@@ -516,15 +614,19 @@ def _assess_reliability(
     The cost is n hyper-parameter fits instead of n cheap ones. That is real
     but small, and correctness of this particular number is the product.
     """
-    n = int(x_norm.size)
+    # Accept (n,) or (n, d); the reshape is a no-op for the 1-D callers, which
+    # previously did `.reshape(-1, 1)` at each use site.
+    x_mat = np.asarray(x_norm, dtype=float)
+    x_mat = x_mat.reshape(x_mat.shape[0], -1)
+    n, d = x_mat.shape
     inside = 0
     for i in range(n):
         mask = np.arange(n) != i
-        gp = _build_gp(y[mask], noise_std, None, seed)
+        gp = _build_gp(y[mask], noise_std, None, seed, n_dims=d)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", ConvergenceWarning)
-            gp.fit(x_norm[mask].reshape(-1, 1), y[mask])
-        mu, sd = gp.predict(np.asarray([[x_norm[i]]]), return_std=True)
+            gp.fit(x_mat[mask], y[mask])
+        mu, sd = gp.predict(x_mat[i : i + 1], return_std=True)
         half = _CI95 * float(np.sqrt(sd[0] ** 2 + noise_std**2))
         if abs(float(y[i]) - float(mu[0])) <= half:
             inside += 1
@@ -558,6 +660,31 @@ def _assess_reliability(
             f"cannot predict its own data points, so its intervals should not be "
             f"trusted regardless of the data count."
         )
+
+    # Coverage of the search box, independent of how many points there are.
+    # Downgrade only, never upgrade: a well-filled box does not make a model
+    # trustworthy, but a badly-filled one does make it untrustworthy, which is
+    # the same asymmetry the leave-one-out gate above uses.
+    fill = _fill_distance(x_mat)
+    fill_limit = _FILL_CALIBRATED if level == "calibrated" else _FILL_INDICATIVE
+    if fill > _FILL_INDICATIVE and level != "exploratory":
+        level = "exploratory"
+        note = (
+            f"Exploratory: {n} points over {d} "
+            f"{'axis' if d == 1 else 'axes'} still leave an unsampled gap of "
+            f"radius {fill:.2f} (limit {_FILL_INDICATIVE:.2f}, in units where each "
+            f"search range spans {_SPAN_UNITS:g}). The count is not the problem — "
+            f"the points do not cover the space."
+        )
+    elif fill > _FILL_CALIBRATED and level == "calibrated":
+        level = "indicative"
+        note = (
+            f"Indicative: {n} points would grade calibrated on count, but the "
+            f"largest unsampled gap has radius {fill:.2f} (limit "
+            f"{_FILL_CALIBRATED:.2f}) — well sampled in places, not everywhere. "
+            f"Leave-one-out: {inside}/{n} inside the 95% band."
+        )
+
     return ReliabilityReport(
         level=level,
         n_observations=n,
@@ -565,6 +692,9 @@ def _assess_reliability(
         loo_total=n,
         loo_coverage=round(coverage, 3),
         note=note,
+        n_dims=d,
+        fill_distance=round(fill, 4),
+        fill_limit=round(fill_limit, 4),
     )
 
 
@@ -805,6 +935,386 @@ def optimize(
         recommendation=recommendation,
         max_ei=max_ei,
         noise_threshold=noise_threshold,
+        converged=converged,
+        config=config,
+        reliability=reliability,
+        epsilon=eps,
+        delta=delta,
+        prob_within_epsilon=prob_within,
+        epsilon_delta_met=prob_within >= 1.0 - delta,
+        n_unreliable=n_unreliable,
+        noise_measured=bool(measured_noise is not None and measured_noise > 0),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-dimensional search.
+#
+# `optimize()` above stays exactly as it was: it is 1-D, it is what produced
+# every frozen pre-registration on disk, and those records must keep replaying
+# to the same numbers. The functions below add d >= 1 alongside it rather than
+# underneath it, sharing every helper that was already dimension-agnostic.
+#
+# Two things genuinely change with dimension. The kernel becomes ARD, so the
+# model reports one length-scale per axis and can say which variable the
+# property responds to. And the acquisition can no longer be maximised on a
+# dense grid: a 200-point line becomes 200^d, so candidates come from a
+# scrambled Sobol sequence, which fills the box far more evenly than random
+# sampling at the same budget.
+# ---------------------------------------------------------------------------
+
+_ND_CANDIDATES = 2048  # Sobol points the acquisition is maximised over
+_ND_MIN_EXTRA = 2  # a GP over d axes needs at least d + this many points
+_N_MATRIX_DIMS = 2  # observations arrive as a 2-D (n, d) matrix
+
+
+@dataclass(frozen=True, slots=True)
+class RecommendationND:
+    """The next experiment to run, in d dimensions.
+
+    Identical in meaning to `Recommendation`; `x` is a point rather than a
+    scalar. The two interval fields carry the same distinction — `ci95` is the
+    model's own uncertainty, `predictive_interval_95` is what a new measurement
+    at this point should fall inside, and is the band to test calibration
+    against.
+    """
+
+    x: tuple[float, ...]
+    predicted_mean: float
+    ci95: float
+    predictive_sd: float
+    ci95_predictive: float
+    predictive_interval_95: tuple[float, float]
+
+
+@dataclass(frozen=True, slots=True)
+class BoConfigND:
+    """Frozen record of a d-dimensional run.
+
+    Deliberately a separate type from `BoConfig`: that one is persisted inside
+    existing pre-registration files, and widening it would change how those
+    deserialise. `length_scales` is the ARD result and the scientifically
+    interesting field — a length-scale pinned at its upper bound is the model
+    reporting that the axis does nothing.
+    """
+
+    objective: str
+    direction: str
+    y_transform: str
+    objective_aggregation: str
+    input_names: tuple[str, ...]
+    bounds: tuple[tuple[float, float], ...]
+    kernel: str
+    n_dims: int
+    x_scales: tuple[float, ...]  # raw units per normalized unit, per axis
+    length_scales: tuple[float, ...]  # fitted ARD length-scales (normalized)
+    length_scale_bounds: tuple[float, float]
+    xi: float
+    rel_noise: float
+    noise_std: float
+    n_observations: int
+    n_candidates: int
+    seed: int
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class OptimizationResultND:
+    """A d-dimensional optimization round.
+
+    `candidates` is the Sobol set the acquisition was maximised over, with the
+    posterior evaluated on it, so a caller can contour a 2-D surface or slice a
+    higher-dimensional one without refitting anything.
+    """
+
+    input_names: tuple[str, ...]
+    target_name: str
+    candidates: tuple[tuple[float, ...], ...]
+    cand_mean: tuple[float, ...]
+    cand_lower: tuple[float, ...]
+    cand_upper: tuple[float, ...]
+    cand_ei: tuple[float, ...]
+    observed_x: tuple[tuple[float, ...], ...]
+    observed_y: tuple[float, ...]
+    best_x: tuple[float, ...]
+    best_y: float
+    recommendation: RecommendationND
+    max_ei: float
+    noise_threshold: float
+    converged: bool
+    config: BoConfigND
+    reliability: ReliabilityReport | None = None
+    epsilon: float = 0.0
+    delta: float = _DEFAULT_DELTA
+    prob_within_epsilon: float = 0.0
+    epsilon_delta_met: bool = False
+    n_unreliable: int = 0
+    noise_measured: bool = False
+
+
+def _sobol_candidates(bounds: np.ndarray, n_candidates: int, seed: int) -> np.ndarray:
+    """A scrambled Sobol fill of the search box, shape (m, d).
+
+    Sobol rather than a grid because a grid costs `points**d`, and rather than
+    uniform random because Sobol's discrepancy is far lower at the same budget
+    — the acquisition maximum is found more reliably for the same compute.
+    Drawn in powers of two, which is where the sequence's balance properties
+    actually hold.
+    """
+    d = bounds.shape[0]
+    m = max(4, int(np.ceil(np.log2(max(n_candidates, 2)))))
+    engine = qmc.Sobol(d=d, scramble=True, seed=seed)
+    unit = engine.random_base2(m)
+    return bounds[:, 0] + unit * (bounds[:, 1] - bounds[:, 0])
+
+
+def _prepare_nd_inputs(
+    x: np.ndarray,
+    y: np.ndarray,
+    bounds: Sequence[tuple[float, float]],
+    input_names: Sequence[str],
+    direction: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[str, ...]]:
+    """Validate and shape the multi-dimensional inputs.
+
+    Returns `(x_obs, y, box, names)` with `x_obs` as (n, d) and `box` as
+    (d, 2). Every failure is an `OptimizationError` naming the offending
+    argument, because a silent broadcast between a (n,) and a (n, 1) is
+    exactly the kind of mistake that produces a plausible wrong answer.
+    """
+    x_obs = np.asarray(x, dtype=float)
+    if x_obs.ndim == 1:
+        x_obs = x_obs.reshape(-1, 1)
+    if x_obs.ndim != _N_MATRIX_DIMS:
+        raise OptimizationError(f"x must be 2-D (n, d); got shape {x_obs.shape}")
+    y = np.asarray(y, dtype=float).ravel()
+    n, d = x_obs.shape
+
+    names = tuple(str(v) for v in input_names)
+    if len(names) != d:
+        raise OptimizationError(f"input_names has {len(names)} entries for {d} axes")
+    if y.shape[0] != n:
+        raise OptimizationError(f"x has {n} rows but y has {y.shape[0]} values")
+    if direction not in _DIRECTIONS:
+        raise OptimizationError(f"direction must be one of {_DIRECTIONS}; got {direction!r}")
+
+    need = max(_MIN_POINTS, d + _ND_MIN_EXTRA)
+    if n < need:
+        raise OptimizationError(
+            f"Need at least {need} measured points to optimize over {d} axes; got {n}"
+        )
+    if not np.all(np.isfinite(x_obs)) or not np.all(np.isfinite(y)):
+        raise OptimizationError("x and y must be finite (no NaN or Inf)")
+
+    box = np.asarray([(float(lo), float(hi)) for lo, hi in bounds], dtype=float)
+    if box.shape != (d, _N_MATRIX_DIMS):
+        raise OptimizationError(f"bounds must hold {d} (low, high) pairs; got {box.shape}")
+    if not np.all(box[:, 1] > box[:, 0]):
+        bad = [i for i in range(d) if box[i, 1] <= box[i, 0]]
+        raise OptimizationError(f"bounds must have high > low; axes {bad} do not")
+    return x_obs, y, box, names
+
+
+def _recommend_nd(
+    candidates: np.ndarray,
+    rec_i: int,
+    mean_int: np.ndarray,
+    std: np.ndarray,
+    *,
+    sign: float,
+    noise_std: float,
+    transform: str,
+    y_min: float | None,
+    y_max: float | None,
+) -> RecommendationND:
+    """The d-dimensional twin of `_recommend`.
+
+    Same arithmetic; the recommended point is a row of the candidate set
+    rather than a scalar grid value.
+    """
+    rec_sigma = float(std[rec_i])
+    predictive_sd = float(np.sqrt(rec_sigma**2 + noise_std**2))
+    pm_work = float(sign * mean_int[rec_i])
+    lo_pred = _to_phys(pm_work - _CI95 * predictive_sd, transform, y_min, y_max)
+    hi_pred = _to_phys(pm_work + _CI95 * predictive_sd, transform, y_min, y_max)
+    lo_model = _to_phys(pm_work - _CI95 * rec_sigma, transform, y_min, y_max)
+    hi_model = _to_phys(pm_work + _CI95 * rec_sigma, transform, y_min, y_max)
+    return RecommendationND(
+        x=tuple(float(v) for v in candidates[rec_i]),
+        predicted_mean=_to_phys(pm_work, transform, y_min, y_max),
+        ci95=(hi_model - lo_model) / 2.0,
+        predictive_sd=predictive_sd,
+        ci95_predictive=(hi_pred - lo_pred) / 2.0,
+        predictive_interval_95=(lo_pred, hi_pred),
+    )
+
+
+def optimize_nd(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    bounds: Sequence[tuple[float, float]],
+    input_names: Sequence[str],
+    target_name: str,
+    direction: str = "maximize",
+    y_transform: str = _IDENTITY,
+    y_min: float | None = None,
+    y_max: float | None = None,
+    rel_noise: float = _REL_NOISE,
+    measured_noise: float | None = None,
+    xi: float = _XI,
+    n_candidates: int = _ND_CANDIDATES,
+    seed: int = 0,
+    objective_aggregation: str = "peak",
+    created_at: datetime | None = None,
+    with_reliability: bool = True,
+    unreliable: np.ndarray | None = None,
+    epsilon: float | None = None,
+    delta: float = _DEFAULT_DELTA,
+) -> OptimizationResultND:
+    """Run one round of Bayesian optimization over d parameters.
+
+    The d-dimensional sibling of `optimize()`. Every physics behaviour carries
+    over unchanged — the log-space fit, the physical clamp, the down-weighting
+    of observations the physics checks flagged, the noise-floor stopping gate,
+    the leave-one-out self-check and the reliability-aware exploration
+    fallback all work per-point and never depended on dimension.
+
+    Args:
+        x: Observed parameters, shape (n, d). Each column is normalized on its
+            own range, so axes in wildly different units (percent and kelvin)
+            are treated even-handedly.
+        y: Observed property values, shape (n,).
+        bounds: One (low, high) pair per input axis.
+        input_names: One label per axis; length fixes d.
+        input_names: One label per axis; length fixes d.
+        target_name: Label of the property being optimized.
+        direction: "maximize" (default) or "minimize".
+        y_transform: "identity" (default) or "log", as in `optimize()`.
+        y_min: Lower physical bound for the target, or None.
+        y_max: Upper physical bound for the target, or None.
+        rel_noise: Assumed relative measurement noise, used when
+            `measured_noise` is absent.
+        measured_noise: Observed repeatability in the target's own units;
+            beats `rel_noise` when supplied.
+        xi: Exploration sweetener in EI.
+        n_candidates: Sobol points the acquisition is maximised over. Rounded
+            up to the next power of two.
+        seed: RNG seed for the GP restarts and the Sobol scramble.
+        objective_aggregation: How each sample's `y` was reduced.
+        created_at: Timestamp for the frozen config; defaults to now (UTC).
+        with_reliability: Run the leave-one-out self-check (default True).
+        unreliable: Per-observation flags from the physics checks; flagged
+            points are down-weighted rather than dropped.
+        epsilon: Tolerance for the probabilistic regret bound.
+        delta: Risk level for that bound.
+
+    Returns:
+        An `OptimizationResultND`.
+
+    Raises:
+        OptimizationError: on shape mismatches, too few points for the
+            dimension, or a degenerate bound range.
+    """
+    x_obs, y, box, names = _prepare_nd_inputs(x, y, bounds, input_names, direction)
+    n, d = x_obs.shape
+
+    # Per-axis normalization: each search span maps to _SPAN_UNITS, so one set
+    # of length-scale bounds is meaningful for every axis whatever its units.
+    x_scales = (box[:, 1] - box[:, 0]) / _SPAN_UNITS
+    x_norm = (x_obs - box[:, 0]) / x_scales
+
+    transform = y_transform if y_transform in _TRANSFORMS else _IDENTITY
+    if transform == _LOG and bool(np.any(y <= 0)):
+        transform = _IDENTITY
+    y_work = _forward(y, transform)
+    noise_std = _noise_std(y_work, rel_noise, transform, measured_noise, y)
+
+    sign = 1.0 if direction == "maximize" else -1.0
+    y_int = sign * y_work
+
+    noise_scale, n_unreliable = _noise_scale(unreliable, y_int.size)
+    gp = _build_gp(y_int, noise_std, None, seed, noise_scale=noise_scale, n_dims=d)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        gp.fit(x_norm, y_int)
+
+    cand = _sobol_candidates(box, n_candidates, seed)
+    cand_norm = (cand - box[:, 0]) / x_scales
+    mean_int, std = gp.predict(cand_norm, return_std=True)
+
+    best_i = int(np.argmax(y_int))
+    ei = _expected_improvement(mean_int, std, float(y_int[best_i]), xi)
+
+    mean_work = sign * mean_int
+    cand_mean, cand_lower, cand_upper, _ = _physical_band(mean_work, std, transform, y_min, y_max)
+
+    ei_i = int(np.argmax(ei))
+    max_ei = float(ei[ei_i])
+    signal_exhausted = max_ei < noise_std
+
+    eps = float(epsilon) if epsilon is not None else noise_std
+    prob_within = _prob_within_epsilon(gp, cand_norm, x_norm[best_i], eps, seed)
+
+    reliability: ReliabilityReport | None = None
+    if with_reliability:
+        reliability = _assess_reliability(x_norm, y_int, noise_std=noise_std, seed=seed)
+
+    # Same reliability-aware rule as the 1-D path: a flat acquisition over
+    # data too sparse to trust means "go and look where you have not looked",
+    # not "we are done".
+    is_exploratory = reliability is not None and reliability.level == "exploratory"
+    converged = signal_exhausted and not is_exploratory
+    rec_i = int(np.argmax(std)) if (signal_exhausted and is_exploratory) else ei_i
+
+    recommendation = _recommend_nd(
+        cand,
+        rec_i,
+        mean_int,
+        std,
+        sign=sign,
+        noise_std=noise_std,
+        transform=transform,
+        y_min=y_min,
+        y_max=y_max,
+    )
+
+    config = BoConfigND(
+        objective=target_name,
+        direction=direction,
+        y_transform=transform,
+        objective_aggregation=objective_aggregation,
+        input_names=names,
+        bounds=tuple((float(a), float(b)) for a, b in box),
+        kernel="ConstantKernel * RBF(ARD)" if d > 1 else "ConstantKernel * RBF",
+        n_dims=d,
+        x_scales=tuple(float(v) for v in x_scales),
+        length_scales=_fitted_length_scales(gp),
+        length_scale_bounds=_LS_BOUNDS,
+        xi=xi,
+        rel_noise=rel_noise,
+        noise_std=noise_std,
+        n_observations=n,
+        n_candidates=int(cand.shape[0]),
+        seed=seed,
+        created_at=created_at if created_at is not None else datetime.now(UTC),
+    )
+
+    return OptimizationResultND(
+        input_names=names,
+        target_name=target_name,
+        candidates=tuple(tuple(float(v) for v in row) for row in cand),
+        cand_mean=tuple(cand_mean.tolist()),
+        cand_lower=tuple(cand_lower.tolist()),
+        cand_upper=tuple(cand_upper.tolist()),
+        cand_ei=tuple(ei.tolist()),
+        observed_x=tuple(tuple(float(v) for v in row) for row in x_obs),
+        observed_y=tuple(y.tolist()),
+        best_x=tuple(float(v) for v in x_obs[best_i]),
+        best_y=float(y[best_i]),
+        recommendation=recommendation,
+        max_ei=max_ei,
+        noise_threshold=noise_std,
         converged=converged,
         config=config,
         reliability=reliability,
