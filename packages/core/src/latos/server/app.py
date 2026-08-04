@@ -65,13 +65,22 @@ from latos.optimization import (
     freeze,
     length_scale_robustness,
     optimize,
+    recommendation_drift,
 )
 from latos.reporting.correlation import correlate
-from latos.server import edits, features, optimization_data, synthesis_store, transport_data
+from latos.server import (
+    edits,
+    features,
+    optimization_data,
+    synthesis_store,
+    transport_data,
+    trust_store,
+)
 from latos.server.edits import EditError
 from latos.server.imaging import render_to_png
 from latos.server.schemas import (
     AnalyzerResultOut,
+    CampaignDriftOut,
     CorrelationOut,
     CorrelationsOut,
     DatasetPoint,
@@ -79,6 +88,8 @@ from latos.server.schemas import (
     DeleteProjectResult,
     DetectPeaksRequest,
     DetectPeaksResult,
+    DistrustRequest,
+    DriftStepOut,
     FeatureCellOut,
     FeatureRowOut,
     FeatureTableOut,
@@ -261,7 +272,11 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
         return _project_summary(result)
 
     _register_review_routes(app, state)
+    # Registered before the /samples/{sample_id}/... routes so the literal
+    # /samples/distrusted path is matched ahead of the parameterized ones.
+    _register_trust_routes(app, state)
     _register_optimization_data_routes(app, state)
+    _register_prereg_routes(app, state)
     _register_fit_routes(app)
     _register_report_routes(app, state)
 
@@ -787,6 +802,38 @@ def _register_review_routes(app: FastAPI, state: ServerState) -> None:
         return _apply(state, lambda p: edits.remove_measurements(p, body.measurement_ids))
 
 
+def _register_trust_routes(app: FastAPI, state: ServerState) -> None:
+    """The researcher's own data-quality calls (HL1).
+
+    Separate from the physics checks on purpose: those are automatic and see
+    only the exported numbers. This is the half that knows the powder clumped
+    or the sonicator was skipped, which no score computed from the data can.
+    """
+
+    @app.get("/samples/distrusted")
+    def get_distrusted() -> list[str]:
+        """Sample ids the researcher has marked untrusted, for this project."""
+        if state.root is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        return sorted(trust_store.load_distrusted(state.root))
+
+    @app.post("/samples/{sample_id}/distrust")
+    def set_distrust(sample_id: str, body: DistrustRequest) -> list[str]:
+        """Record the researcher's own quality call on one sample.
+
+        A distrusted sample is fitted with larger assumed noise, exactly like
+        one a physics check rejected. It is never removed from the dataset:
+        the model still sees it, it just stops chasing it. Silently dropping
+        data would leave no trace of the judgement.
+        """
+        if state.result is None or state.root is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        known = {s.id for s in state.result.project.samples}
+        if sample_id not in known:
+            raise HTTPException(status_code=404, detail="Unknown sample")
+        return sorted(trust_store.set_distrusted(state.root, sample_id, body.distrusted))
+
+
 def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None:
     """Synthesis-parameter storage + the (x, y) dataset assembly (BO2)."""
 
@@ -885,6 +932,8 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
                 y_transform=asm.y_transform,
                 y_min=asm.y_min,
                 y_max=asm.y_max,
+                unreliable=asm.unreliable,
+                measured_noise=asm.measured_noise,
             )
         except OptimizationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -910,7 +959,23 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             noise_threshold=res.noise_threshold,
             converged=res.converged,
             verdict=_verdict(res),
+            epsilon=res.epsilon,
+            delta=res.delta,
+            prob_within_epsilon=res.prob_within_epsilon,
+            epsilon_delta_met=res.epsilon_delta_met,
+            n_unreliable=res.n_unreliable,
+            n_distrusted=asm.n_distrusted,
+            noise_measured=res.noise_measured,
         )
+
+
+def _register_prereg_routes(app: FastAPI, state: ServerState) -> None:
+    """The closed loop: freeze a prediction, list the record, score the outcome.
+
+    Split from the run/dataset routes because these all read and write the
+    pre-registration files on disk rather than the live model — including
+    `/optimize/drift`, which judges convergence purely from that history.
+    """
 
     @app.post("/optimize/freeze")
     def optimize_freeze(body: OptimizeRunRequest) -> FreezeResult:
@@ -934,6 +999,17 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
         if state.root is None:
             raise HTTPException(status_code=404, detail="No project is open")
         return [_prereg_summary(e) for e in optimization.list_preregistrations(state.root)]
+
+    @app.get("/optimize/drift")
+    def optimize_drift() -> list[CampaignDriftOut]:
+        """How far the recommendation has moved between successive freezes.
+
+        A convergence check taken from outside the model. Everything in
+        `/optimize/run` that says "done" is the model judging itself, so it
+        all fails together when the model is wrong. This reads only the
+        frozen records on disk, which no later run can retune.
+        """
+        return _campaign_drift(state)
 
     @app.post("/optimize/validate")
     def validate_prereg(body: ValidateOutcomeRequest) -> OutcomeVerdictOut:
@@ -962,6 +1038,8 @@ def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> Free
             y_transform=asm.y_transform,
             y_min=asm.y_min,
             y_max=asm.y_max,
+            unreliable=asm.unreliable,
+            measured_noise=asm.measured_noise,
         )
         robustness = length_scale_robustness(
             asm.xs,
@@ -979,7 +1057,7 @@ def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> Free
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     stamp = res.config.created_at.strftime("%Y%m%dT%H%M%SZ")
-    out_path = state.root / ".latos" / "prereg" / f"prereg_{stamp}.json"
+    out_path = _unused_prereg_path(state.root / ".latos" / "prereg", stamp)
     freeze(res, out_path, prior_best=res.best_y, robustness=robustness)
     return FreezeResult(
         path=str(out_path),
@@ -990,6 +1068,22 @@ def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> Free
         reliability_level=res.reliability.level if res.reliability else "unknown",
         reliability_note=res.reliability.note if res.reliability else "",
     )
+
+
+def _unused_prereg_path(directory: Path, stamp: str) -> Path:
+    """`prereg_<stamp>.json`, suffixed if that second already has a record.
+
+    The stamp resolves to one second, so two freezes in the same second would
+    land on the same filename. A pre-registration is meant to be an immutable
+    commitment, and campaign drift reads the sequence of them, so overwriting
+    one would destroy exactly the history the record exists to preserve.
+    """
+    candidate = directory / f"prereg_{stamp}.json"
+    suffix = 2
+    while candidate.exists():
+        candidate = directory / f"prereg_{stamp}_{suffix}.json"
+        suffix += 1
+    return candidate
 
 
 @dataclass(frozen=True)
@@ -1003,6 +1097,11 @@ class _AssembledOptimization:
     target_label: str
     direction: str  # what the engine runs: "maximize" | "minimize"
     quality_flags: list[QualityFlagOut]  # untrustworthy points (warn, don't block)
+    unreliable: np.ndarray  # per-point mask matching xs/ys, True where down-weighted
+    n_distrusted: int  # how much of `unreliable` came from the researcher, not physics
+    # Repeatability pooled from repeat measurements, in the target's units,
+    # or None when the technique records one value per sample.
+    measured_noise: float | None
     # Physics layer: the fit space + physical clamp bounds for the target.
     y_transform: str  # "identity" | "log"
     y_min: float | None
@@ -1089,6 +1188,18 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
             y_min, y_max = prop.min_value, prop.max_value
 
     bounds = body.bounds or (float(xs.min()), float(xs.max()))
+    # One boolean per point: is there any reason not to fit this sample at full
+    # confidence? Two independent sources feed it, and neither drops a point.
+    #   - a physics check rejected the value (automatic, sees only the numbers)
+    #   - the researcher marked the sample untrusted (they were in the room)
+    # The second exists because the first cannot be complete: a score computed
+    # from the data cannot know the powder clumped or the sonicator was skipped.
+    flagged_names = {fl.sample_name for fl in flags}
+    distrusted_ids = trust_store.load_distrusted(state.root)
+    distrusted_mask = np.array([r.sample_id in distrusted_ids for r in rows], dtype=bool)
+    unreliable = (
+        np.array([r.sample_name in flagged_names for r in rows], dtype=bool) | distrusted_mask
+    )
     return _AssembledOptimization(
         points=points,
         xs=xs,
@@ -1097,6 +1208,9 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
         target_label=target_label,
         direction=direction,
         quality_flags=flags,
+        unreliable=unreliable,
+        n_distrusted=int(distrusted_mask.sum()),
+        measured_noise=optimization_data.measured_noise(rows),
         y_transform=y_transform,
         y_min=y_min,
         y_max=y_max,
@@ -1166,6 +1280,39 @@ def _validate_prereg(state: ServerState, body: ValidateOutcomeRequest) -> Outcom
     return _verdict_out(verdict)
 
 
+def _campaign_drift(state: ServerState) -> list[CampaignDriftOut]:
+    """Read the frozen records off disk and measure the movement between them."""
+    if state.root is None:
+        raise HTTPException(status_code=404, detail="No project is open")
+    entries = optimization.list_preregistrations(state.root)
+    return [_drift_out(d) for d in recommendation_drift(entries)]
+
+
+def _drift_out(drift: optimization.CampaignDrift) -> CampaignDriftOut:
+    """Map a core CampaignDrift to the API shape."""
+    return CampaignDriftOut(
+        input_variable=drift.input_variable,
+        property_name=drift.property_name,
+        direction=drift.direction,
+        n_freezes=drift.n_freezes,
+        steps=[
+            DriftStepOut(
+                from_created_at=s.from_created_at,
+                to_created_at=s.to_created_at,
+                from_x=s.from_x,
+                to_x=s.to_x,
+                distance=s.distance,
+                fraction_of_span=s.fraction_of_span,
+            )
+            for s in drift.steps
+        ],
+        search_span=drift.search_span,
+        latest_fraction=drift.latest_fraction,
+        settled=drift.settled,
+        note=drift.note,
+    )
+
+
 def _prereg_summary(entry: optimization.PreregEntry) -> PreregSummary:
     """Map a core PreregEntry to the API shape."""
     return PreregSummary(
@@ -1198,6 +1345,7 @@ def _verdict_out(verdict: optimization.OutcomeVerdict) -> OutcomeVerdictOut:
         relative_error=verdict.relative_error,
         summary=verdict.summary,
         validated_at=verdict.validated_at,
+        stopping_claim_held=verdict.stopping_claim_held,
     )
 
 
@@ -1221,6 +1369,11 @@ def _verdict_out_from_dict(data: dict[str, object]) -> OutcomeVerdictOut:
         ),
         summary=str(data.get("summary", "")),
         validated_at=str(data.get("validated_at", "")),
+        stopping_claim_held=(
+            bool(data["stopping_claim_held"])
+            if data.get("stopping_claim_held") is not None
+            else None
+        ),
     )
 
 
@@ -1257,15 +1410,32 @@ def _verdict(res: OptimizationResult) -> str:
     # Not converged. If the improvement signal is already within measurement
     # noise but the model is still exploratory, the honest verdict is "too few
     # points to confirm an optimum" — not a promise of improvement.
-    exploratory = res.reliability is not None and res.reliability.level == "exploratory"
-    if res.max_ei < res.noise_threshold and exploratory:
+    # Bind the report before testing it: this branch quotes the observation
+    # count, so it must only be reachable when a report actually exists.
+    reliability = res.reliability
+    if (
+        res.max_ei < res.noise_threshold
+        and reliability is not None
+        and reliability.level == "exploratory"
+    ):
+        # Diminishing returns: lead with "you can stop" (the resource-saving
+        # signal), then offer ONE optional confirmation. Do not imply a long
+        # campaign — the tool's job is the fewest experiments to a good answer.
+        # Name where the noise came from. "The gain is below the noise" is the
+        # entire basis for stopping, so whether that floor was measured from
+        # repeats or assumed as a percentage changes what the sentence is worth.
+        noise_origin = (
+            "measured repeatability" if res.noise_measured else "assumed measurement noise"
+        )
         return (
-            f"Not enough data to confirm an optimum: the improvement signal is "
-            f"within measurement noise, but with only "
-            f"{res.reliability.n_observations} points the model is still exploratory. "
-            f"The most informative next experiment is the least-sampled composition: "
-            f"{res.input_name} = {rec.x:.3g} (predicted {res.target_name} "
-            f"{rec.predicted_mean:.2f} +/- {rec.ci95_predictive:.2f}, 95% predictive)."
+            f"Likely done. The best expected improvement ({res.max_ei:.2g}) is already "
+            f"below the {noise_origin} ({res.noise_threshold:.3g}), so another experiment "
+            f"is unlikely to beat the current {best_word} ({res.best_y:.3f} at "
+            f"{res.input_name} = {res.best_x:g}). With only {reliability.n_observations} "
+            f"measured points this is not yet certified; for more confidence the single most "
+            f"informative check is {res.input_name} = {rec.x:.3g} (predicted {res.target_name} "
+            f"{rec.predicted_mean:.2f} +/- {rec.ci95_predictive:.2f}, 95% predictive). "
+            f"Otherwise you can stop here."
         )
     return (
         f"Recommended next experiment: {res.input_name} = {rec.x:.3g} "

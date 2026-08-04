@@ -482,3 +482,88 @@ class TestPhysicsLayer:
         assert r.config.y_transform == "identity"
         # Sparse + exhausted -> explores the largest gap (the 3-5 interval).
         assert 3.0 <= r.recommendation.x <= 4.5
+
+
+class TestQualityAwareFit:
+    """Physics-rejected measurements are down-weighted, never silently used."""
+
+    @staticmethod
+    def _data():
+        import numpy as _np
+
+        x = _np.array([40.169, 44.946, 50.025, 54.956])
+        y = _np.array([71.6667, 57.0, 36.6667, 57.0])
+        return x, y
+
+    @staticmethod
+    def _run(x, y, **kw):
+        from latos.optimization.engine import optimize
+
+        return optimize(
+            x,
+            y,
+            bounds=(float(x.min()), float(x.max())),
+            input_name="particle_wt_pct",
+            target_name="peak_force_n",
+            direction="minimize",
+            **kw,
+        )
+
+    def test_no_flags_matches_baseline(self):
+        """An all-clear mask must not perturb the fit at all."""
+        import numpy as _np
+
+        x, y = self._data()
+        base = self._run(x, y)
+        clean = self._run(x, y, unreliable=_np.zeros(4, dtype=bool))
+        assert clean.n_unreliable == 0
+        assert clean.recommendation.x == base.recommendation.x
+        assert clean.max_ei == base.max_ei
+
+    def test_flagging_the_best_point_lowers_confidence(self):
+        """Distrusting the incumbent must reduce belief that we are done."""
+        import numpy as _np
+
+        x, y = self._data()
+        base = self._run(x, y)
+        flagged = self._run(x, y, unreliable=_np.array([False, False, True, False]))
+        assert flagged.n_unreliable == 1
+        assert flagged.prob_within_epsilon < base.prob_within_epsilon
+
+    def test_mask_length_is_validated(self):
+        import numpy as _np
+        import pytest
+
+        x, y = self._data()
+        with pytest.raises(ValueError, match="one entry per observation"):
+            self._run(x, y, unreliable=_np.zeros(3, dtype=bool))
+
+
+class TestProbabilisticRegretBound:
+    """P(best measured point is within epsilon of the optimum)."""
+
+    @staticmethod
+    def _run(**kw):
+        import numpy as _np
+
+        from latos.optimization.engine import optimize
+
+        x = _np.array([0.0, 1.0, 3.0, 5.0])
+        y = _np.array([0.607, 0.373, 0.985, 0.496])
+        return optimize(x, y, bounds=(0, 5), input_name="d", target_name="zt", **kw)
+
+    def test_probability_is_a_probability(self):
+        r = self._run()
+        assert 0.0 <= r.prob_within_epsilon <= 1.0
+        assert r.epsilon == r.noise_threshold  # default tolerance is the noise floor
+        assert r.epsilon_delta_met == (r.prob_within_epsilon >= 1.0 - r.delta)
+
+    def test_deterministic_for_a_fixed_seed(self):
+        assert self._run().prob_within_epsilon == self._run().prob_within_epsilon
+
+    def test_wider_tolerance_is_never_less_likely(self):
+        """P(within eps) is monotonic in eps."""
+        tight = self._run(epsilon=0.01).prob_within_epsilon
+        loose = self._run(epsilon=10.0).prob_within_epsilon
+        assert loose >= tight
+        assert loose == 1.0  # a huge tolerance is certain

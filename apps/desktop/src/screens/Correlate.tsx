@@ -18,6 +18,7 @@ import {
 } from "../lib/api";
 import { axisLabel } from "../lib/labels";
 import { AnalysisLoader } from "../components/AnalysisLoader";
+import { ChartFrame } from "../components/ChartFrame";
 
 const FORMATS = ["svg", "pdf", "png"] as const;
 type Fmt = (typeof FORMATS)[number];
@@ -236,11 +237,13 @@ export function Correlate({ onBack }: { onBack: () => void }) {
                       clear
                     </button>
                   </div>
-                  <img
-                    src={figureUrl({ kind: "scatter", style, fmt: "png", x: selected.x, y: selected.y })}
-                    alt={`${selected.x} vs ${selected.y}`}
-                    className="mx-auto max-h-80 bg-white"
-                  />
+                  <ChartFrame basename="latos-correlation" label="correlation figure">
+                    <img
+                      src={figureUrl({ kind: "scatter", style, fmt: "png", x: selected.x, y: selected.y })}
+                      alt={`${selected.x} vs ${selected.y}`}
+                      className="mx-auto max-h-80 bg-white"
+                    />
+                  </ChartFrame>
                 </section>
               )}
 

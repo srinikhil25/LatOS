@@ -268,6 +268,24 @@ class OptimizeResult(BaseModel):
     noise_threshold: float
     converged: bool
     verdict: str  # plain-language summary for the UI
+    # Probabilistic regret bound (Wilson, NeurIPS 2024): the chance that the
+    # best measured point is already within `epsilon` of the true optimum,
+    # *under this model*. Read it next to `reliability_level`, which says how
+    # far the model itself can be trusted.
+    epsilon: float = 0.0
+    delta: float = 0.1
+    prob_within_epsilon: float = 0.0
+    epsilon_delta_met: bool = False
+    # Observations down-weighted in the fit because a physics check rejected
+    # them (they are never silently dropped).
+    n_unreliable: int = 0
+    # How many of those the researcher marked by hand, rather than a physics
+    # check. Shown back so a ticked box visibly changes the run.
+    n_distrusted: int = 0
+    # Whether `noise_threshold` is the observed repeatability of repeat
+    # measurements, or the assumed relative noise. The verdict is "the expected
+    # gain is below the noise", so which one it is changes what that means.
+    noise_measured: bool = False
 
 
 class FreezeResult(BaseModel):
@@ -310,6 +328,10 @@ class OutcomeVerdictOut(BaseModel):
     relative_error: float | None
     summary: str
     validated_at: str
+    # Whether the frozen "we are already within epsilon of the optimum" claim
+    # survived this measurement. None for records frozen before the claim
+    # existed, so an older pre-registration still validates cleanly.
+    stopping_claim_held: bool | None = None
 
 
 class PreregSummary(BaseModel):
@@ -337,6 +359,50 @@ class ValidateOutcomeRequest(BaseModel):
 
     prereg_path: str
     measured_value: float
+
+
+class DriftStepOut(BaseModel):
+    """One move of the recommendation between two consecutive freezes."""
+
+    from_created_at: str
+    to_created_at: str
+    from_x: float
+    to_x: float
+    distance: float  # in the input variable's own units
+    fraction_of_span: float  # the same move, relative to the search range
+
+
+class CampaignDriftOut(BaseModel):
+    """GET /optimize/drift — is the campaign still changing its mind?
+
+    An out-of-model convergence check (Ishiyama et al., NPG Asia Mater. 16,
+    17, 2024): the distance between successive frozen recommendations. Every
+    other stopping signal asks the model about itself, so they all fail
+    together when the model is wrong. This reads the records on disk instead.
+
+    `settled` is None with fewer than two freezes — a single point cannot
+    show movement.
+    """
+
+    input_variable: str
+    property_name: str
+    direction: str
+    n_freezes: int
+    steps: list[DriftStepOut]
+    search_span: float | None = None
+    latest_fraction: float | None = None
+    settled: bool | None = None
+    note: str = ""
+
+
+class DistrustRequest(BaseModel):
+    """POST /samples/{sample_id}/distrust — the researcher's own quality call.
+
+    Marks a sample as not to be trusted. It is down-weighted in the fit, the
+    same treatment a physics-flagged point gets, and never deleted.
+    """
+
+    distrusted: bool
 
 
 class MeasurementSummary(BaseModel):

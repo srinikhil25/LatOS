@@ -12,6 +12,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   freezeRecommendation,
+  getCampaignDrift,
+  getDistrusted,
   getOptimizeInputs,
   getOptimizeTargets,
   getParameters,
@@ -19,8 +21,10 @@ import {
   getSpbCheck,
   listPreregistrations,
   runOptimize,
+  setDistrusted,
   setSampleParameters,
   validateOutcome,
+  type CampaignDrift,
   type FreezeResult,
   type InputVariableInfo,
   type Objective,
@@ -32,6 +36,7 @@ import {
   type SpbCheckResult,
 } from "../lib/api";
 import { OptimizeChart } from "../components/OptimizeChart";
+import { ChartFrame } from "../components/ChartFrame";
 import { AnalysisLoader } from "../components/AnalysisLoader";
 
 /** "etching_time_h" → "etching time h" for on-screen labels. */
@@ -88,15 +93,31 @@ export function Optimize({ onBack }: { onBack: () => void }) {
   const [frozen, setFrozen] = useState<FreezeResult | null>(null);
   const [freezing, setFreezing] = useState(false);
   const [preregs, setPreregs] = useState<PreregSummary[]>([]);
+  const [drift, setDrift] = useState<CampaignDrift[]>([]);
   const [measuredInputs, setMeasuredInputs] = useState<Record<string, string>>({});
   const [validatingPath, setValidatingPath] = useState<string | null>(null);
   const [spb, setSpb] = useState<SpbCheckResult | null>(null);
+  const [distrusted, setDistrustedIds] = useState<Set<string>>(new Set());
 
   const loadPreregs = useCallback(() => {
     listPreregistrations()
       .then(setPreregs)
       .catch(() => setPreregs([]));
+    // Drift reads the same frozen records, so it refreshes with them.
+    getCampaignDrift()
+      .then(setDrift)
+      .catch(() => setDrift([]));
   }, []);
+
+  /** Toggle the researcher's quality call, then re-run so the effect is visible. */
+  const toggleDistrust = useCallback(
+    (sampleId: string, next: boolean) => {
+      setDistrusted(sampleId, next)
+        .then((ids) => setDistrustedIds(new Set(ids)))
+        .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+    },
+    [],
+  );
 
   // Every available input axis: synthesis parameters + measured features.
   const knownVars = useMemo(
@@ -157,6 +178,9 @@ export function Optimize({ onBack }: { onBack: () => void }) {
     getSpbCheck()
       .then(setSpb)
       .catch(() => setSpb(null));
+    getDistrusted()
+      .then((ids) => setDistrustedIds(new Set(ids)))
+      .catch(() => setDistrustedIds(new Set()));
   }, [valuesFor, loadPreregs]);
 
   // Switching (or naming) the variable reloads its stored values into the table.
@@ -249,6 +273,10 @@ export function Optimize({ onBack }: { onBack: () => void }) {
 
   const filledCount = Object.values(inputs).filter((v) => v.trim() !== "").length;
   const varLabel = humanize(inputVar);
+  // How many down-weighted points came from the researcher rather than the
+  // physics checks. Read defensively: the sidecar is a separate process and an
+  // older one omits the field, which must not turn into "undefined" on screen.
+  const distrustedCount = Number.isFinite(result?.n_distrusted) ? result!.n_distrusted : 0;
 
   return (
     <div className="flex h-full flex-col">
@@ -354,7 +382,9 @@ export function Optimize({ onBack }: { onBack: () => void }) {
               )}
               <div
                 className={`rounded-lg border px-5 py-4 text-sm ${
-                  result.converged
+                  result.converged ||
+                  (result.max_ei < result.noise_threshold &&
+                    result.reliability_level === "exploratory")
                     ? "border-[color:var(--latos-tech-eds)] bg-[color-mix(in_srgb,var(--latos-tech-eds)_10%,transparent)]"
                     : "border-accent bg-[color-mix(in_srgb,var(--latos-accent)_8%,transparent)]"
                 }`}
@@ -365,7 +395,7 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                       ? "✓ Optimum reached"
                       : result.max_ei < result.noise_threshold &&
                           result.reliability_level === "exploratory"
-                        ? "🔍 Explore the biggest gap next"
+                        ? "◑ Likely done — one optional check"
                         : "↑ Improvement still possible"}
                   </span>
                   {result.reliability_level !== "unknown" && (
@@ -380,6 +410,47 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                 <div className="mt-1 text-secondary" data-selectable>
                   {result.verdict}
                 </div>
+                {/* How likely we are already done, as a number rather than a
+                    yes/no. Stated as "under this model" on purpose: the
+                    reliability grade beside it says how far to trust that.
+
+                    Guarded because the sidecar is a separate process: in
+                    development the UI hot-reloads while the Python server does
+                    not, so a newer screen can be handed an older payload. A
+                    missing field should cost this one line, not the screen. */}
+                {Number.isFinite(result.epsilon) &&
+                  Number.isFinite(result.prob_within_epsilon) && (
+                    <div className="mt-1.5 text-secondary" data-selectable>
+                      Under this model, the best measured point is within{" "}
+                      <span className="font-medium text-primary">
+                        {fmtVal(result.epsilon)}
+                      </span>{" "}
+                      of the optimum with probability{" "}
+                      <span className="font-medium text-primary">
+                        {(result.prob_within_epsilon * 100).toFixed(0)}%
+                      </span>
+                      {result.epsilon_delta_met
+                        ? ` (meets the ${((1 - result.delta) * 100).toFixed(0)}% bar).`
+                        : ` (below the ${((1 - result.delta) * 100).toFixed(0)}% bar).`}
+                    </div>
+                  )}
+                {result.n_unreliable > 0 && (
+                  <div className="mt-1 text-xs text-secondary" data-selectable>
+                    {result.n_unreliable} measurement
+                    {result.n_unreliable === 1 ? " was" : "s were"} down-weighted in the fit
+                    rather than dropped
+                    {/* Two independent sources feed this: the physics checks and
+                        the researcher's own call. Naming which is which keeps a
+                        ticked box from looking like the tool's own verdict.
+                        Guarded like the epsilon line — an older sidecar omits
+                        the field entirely. */}
+                    {distrustedCount === 0
+                      ? ` because a physics check rejected ${result.n_unreliable === 1 ? "it" : "them"}.`
+                      : distrustedCount >= result.n_unreliable
+                        ? ` because you marked ${result.n_unreliable === 1 ? "it" : "them"} untrusted.`
+                        : `; ${distrustedCount} because you marked ${distrustedCount === 1 ? "it" : "them"} untrusted, the rest by a physics check.`}
+                  </div>
+                )}
                 {result.reliability_note && (
                   <div className="mt-1.5 text-xs text-secondary" data-selectable>
                     {result.reliability_note}
@@ -387,7 +458,9 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                 )}
               </div>
               <div className="rounded-lg border border-edge bg-surface p-3">
-                <OptimizeChart result={result} />
+                <ChartFrame basename="latos-optimization" label="optimization figure">
+                  <OptimizeChart result={result} />
+                </ChartFrame>
               </div>
 
               <div className="flex flex-wrap items-center gap-3">
@@ -567,6 +640,12 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                   <th className="py-2 font-medium">Sample</th>
                   <th className="py-2 font-medium">Measurements</th>
                   <th className="py-2 font-medium">{varLabel}</th>
+                  <th
+                    className="py-2 font-medium"
+                    title="Tick a sample you have reason to doubt. It stays in the dataset, fitted with larger assumed noise."
+                  >
+                    Don&rsquo;t trust
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -591,10 +670,28 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                         className="w-28 rounded-md border border-edge bg-surface px-2 py-1 outline-none focus:border-accent disabled:opacity-60"
                       />
                     </td>
+                    <td className="py-2">
+                      <input
+                        type="checkbox"
+                        checked={distrusted.has(s.id)}
+                        onChange={(e) => toggleDistrust(s.id, e.target.checked)}
+                        title={`Down-weight ${s.name} in the fit — it is not removed`}
+                        className="h-4 w-4 accent-[color:var(--latos-severity-warning)]"
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            <p className="text-xs text-secondary">
+              Tick <span className="font-medium">Don&rsquo;t trust</span> for a sample you
+              have reason to doubt — the powder clumped, the sonicator was skipped, the
+              sensor was knocked. Latos&rsquo;s physics checks only see the exported
+              numbers, so they cannot know this. A ticked sample is{" "}
+              <span className="font-medium">not deleted</span>: it is fitted with larger
+              assumed noise, so the model still sees it but stops chasing it. Re-run to
+              apply.
+            </p>
           </section>
 
           {/* Loop-closer: frozen predictions and their validated outcomes */}
@@ -608,6 +705,47 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                 recommended sample — how the real result scored against it. Entering an
                 outcome writes it beside the prediction, so the closed loop stays auditable.
               </p>
+
+              {/* Convergence read from OUTSIDE the model. Everything in the
+                  verdict above is the model judging its own fit, so it all
+                  fails together when the fit is wrong. This compares the
+                  frozen records on disk, which no later run can retune. */}
+              {drift
+                .filter((d) => d.n_freezes > 1)
+                .map((d) => (
+                  <div
+                    key={`${d.property_name}:${d.input_variable}:${d.direction}`}
+                    className={`rounded-lg border px-5 py-4 text-sm ${
+                      d.settled
+                        ? "border-[color:var(--latos-tech-eds)] bg-[color-mix(in_srgb,var(--latos-tech-eds)_10%,transparent)]"
+                        : "border-edge bg-surface"
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">
+                        {d.settled === true
+                          ? "✓ Recommendation has stopped moving"
+                          : "↔ Recommendation is still moving"}
+                      </span>
+                      <span className="text-secondary">
+                        · {humanize(d.input_variable)} → {d.property_name} ·{" "}
+                        {d.n_freezes} freezes
+                      </span>
+                    </div>
+                    <div className="mt-1 text-secondary" data-selectable>
+                      {d.note}
+                    </div>
+                    <div className="mt-1 text-xs text-secondary" data-selectable>
+                      Moves:{" "}
+                      {d.steps
+                        .map(
+                          (s) =>
+                            `${fmtVal(s.from_x)} → ${fmtVal(s.to_x)} (${fmtVal(s.distance)})`,
+                        )
+                        .join(" · ")}
+                    </div>
+                  </div>
+                ))}
               {preregs.map((pr) => (
                 <div
                   key={pr.path}

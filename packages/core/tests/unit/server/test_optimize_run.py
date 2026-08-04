@@ -97,6 +97,17 @@ def _confirmed_te_project(root: Path) -> tuple[Project, dict[str, float]]:
 
 
 def _client(root: Path, *, confirmed: bool = True) -> TestClient:
+    client = _client_with_ids(root, confirmed=confirmed)[0]
+    return client
+
+
+def _client_with_ids(root: Path, *, confirmed: bool = True) -> tuple[TestClient, dict[str, str]]:
+    """Same fixture, plus {sample name: id} for tests that address a sample."""
+    client, project = _build_client(root, confirmed=confirmed)
+    return client, {s.canonical_name: s.id for s in project.samples}
+
+
+def _build_client(root: Path, *, confirmed: bool = True) -> tuple[TestClient, Project]:
     project, doping_by_id = _confirmed_te_project(root)
     if not confirmed:
         from dataclasses import replace
@@ -109,7 +120,7 @@ def _client(root: Path, *, confirmed: bool = True) -> TestClient:
     state: ServerState = app.state.latos  # type: ignore[union-attr]
     state.root = root
     state.result = IngestionResult(project=project, outcomes=())
-    return TestClient(app)
+    return TestClient(app), project
 
 
 def _run(client: TestClient) -> dict:
@@ -187,6 +198,23 @@ class TestFreeze:
             json={"input_variable": "doping_pct", "target_property": "zt"},
         )
         assert resp.status_code == 409
+
+    def test_two_freezes_in_one_second_do_not_overwrite(self, tmp_path: Path):
+        # The filename stamp resolves to one second. A pre-registration is an
+        # immutable commitment and campaign drift reads the sequence of them,
+        # so a collision must add a record, never replace one.
+        client = _client(tmp_path)
+        first = client.post(
+            "/optimize/freeze",
+            json={"input_variable": "doping_pct", "target_property": "zt"},
+        ).json()["path"]
+        second = client.post(
+            "/optimize/freeze",
+            json={"input_variable": "doping_pct", "target_property": "zt"},
+        ).json()["path"]
+        assert first != second
+        assert Path(first).exists() and Path(second).exists()
+        assert len(client.get("/optimize/prereg").json()) == 2
 
 
 # ─── Objective modes + input-variable listing (OP2/OP3) ─────────────
@@ -352,3 +380,182 @@ class TestQualityFlagsEndpoint:
         # The TE fixture has no Hall data, so a zt run is never flagged.
         body = _run(_client(tmp_path))
         assert body["quality_flags"] == []
+
+
+class TestVerdictWithoutReliability:
+    """The verdict must not assume a reliability report exists.
+
+    `OptimizationResult.reliability` is None whenever the caller skipped the
+    assessment (the robustness sweep passes `with_reliability=False`). The
+    "likely done" branch quotes the observation count, so reaching it without
+    a report used to raise AttributeError.
+    """
+
+    @staticmethod
+    def _result_without_reliability():
+        import numpy as np
+
+        from latos.optimization.engine import optimize
+
+        # Flat data: the improvement signal is exhausted immediately, which is
+        # the branch that reads the observation count.
+        x = np.array([0.0, 1.0, 2.0, 3.0])
+        y = np.array([1.0, 1.0, 1.0, 1.0])
+        return optimize(
+            x,
+            y,
+            bounds=(0.0, 3.0),
+            input_name="d",
+            target_name="zt",
+            with_reliability=False,
+        )
+
+    def test_verdict_is_a_sentence_not_a_crash(self):
+        from latos.server.app import _verdict
+
+        res = self._result_without_reliability()
+        assert res.reliability is None
+        text = _verdict(res)
+        assert isinstance(text, str)
+        assert text  # non-empty
+
+
+# ─── Researcher distrust flag (HL1) ─────────────────────────────────
+
+
+class TestDistrustFlag:
+    """The human half of the quality signal.
+
+    The physics checks only see the exported numbers, so they cannot know the
+    powder clumped or the sonicator was skipped. This lets the researcher say
+    so, and the sample is down-weighted rather than deleted.
+    """
+
+    def test_empty_before_anything_is_marked(self, tmp_path: Path):
+        client = _client(tmp_path)
+        assert client.get("/samples/distrusted").json() == []
+
+    def test_mark_then_list(self, tmp_path: Path):
+        client, ids = _client_with_ids(tmp_path)
+        resp = client.post(f"/samples/{ids['CSCBI-1']}/distrust", json={"distrusted": True})
+        assert resp.status_code == 200
+        assert resp.json() == [ids["CSCBI-1"]]
+        assert client.get("/samples/distrusted").json() == [ids["CSCBI-1"]]
+
+    def test_unmark_clears_it(self, tmp_path: Path):
+        client, ids = _client_with_ids(tmp_path)
+        client.post(f"/samples/{ids['CSCBI-1']}/distrust", json={"distrusted": True})
+        client.post(f"/samples/{ids['CSCBI-1']}/distrust", json={"distrusted": False})
+        assert client.get("/samples/distrusted").json() == []
+
+    def test_unknown_sample_is_404(self, tmp_path: Path):
+        client = _client(tmp_path)
+        resp = client.post("/samples/not-a-sample/distrust", json={"distrusted": True})
+        assert resp.status_code == 404
+
+    def test_run_reports_the_count_back(self, tmp_path: Path):
+        client, ids = _client_with_ids(tmp_path)
+        assert _run(client)["n_distrusted"] == 0
+        client.post(f"/samples/{ids['CSCBI-1']}/distrust", json={"distrusted": True})
+        body = _run(client)
+        assert body["n_distrusted"] == 1
+        assert body["n_unreliable"] == 1  # it feeds the same down-weighting mask
+
+    def test_distrusted_sample_is_kept_not_dropped(self, tmp_path: Path):
+        # The whole design rests on this: a flagged point stays in the dataset
+        # and is fitted with larger assumed noise. Silently removing data would
+        # leave no trace of the judgement.
+        client, ids = _client_with_ids(tmp_path)
+        client.post(f"/samples/{ids['CSCBI-3']}/distrust", json={"distrusted": True})
+        body = _run(client)
+        assert len(body["points"]) == 4
+        assert {p["sample_name"] for p in body["points"]} == {
+            "CS",
+            "CSCBI-1",
+            "CSCBI-3",
+            "CSCBI-5",
+        }
+
+    def test_distrusting_the_best_point_changes_the_fit(self, tmp_path: Path):
+        # CSCBI-3 (zt 0.967) is the peak. Down-weighting it must visibly move
+        # the posterior, otherwise the flag is decorative.
+        client, ids = _client_with_ids(tmp_path)
+        before = _run(client)
+        client.post(f"/samples/{ids['CSCBI-3']}/distrust", json={"distrusted": True})
+        after = _run(client)
+        assert before["grid_mean"] != after["grid_mean"]
+        # best_x/best_y report the measured data, which has not changed.
+        assert after["best_x"] == 3.0
+        assert after["best_y"] == 0.967
+
+    def test_flag_survives_a_new_client_on_the_same_project(self, tmp_path: Path):
+        client, ids = _client_with_ids(tmp_path)
+        client.post(f"/samples/{ids['CS']}/distrust", json={"distrusted": True})
+        # A fresh app over the same root re-reads the sidecar from disk.
+        again = _client(tmp_path)
+        assert again.get("/samples/distrusted").json() == [ids["CS"]]
+
+
+# ─── Recommendation drift across freezes (DR1) ──────────────────────
+
+
+class TestCampaignDrift:
+    """Convergence measured from outside the model, off the frozen records."""
+
+    def _freeze(self, client: TestClient) -> str:
+        return client.post(
+            "/optimize/freeze",
+            json={"input_variable": "doping_pct", "target_property": "zt"},
+        ).json()["path"]
+
+    def test_empty_before_any_freeze(self, tmp_path: Path):
+        client = _client(tmp_path)
+        assert client.get("/optimize/drift").json() == []
+
+    def test_one_freeze_reports_unknown_not_settled(self, tmp_path: Path):
+        client = _client(tmp_path)
+        self._freeze(client)
+        (d,) = client.get("/optimize/drift").json()
+        assert d["n_freezes"] == 1
+        assert d["settled"] is None
+        assert d["steps"] == []
+        assert d["note"]
+
+    def test_two_identical_freezes_are_settled(self, tmp_path: Path):
+        # Same data, same seed -> the same recommendation, so the campaign is
+        # provably pointing at the same place twice.
+        client = _client(tmp_path)
+        self._freeze(client)
+        self._freeze(client)
+        (d,) = client.get("/optimize/drift").json()
+        assert d["n_freezes"] == 2
+        assert len(d["steps"]) == 1
+        assert d["steps"][0]["distance"] == 0.0
+        assert d["settled"] is True
+
+    def test_span_comes_from_the_frozen_bounds(self, tmp_path: Path):
+        client = _client(tmp_path)
+        self._freeze(client)
+        self._freeze(client)
+        (d,) = client.get("/optimize/drift").json()
+        assert d["search_span"] == 5.0  # doping 0..5 in the fixture
+
+    def test_drift_is_grouped_by_objective(self, tmp_path: Path):
+        client = _client(tmp_path)
+        self._freeze(client)
+        client.post(
+            "/optimize/freeze",
+            json={
+                "input_variable": "doping_pct",
+                "target_property": "zt",
+                "objective": "minimize",
+            },
+        )
+        drifts = client.get("/optimize/drift").json()
+        assert {d["direction"] for d in drifts} == {"maximize", "minimize"}
+        assert all(d["n_freezes"] == 1 for d in drifts)
+
+    def test_no_open_project_is_404(self):
+        from latos.server.app import create_app
+
+        assert TestClient(create_app()).get("/optimize/drift").status_code == 404

@@ -14,16 +14,25 @@ a kernel artifact.
 from __future__ import annotations
 
 from latos.optimization import spb
+from latos.optimization.campaign import (
+    CampaignDrift,
+    DriftStep,
+    recommendation_drift,
+)
 from latos.optimization.engine import (
     BoConfig,
+    BoConfigND,
     OptimizationError,
     OptimizationResult,
+    OptimizationResultND,
     Recommendation,
+    RecommendationND,
     ReliabilityReport,
     RobustnessEntry,
     RobustnessReport,
     length_scale_robustness,
     optimize,
+    optimize_nd,
 )
 from latos.optimization.prereg import build_record, freeze, write_record
 from latos.optimization.validate import (
@@ -37,6 +46,12 @@ from latos.optimization.validate import (
 
 __all__ = [
     "BoConfig",
+    "optimize_nd",
+    "RecommendationND",
+    "OptimizationResultND",
+    "BoConfigND",
+    "CampaignDrift",
+    "DriftStep",
     "OptimizationError",
     "OptimizationResult",
     "OutcomeVerdict",
@@ -51,6 +66,7 @@ __all__ = [
     "list_preregistrations",
     "optimize",
     "outcome_path_for",
+    "recommendation_drift",
     "spb",
     "validate_outcome",
     "write_outcome",

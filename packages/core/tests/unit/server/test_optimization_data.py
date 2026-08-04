@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from latos.core.enums import Technique
@@ -762,3 +763,53 @@ class TestShockTarget:
         state.result = IngestionResult(project=project, outcomes=())
         client = TestClient(app)
         assert client.get("/optimize/targets").json()["properties"] == ["peak_force_n"]
+
+
+# ─── Measured measurement noise (MN1) ────────────────────────────────
+
+
+class TestMeasuredNoise:
+    """Pooled repeatability from per-sample replicate scatter.
+
+    Values are the real Adachi drop-impact set: three drops per loading, whose
+    within-sample standard deviations the shock parser already records.
+    """
+
+    @staticmethod
+    def _rows(sds):
+        from latos.server.optimization_data import DatasetRow
+
+        return [
+            DatasetRow(sample_id=f"s{i}", sample_name=f"P{i}", x=float(i), y=1.0, y_sd=sd)
+            for i, sd in enumerate(sds)
+        ]
+
+    def test_none_when_no_sample_records_scatter(self):
+        from latos.server.optimization_data import measured_noise
+
+        assert measured_noise(self._rows([None, None, None])) is None
+
+    def test_none_from_a_single_sample(self):
+        # One sample's spread is not a repeatability estimate for the campaign.
+        from latos.server.optimization_data import measured_noise
+
+        assert measured_noise(self._rows([3.2, None, None])) is None
+
+    def test_pools_as_the_root_mean_of_variances(self):
+        from latos.server.optimization_data import measured_noise
+
+        got = measured_noise(self._rows([3.0, 4.0]))
+        assert got == pytest.approx(((9.0 + 16.0) / 2) ** 0.5)
+
+    def test_real_adachi_set_pools_to_about_six_newtons(self):
+        # sd of 68/74/73, 50/54/67, 36/40/34, 63/50/58 respectively.
+        from latos.server.optimization_data import measured_noise
+
+        got = measured_noise(self._rows([3.2146, 8.8882, 3.0551, 6.5574]))
+        assert got == pytest.approx(5.95, abs=0.01)
+
+    def test_zero_and_negative_scatter_are_not_measurements(self):
+        from latos.server.optimization_data import measured_noise
+
+        assert measured_noise(self._rows([0.0, -1.0])) is None
+        assert measured_noise(self._rows([0.0, 3.0, 4.0])) == pytest.approx(3.5355, abs=1e-3)

@@ -22,6 +22,7 @@ fact.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,44 @@ class OutcomeVerdict:
     relative_error: float | None  # abs_error / |measured|; None if measured ≈ 0
     summary: str  # plain-language, materials-scientist-facing
     validated_at: str  # ISO timestamp
+    # Did the frozen stopping claim survive this measurement? The claim was
+    # "the best so far is within epsilon of the optimum", so a result that
+    # beats the frozen best by more than epsilon falsifies it. None when the
+    # record predates the claim, or when it cannot be compared.
+    stopping_claim_held: bool | None = None
+
+
+def _check_stopping_claim(record: dict[str, Any], measured: float) -> bool | None:
+    """Did the frozen "we are within epsilon of the optimum" claim survive?
+
+    The claim is falsified by a measurement that beats the frozen best by
+    more than epsilon: if a single further experiment finds that much more
+    headroom, the campaign was not as finished as the tool asserted.
+
+    `epsilon` is in the model's fit space, so a log-space fit is compared as
+    a log-ratio rather than a difference. Returns None when the record has no
+    claim (older freezes) or the comparison is undefined.
+    """
+    claim = record.get("stopping_claim")
+    if not claim:
+        return None
+    try:
+        eps = float(claim["epsilon"])
+        best = float(claim["best_measured"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    obj = record.get("objective", {})
+    maximizing = str(obj.get("direction", "maximize")) == "maximize"
+    if str(obj.get("y_transform", "identity")) == "log":
+        if measured <= 0.0 or best <= 0.0:
+            return None
+        gain = math.log(measured) - math.log(best)
+    else:
+        gain = measured - best
+    if not maximizing:
+        gain = -gain
+    return bool(gain <= eps)
 
 
 def _summarize(
@@ -69,8 +108,9 @@ def _summarize(
     direction: str,
     within: bool,
     improved: bool,
+    claim_held: bool | None = None,
 ) -> str:
-    """One or two plain sentences: calibration then improvement."""
+    """Plain sentences: calibration, improvement, then the stopping claim."""
     calib = (
         f"Measured {property_name} {measured:.4g} falls within the predicted 95% "
         f"interval [{lo:.4g}, {hi:.4g}] — the model's uncertainty was honest here."
@@ -90,7 +130,19 @@ def _summarize(
             f"It did not beat the prior best ({prior_best:.4g}; {better} is better) — "
             f"the optimum likely still stands."
         )
-    return f"{calib} {impr}"
+    parts = [calib, impr]
+    if claim_held is True:
+        parts.append(
+            "The frozen stopping claim held: nothing here beat the frozen best by "
+            "more than the stated tolerance."
+        )
+    elif claim_held is False:
+        parts.append(
+            "The frozen stopping claim did NOT hold: this result beats the frozen "
+            "best by more than the stated tolerance, so the campaign was not as "
+            "finished as the model asserted."
+        )
+    return " ".join(parts)
 
 
 def validate_outcome(record: dict[str, Any], measured: float) -> OutcomeVerdict:
@@ -110,6 +162,7 @@ def validate_outcome(record: dict[str, Any], measured: float) -> OutcomeVerdict:
 
     within = lo <= measured <= hi
     improved = measured > prior_best if direction == "maximize" else measured < prior_best
+    claim_held = _check_stopping_claim(record, measured)
     signed = measured - predicted_mean
     abs_err = abs(signed)
     rel_err = abs_err / abs(measured) if abs(measured) > _REL_ERROR_MIN_DENOM else None
@@ -134,8 +187,10 @@ def validate_outcome(record: dict[str, Any], measured: float) -> OutcomeVerdict:
             direction=direction,
             within=within,
             improved=improved,
+            claim_held=claim_held,
         ),
         validated_at=utc_now().isoformat(),
+        stopping_claim_held=claim_held,
     )
 
 
@@ -171,10 +226,25 @@ class PreregEntry:
     prior_best: float
     reliability_level: str
     outcome: dict[str, Any] | None  # the recorded verdict, or None
+    # The range this freeze committed to searching. None for records written
+    # before it was read out; campaign drift scales its moves against it.
+    search_bounds: tuple[float, float] | None = None
 
 
 def _prereg_dir(root: Path) -> Path:
     return root / ".latos" / "prereg"
+
+
+def _search_bounds(objective: dict[str, Any]) -> tuple[float, float] | None:
+    """The frozen search range, or None if the record predates the field."""
+    raw = objective.get("search_bounds")
+    if not isinstance(raw, list | tuple):
+        return None
+    try:
+        low, high = (float(v) for v in raw)
+    except (TypeError, ValueError):
+        return None
+    return (low, high)
 
 
 def list_preregistrations(root: Path) -> list[PreregEntry]:
@@ -215,6 +285,7 @@ def list_preregistrations(root: Path) -> list[PreregEntry]:
                     prior_best=float(record.get("prior_best", float("nan"))),
                     reliability_level=str(record.get("reliability", {}).get("level", "unknown")),
                     outcome=outcome,
+                    search_bounds=_search_bounds(obj),
                 )
             )
         except (KeyError, ValueError, OSError):
