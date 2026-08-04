@@ -237,6 +237,54 @@ class TestTwoDimensional:
         assert r.best_y == pytest.approx(float(y.min()))
 
 
+class TestAcquisitionPolish:
+    """MV2: the Sobol set finds the right basin, L-BFGS-B places the point
+    inside it. 2048 candidates resolve about a fortieth of each axis in 2-D,
+    and that quantisation is avoidable because the surrogate is a closed-form
+    function that can be optimised between the candidates."""
+
+    def _run(self, *, polish: bool):
+        x, y = _grid_2d()
+        return optimize_nd(
+            x,
+            y,
+            bounds=[(0, 5), (300, 600)],
+            input_names=("doping", "temp"),
+            target_name="zt",
+            n_candidates=256,
+            polish=polish,
+        )
+
+    def test_grid_only_recommends_one_of_the_candidates(self):
+        r = self._run(polish=False)
+        cand = np.asarray(r.candidates)
+        assert np.min(np.linalg.norm(cand - np.asarray(r.recommendation.x), axis=1)) < 1e-9
+        assert r.config.acquisition == "sobol"
+
+    def test_polished_point_leaves_the_grid(self):
+        r = self._run(polish=True)
+        cand = np.asarray(r.candidates)
+        off_grid = np.min(np.linalg.norm(cand - np.asarray(r.recommendation.x), axis=1))
+        assert r.config.acquisition == "sobol+lbfgsb"
+        assert off_grid > 0.0
+
+    def test_polished_point_stays_inside_the_bounds(self):
+        r = self._run(polish=True)
+        assert 0.0 <= r.recommendation.x[0] <= 5.0
+        assert 300.0 <= r.recommendation.x[1] <= 600.0
+
+    def test_polish_never_lowers_the_acquisition_it_was_given(self):
+        """The guard that makes this safe: the grid answer is kept unless the
+        refinement genuinely beats it, so a failed polish cannot regress."""
+        grid = self._run(polish=False)
+        fine = self._run(polish=True)
+        assert fine.max_ei >= grid.max_ei - 1e-12
+
+    def test_is_reproducible(self):
+        a, b = self._run(polish=True), self._run(polish=True)
+        assert a.recommendation.x == pytest.approx(b.recommendation.x)
+
+
 class TestOneAxisThroughTheNdPath:
     """d = 1 must still be a legal, sane call even though `optimize()` is the
     production route for it."""

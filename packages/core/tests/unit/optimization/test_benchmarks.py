@@ -161,6 +161,31 @@ class TestLengthScaleFloor:
         assert freed.regret < stalled.regret / 2
 
 
+@pytest.mark.slow
+class TestAcquisitionPolishPaysOff:
+    """Measured over 8 seeds, not 3. On three seeds the refinement appeared to
+    hurt Hartmann-3; over eight it improves the median there too. Three noisy
+    campaigns are not enough to set a default on."""
+
+    def test_polish_improves_the_worst_case_on_branin(self):
+        seeds = tuple(range(8))
+        grid = np.array(
+            [
+                run_campaign("branin", seed=s, n_initial=8, n_rounds=12, polish=False).regret
+                for s in seeds
+            ]
+        )
+        fine = np.array(
+            [
+                run_campaign("branin", seed=s, n_initial=8, n_rounds=12, polish=True).regret
+                for s in seeds
+            ]
+        )
+        assert np.median(fine) < np.median(grid)
+        # The important one: refinement removes the catastrophic stall.
+        assert fine.max() < grid.max() / 2
+
+
 class TestReliabilityDuringACampaign:
     def test_the_grade_is_recorded_each_round(self):
         r = run_campaign("branin", n_initial=8, n_rounds=3, seed=0, with_reliability=True)

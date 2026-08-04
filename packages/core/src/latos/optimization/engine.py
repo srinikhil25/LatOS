@@ -49,7 +49,7 @@ from __future__ import annotations
 import math
 import os
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -59,6 +59,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import numpy as np
+from scipy.optimize import minimize
 from scipy.spatial import cKDTree
 from scipy.stats import norm, qmc
 from sklearn.exceptions import ConvergenceWarning
@@ -975,6 +976,9 @@ def optimize(
 
 _ND_CANDIDATES = 2048  # Sobol points the acquisition is maximised over
 _ND_MIN_EXTRA = 2  # a GP over d axes needs at least d + this many points
+# Restarts for the continuous acquisition refinement. The surface is
+# multi-modal, so one descent finds the nearest peak, not the best one.
+_POLISH_STARTS = 4
 _N_MATRIX_DIMS = 2  # observations arrive as a 2-D (n, d) matrix
 
 
@@ -1015,6 +1019,7 @@ class BoConfigND:
     input_names: tuple[str, ...]
     bounds: tuple[tuple[float, float], ...]
     kernel: str
+    acquisition: str  # "sobol" or "sobol+lbfgsb"
     n_dims: int
     x_scales: tuple[float, ...]  # raw units per normalized unit, per axis
     length_scales: tuple[float, ...]  # fitted ARD length-scales (normalized)
@@ -1125,11 +1130,90 @@ def _prepare_nd_inputs(
     return x_obs, y, box, names
 
 
-def _recommend_nd(
-    candidates: np.ndarray,
+def _polish_acquisition(
+    objective: Callable[[np.ndarray], float],
+    starts: np.ndarray,
+    n_dims: int,
+) -> tuple[np.ndarray | None, float]:
+    """Refine an acquisition maximum off the candidate grid, with L-BFGS-B.
+
+    The Sobol set locates the right basin; it cannot place a point inside it
+    more precisely than its own spacing. In two dimensions 2048 points resolve
+    about a fortieth of each axis, so the recommendation carries a quantisation
+    error of roughly that size — real, and avoidable, because the surrogate is
+    a closed-form function that can be optimised continuously between the
+    candidates.
+
+    Several starts, because the acquisition surface is multi-modal and a single
+    descent finds the nearest peak rather than the best one. Gradients are
+    finite-differenced: scikit-learn does not expose a derivative of the
+    posterior, and at these dimensions the extra evaluations are far cheaper
+    than the fit that preceded them.
+
+    Returns `(point, value)` in normalized coordinates, or `(None, -inf)` if
+    every start failed. The caller keeps its grid answer unless this beats it,
+    so a failed or unhelpful polish can never make the recommendation worse.
+    """
+    box = [(0.0, _SPAN_UNITS)] * n_dims
+    best_x: np.ndarray | None = None
+    best_v = -np.inf
+    for x0 in np.atleast_2d(starts):
+        try:
+            res = minimize(
+                lambda p: -objective(np.asarray(p, dtype=float)),
+                x0=np.clip(x0, 0.0, _SPAN_UNITS),
+                method="L-BFGS-B",
+                bounds=box,
+            )
+        except (ValueError, np.linalg.LinAlgError):
+            continue
+        if not np.all(np.isfinite(res.x)):
+            continue
+        value = -float(res.fun)
+        if value > best_v:
+            best_v, best_x = value, np.clip(res.x, 0.0, _SPAN_UNITS)
+    return best_x, best_v
+
+
+def _pick_point(
+    gp: GaussianProcessRegressor,
+    cand_norm: np.ndarray,
+    driver: np.ndarray,
     rec_i: int,
-    mean_int: np.ndarray,
-    std: np.ndarray,
+    *,
+    explore: bool,
+    f_best: float,
+    xi: float,
+    n_dims: int,
+    polish: bool,
+) -> tuple[np.ndarray, str]:
+    """Choose the next point, refining off the grid when that helps.
+
+    `driver` is whichever quantity selected `rec_i` — Expected Improvement
+    normally, posterior spread when the data is too sparse to exploit. The same
+    quantity is what gets refined, so the polish never optimises something
+    other than the criterion that made the choice.
+    """
+    if not polish:
+        return cand_norm[rec_i], "sobol"
+
+    def score(p: np.ndarray) -> float:
+        mu, sd = gp.predict(p.reshape(1, -1), return_std=True)
+        if explore:
+            return float(sd[0])
+        return float(_expected_improvement(mu, sd, f_best, xi)[0])
+
+    top = np.argsort(driver)[-_POLISH_STARTS:][::-1]
+    refined, value = _polish_acquisition(score, cand_norm[top], n_dims)
+    if refined is not None and value > float(driver[rec_i]):
+        return refined, "sobol+lbfgsb"
+    return cand_norm[rec_i], "sobol"
+
+
+def _recommend_nd(
+    point: np.ndarray,
+    mean_at: float,
+    std_at: float,
     *,
     sign: float,
     noise_std: float,
@@ -1139,18 +1223,19 @@ def _recommend_nd(
 ) -> RecommendationND:
     """The d-dimensional twin of `_recommend`.
 
-    Same arithmetic; the recommended point is a row of the candidate set
-    rather than a scalar grid value.
+    Same arithmetic, but takes the recommended point and the posterior there
+    directly rather than an index into a candidate array — the point may have
+    been refined off the grid and so need not be one of the candidates.
     """
-    rec_sigma = float(std[rec_i])
+    rec_sigma = float(std_at)
     predictive_sd = float(np.sqrt(rec_sigma**2 + noise_std**2))
-    pm_work = float(sign * mean_int[rec_i])
+    pm_work = float(sign * mean_at)
     lo_pred = _to_phys(pm_work - _CI95 * predictive_sd, transform, y_min, y_max)
     hi_pred = _to_phys(pm_work + _CI95 * predictive_sd, transform, y_min, y_max)
     lo_model = _to_phys(pm_work - _CI95 * rec_sigma, transform, y_min, y_max)
     hi_model = _to_phys(pm_work + _CI95 * rec_sigma, transform, y_min, y_max)
     return RecommendationND(
-        x=tuple(float(v) for v in candidates[rec_i]),
+        x=tuple(float(v) for v in np.asarray(point, dtype=float).ravel()),
         predicted_mean=_to_phys(pm_work, transform, y_min, y_max),
         ci95=(hi_model - lo_model) / 2.0,
         predictive_sd=predictive_sd,
@@ -1175,6 +1260,7 @@ def optimize_nd(
     xi: float = _XI,
     length_scale_bounds: tuple[float, float] = _LS_BOUNDS,
     n_candidates: int = _ND_CANDIDATES,
+    polish: bool = True,
     seed: int = 0,
     objective_aggregation: str = "peak",
     created_at: datetime | None = None,
@@ -1218,6 +1304,10 @@ def optimize_nd(
             silently; lower it deliberately for a structured multi-axis target.
         n_candidates: Sobol points the acquisition is maximised over. Rounded
             up to the next power of two.
+        polish: refine the chosen point continuously with L-BFGS-B instead of
+            leaving it on the Sobol grid (default). The grid answer is kept
+            unless the refinement genuinely beats it, so this can only help;
+            set False to reproduce a pure grid search.
         seed: RNG seed for the GP restarts and the Sobol scramble.
         objective_aggregation: How each sample's `y` was reduced.
         created_at: Timestamp for the frozen config; defaults to now (UTC).
@@ -1297,13 +1387,30 @@ def optimize_nd(
     # not "we are done".
     is_exploratory = reliability is not None and reliability.level == "exploratory"
     converged = signal_exhausted and not is_exploratory
-    rec_i = int(np.argmax(std)) if (signal_exhausted and is_exploratory) else ei_i
+    explore = signal_exhausted and is_exploratory
+    rec_i = int(np.argmax(std)) if explore else ei_i
 
-    recommendation = _recommend_nd(
-        cand,
+    # Refine off the candidate grid. Whichever quantity is driving the pick —
+    # Expected Improvement normally, posterior spread when exploring — is the
+    # one that gets refined, so the polish never optimises something other than
+    # the criterion that chose the point.
+    rec_norm, acquisition = _pick_point(
+        gp,
+        cand_norm,
+        std if explore else ei,
         rec_i,
-        mean_int,
-        std,
+        explore=explore,
+        f_best=float(y_int[best_i]),
+        xi=xi,
+        n_dims=d,
+        polish=polish,
+    )
+
+    rec_mu, rec_sd = gp.predict(rec_norm.reshape(1, -1), return_std=True)
+    recommendation = _recommend_nd(
+        box[:, 0] + rec_norm * x_scales,
+        float(rec_mu[0]),
+        float(rec_sd[0]),
         sign=sign,
         noise_std=noise_std,
         transform=transform,
@@ -1319,6 +1426,7 @@ def optimize_nd(
         input_names=names,
         bounds=tuple((float(a), float(b)) for a, b in box),
         kernel="ConstantKernel * RBF(ARD)" if d > 1 else "ConstantKernel * RBF",
+        acquisition=acquisition,
         n_dims=d,
         x_scales=tuple(float(v) for v in x_scales),
         length_scales=_fitted_length_scales(gp),

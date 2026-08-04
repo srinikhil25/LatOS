@@ -129,6 +129,7 @@ def run_campaign(
     with_reliability: bool = False,
     n_candidates: int = 1024,
     length_scale_bounds: tuple[float, float] | None = None,
+    polish: bool = True,
 ) -> CampaignResult:
     """Simulate a closed loop and report how close it got.
 
@@ -151,6 +152,8 @@ def run_campaign(
         length_scale_bounds: override the ARD length-scale range. `None` uses
             the engine default, which is the 1-D value and measurably too
             coarse for structured multi-axis targets.
+        polish: refine each proposal continuously off the Sobol grid. Set
+            False to measure what the refinement is actually worth.
 
     Returns:
         A `CampaignResult`.
@@ -182,6 +185,7 @@ def run_campaign(
                 seed=seed,
                 n_candidates=n_candidates,
                 with_reliability=with_reliability,
+                polish=polish,
                 **(
                     {}
                     if length_scale_bounds is None
