@@ -285,6 +285,94 @@ class TestAcquisitionPolish:
         assert a.recommendation.x == pytest.approx(b.recommendation.x)
 
 
+class TestPosteriorSurface:
+    """MV4: the same posterior on a lattice, so a front-end can draw a map
+    without triangulating the Sobol set. Off unless asked for."""
+
+    def _run(self, *, surface_size: int, n_dims: int = 2):
+        if n_dims == 2:
+            x, y = _grid_2d()
+            return optimize_nd(
+                x,
+                y,
+                bounds=[(0, 5), (300, 600)],
+                input_names=("doping", "temp"),
+                target_name="zt",
+                surface_size=surface_size,
+            )
+        x = FROZEN_X.reshape(-1, 1)
+        return optimize_nd(
+            x,
+            FROZEN_Y,
+            bounds=[(40.0, 55.0)],
+            input_names=("wt",),
+            target_name="peak_force_n",
+            surface_size=surface_size,
+        )
+
+    def test_absent_by_default(self):
+        x, y = _grid_2d()
+        r = optimize_nd(
+            x, y, bounds=[(0, 5), (300, 600)], input_names=("doping", "temp"), target_name="zt"
+        )
+        assert r.surface is None
+
+    def test_lattice_shape_and_orientation(self):
+        s = self._run(surface_size=9).surface
+        assert s is not None
+        assert s.axis_names == ("doping", "temp")
+        assert len(s.axis_x) == len(s.axis_y) == 9
+        assert len(s.mean) == 9  # rows indexed by axis_y
+        assert all(len(row) == 9 for row in s.mean)
+        assert len(s.sd) == len(s.ei) == 9
+
+    def test_lattice_spans_the_bounds(self):
+        s = self._run(surface_size=9).surface
+        assert (s.axis_x[0], s.axis_x[-1]) == (0.0, 5.0)
+        assert (s.axis_y[0], s.axis_y[-1]) == (300.0, 600.0)
+
+    def test_mean_is_in_physical_units(self):
+        """The colour bar has to read in the units the researcher measured, so
+        the lattice goes through the same inverse transform and clamp as the
+        recommendation — not the internal maximization frame."""
+        _x, y = _grid_2d()
+        r = self._run(surface_size=12)
+        flat = [v for row in r.surface.mean for v in row]
+        assert min(flat) > -1.0
+        assert max(flat) < float(y.max()) * 2.0
+
+    def test_the_posterior_peak_is_near_the_data_peak(self):
+        r = self._run(surface_size=24)
+        s = r.surface
+        mean = np.asarray(s.mean)
+        j, i = np.unravel_index(int(np.argmax(mean)), mean.shape)
+        assert abs(s.axis_x[i] - 3.0) < 1.0  # the surface peaks in doping at 3
+        assert s.axis_y[j] > 550.0  # and rises to the hot end
+
+    def test_uncertainty_is_lowest_where_the_data_is(self):
+        """A sanity check on `sd`: the corner of the box furthest from any
+        observation must not be more certain than the middle of the data."""
+        s = self._run(surface_size=16).surface
+        sd = np.asarray(s.sd)
+        assert sd[0][0] >= sd[len(s.axis_y) // 2][len(s.axis_x) // 2]
+
+    def test_skipped_outside_two_dimensions(self):
+        """A lattice is a 2-D idea. One axis already has `optimize()`'s curve,
+        and three would be a cube nobody asked to be sent."""
+        assert self._run(surface_size=16, n_dims=1).surface is None
+
+    def test_does_not_move_the_recommendation(self):
+        x, y = _grid_2d()
+        kw = {
+            "bounds": [(0, 5), (300, 600)],
+            "input_names": ("doping", "temp"),
+            "target_name": "zt",
+        }
+        assert optimize_nd(x, y, **kw).recommendation.x == pytest.approx(
+            optimize_nd(x, y, surface_size=32, **kw).recommendation.x
+        )
+
+
 class TestOneAxisThroughTheNdPath:
     """d = 1 must still be a legal, sane call even though `optimize()` is the
     production route for it."""

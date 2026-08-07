@@ -561,6 +561,104 @@ export function runOptimize(
   return post<OptimizeResult>("/optimize/run", optimizeBody(inputVariable, targetProperty, opts));
 }
 
+// ─── Multi-variable BO (MV4) ─────────────────────────────────────────
+// A separate result type rather than a widened OptimizeResult: the 1-D curve
+// (grid_*) and a 2-D lattice are different shapes, and /optimize/freeze still
+// records one-variable runs only.
+
+/** One observed point in a multi-axis dataset; `x` is a coordinate. */
+export interface NdDatasetPoint {
+  sample_id: string;
+  sample_name: string;
+  x: number[];
+  y: number;
+}
+
+export interface NdRecommendation {
+  x: number[];
+  predicted_mean: number;
+  ci95: number;
+  ci95_predictive: number;
+  predictive_interval_95: [number, number];
+}
+
+/** One input axis: its search range and the fitted anisotropic length-scale.
+ * `pinned_at` says whether the fit hit the range it was allowed — "high" means
+ * this axis does not move the target, "low" means the model is under-resolving
+ * structure it can see. Opposite meanings, hence not a boolean. */
+export interface OptimizeAxis {
+  name: string;
+  low: number;
+  high: number;
+  length_scale: number;
+  pinned_at: "low" | "high" | null;
+}
+
+/** The posterior on a regular lattice. `mean[j][i]` is the value at
+ * `(axis_x[i], axis_y[j])` — rows are y, columns are x. */
+export interface OptimizeSurface {
+  axis_names: [string, string];
+  axis_x: number[];
+  axis_y: number[];
+  mean: number[][];
+  sd: number[][];
+  ei: number[][];
+}
+
+export interface OptimizeNdResult {
+  input_variables: string[];
+  target_property: string;
+  objective: Objective;
+  axes: OptimizeAxis[];
+  kernel: string;
+  acquisition: string;
+  reliability_level: ReliabilityLevel;
+  reliability_note: string;
+  // The geometric half of the grade: the largest unsampled hole, and the
+  // largest hole the claimed tier tolerates. Counting points cannot answer
+  // coverage once there is more than one axis.
+  fill_distance: number;
+  fill_limit: number;
+  quality_flags: QualityFlag[];
+  surface: OptimizeSurface | null; // two axes only
+  points: NdDatasetPoint[];
+  n_dropped_for_missing_axis: number; // samples an added axis cost us
+  best_x: number[];
+  best_y: number;
+  recommendation: NdRecommendation;
+  max_ei: number;
+  noise_threshold: number;
+  converged: boolean;
+  verdict: string;
+  epsilon: number;
+  delta: number;
+  prob_within_epsilon: number;
+  epsilon_delta_met: boolean;
+  n_unreliable: number;
+  n_distrusted: number;
+  noise_measured: boolean;
+}
+
+export interface OptimizeNdOptions extends OptimizeOptions {
+  /** Side of the posterior lattice (two axes only). 0 skips it. */
+  surfaceSize?: number;
+}
+
+export function runOptimizeNd(
+  inputVariables: string[],
+  targetProperty: string,
+  opts: OptimizeNdOptions = {},
+): Promise<OptimizeNdResult> {
+  return post<OptimizeNdResult>("/optimize/run-nd", {
+    input_variables: inputVariables,
+    target_property: targetProperty,
+    objective: opts.objective ?? "maximize",
+    target_value: opts.targetValue ?? null,
+    at_temperature_k: opts.atTemperatureK ?? null,
+    surface_size: opts.surfaceSize ?? 48,
+  });
+}
+
 export interface FreezeResult {
   path: string;
   recommendation: Recommendation;

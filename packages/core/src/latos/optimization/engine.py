@@ -980,6 +980,10 @@ _ND_MIN_EXTRA = 2  # a GP over d axes needs at least d + this many points
 # multi-modal, so one descent finds the nearest peak, not the best one.
 _POLISH_STARTS = 4
 _N_MATRIX_DIMS = 2  # observations arrive as a 2-D (n, d) matrix
+# Side of the optional regular grid the posterior is reported on in 2-D. 48 is
+# a compromise: fine enough that a contour reads smoothly, small enough that
+# 48*48 predictions cost about the same as the Sobol candidate set already does.
+_SURFACE_SIZE = 48
 
 
 @dataclass(frozen=True, slots=True)
@@ -1034,12 +1038,34 @@ class BoConfigND:
 
 
 @dataclass(frozen=True, slots=True)
+class SurfaceND:
+    """The fitted posterior on a regular 2-D grid.
+
+    The Sobol candidate set is the right thing to *optimise* over and the wrong
+    thing to *draw*: contouring scattered points needs a triangulation, which a
+    plotting front-end should not have to carry. This is the same posterior
+    resampled onto a lattice, so a heat map is a direct array read.
+
+    Rows are indexed by the second axis and columns by the first, i.e.
+    `mean[j][i]` is the value at `(axis_x[i], axis_y[j])`.
+    """
+
+    axis_names: tuple[str, str]
+    axis_x: tuple[float, ...]
+    axis_y: tuple[float, ...]
+    mean: tuple[tuple[float, ...], ...]
+    sd: tuple[tuple[float, ...], ...]
+    ei: tuple[tuple[float, ...], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class OptimizationResultND:
     """A d-dimensional optimization round.
 
     `candidates` is the Sobol set the acquisition was maximised over, with the
     posterior evaluated on it, so a caller can contour a 2-D surface or slice a
-    higher-dimensional one without refitting anything.
+    higher-dimensional one without refitting anything. `surface` is the same
+    posterior on a regular lattice, present only when asked for and only in 2-D.
     """
 
     input_names: tuple[str, ...]
@@ -1065,6 +1091,50 @@ class OptimizationResultND:
     epsilon_delta_met: bool = False
     n_unreliable: int = 0
     noise_measured: bool = False
+    surface: SurfaceND | None = None
+
+
+def _posterior_surface(
+    gp: GaussianProcessRegressor,
+    box: np.ndarray,
+    x_scales: np.ndarray,
+    names: tuple[str, ...],
+    size: int,
+    *,
+    sign: float,
+    transform: str,
+    y_min: float | None,
+    y_max: float | None,
+    f_best: float,
+    xi: float,
+) -> SurfaceND:
+    """Evaluate the fitted posterior on a `size` x `size` lattice.
+
+    Only meaningful in two dimensions, which is the only case the caller asks
+    for it. The mean is returned in the target's own physical units — through
+    the same inverse transform and clamp the recommendation goes through — so a
+    colour bar reads in the units the researcher measured, not in the internal
+    maximization frame.
+    """
+    ax = np.linspace(box[0, 0], box[0, 1], size)
+    ay = np.linspace(box[1, 0], box[1, 1], size)
+    gx, gy = np.meshgrid(ax, ay, indexing="xy")
+    pts = np.column_stack([gx.ravel(), gy.ravel()])
+    mu_int, sd = gp.predict((pts - box[:, 0]) / x_scales, return_std=True)
+    ei = _expected_improvement(mu_int, sd, f_best, xi)
+    mean_phys, _lo, _hi, _ = _physical_band(sign * mu_int, sd, transform, y_min, y_max)
+
+    def _rows(v: np.ndarray) -> tuple[tuple[float, ...], ...]:
+        return tuple(tuple(float(c) for c in row) for row in v.reshape(size, size))
+
+    return SurfaceND(
+        axis_names=(names[0], names[1]),
+        axis_x=tuple(float(v) for v in ax),
+        axis_y=tuple(float(v) for v in ay),
+        mean=_rows(mean_phys),
+        sd=_rows(sd),
+        ei=_rows(ei),
+    )
 
 
 def _sobol_candidates(bounds: np.ndarray, n_candidates: int, seed: int) -> np.ndarray:
@@ -1261,6 +1331,7 @@ def optimize_nd(
     length_scale_bounds: tuple[float, float] = _LS_BOUNDS,
     n_candidates: int = _ND_CANDIDATES,
     polish: bool = True,
+    surface_size: int = 0,
     seed: int = 0,
     objective_aggregation: str = "peak",
     created_at: datetime | None = None,
@@ -1308,6 +1379,10 @@ def optimize_nd(
             leaving it on the Sobol grid (default). The grid answer is kept
             unless the refinement genuinely beats it, so this can only help;
             set False to reproduce a pure grid search.
+        surface_size: side of a regular lattice to also report the posterior
+            on, for contouring. Ignored unless d == 2. Zero (default) skips it,
+            so nothing that only wants a recommendation pays for the extra
+            `surface_size**2` predictions.
         seed: RNG seed for the GP restarts and the Sobol scramble.
         objective_aggregation: How each sample's `y` was reduced.
         created_at: Timestamp for the frozen config; defaults to now (UTC).
@@ -1406,6 +1481,22 @@ def optimize_nd(
         polish=polish,
     )
 
+    surface = None
+    if surface_size > 0 and d == _N_MATRIX_DIMS:
+        surface = _posterior_surface(
+            gp,
+            box,
+            x_scales,
+            names,
+            int(surface_size),
+            sign=sign,
+            transform=transform,
+            y_min=y_min,
+            y_max=y_max,
+            f_best=float(y_int[best_i]),
+            xi=xi,
+        )
+
     rec_mu, rec_sd = gp.predict(rec_norm.reshape(1, -1), return_std=True)
     recommendation = _recommend_nd(
         box[:, 0] + rec_norm * x_scales,
@@ -1464,6 +1555,7 @@ def optimize_nd(
         epsilon_delta_met=prob_within >= 1.0 - delta,
         n_unreliable=n_unreliable,
         noise_measured=bool(measured_noise is not None and measured_noise > 0),
+        surface=surface,
     )
 
 

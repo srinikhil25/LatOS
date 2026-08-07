@@ -21,6 +21,7 @@ import {
   getSpbCheck,
   listPreregistrations,
   runOptimize,
+  runOptimizeNd,
   setDistrusted,
   setSampleParameters,
   validateOutcome,
@@ -28,6 +29,7 @@ import {
   type FreezeResult,
   type InputVariableInfo,
   type Objective,
+  type OptimizeNdResult,
   type OptimizeOptions,
   type OptimizeResult,
   type PreregSummary,
@@ -36,6 +38,7 @@ import {
   type SpbCheckResult,
 } from "../lib/api";
 import { OptimizeChart } from "../components/OptimizeChart";
+import { OptimizeSurfaceChart, type SurfaceMode } from "../components/OptimizeSurfaceChart";
 import { ChartFrame } from "../components/ChartFrame";
 import { AnalysisLoader } from "../components/AnalysisLoader";
 
@@ -82,12 +85,18 @@ export function Optimize({ onBack }: { onBack: () => void }) {
   const [inputInfos, setInputInfos] = useState<InputVariableInfo[]>([]);
   const [inputVar, setInputVar] = useState<string>("");
   const [inputs, setInputs] = useState<Record<string, string>>({});
+  // Optional second axis. Empty means the one-variable run, which stays the
+  // default: it is the only shape /optimize/freeze can pre-register.
+  const [secondVar, setSecondVar] = useState<string>("");
+  const [secondInputs, setSecondInputs] = useState<Record<string, string>>({});
   const [targets, setTargets] = useState<string[]>([]);
   const [target, setTarget] = useState<string>("");
   const [objective, setObjective] = useState<Objective>("maximize");
   const [targetValue, setTargetValue] = useState<string>("");
   const [atTempK, setAtTempK] = useState<string>("");
   const [result, setResult] = useState<OptimizeResult | null>(null);
+  const [ndResult, setNdResult] = useState<OptimizeNdResult | null>(null);
+  const [surfaceMode, setSurfaceMode] = useState<SurfaceMode>("mean");
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [frozen, setFrozen] = useState<FreezeResult | null>(null);
@@ -131,6 +140,12 @@ export function Optimize({ onBack }: { onBack: () => void }) {
   // Measured variables (e.g. Hall carrier concentration) come from an
   // instrument — shown read-only, never written back as synthesis params.
   const isMeasured = selectedInfo?.source === "measured";
+  const secondInfo = useMemo(
+    () => inputInfos.find((v) => v.name === secondVar.trim()),
+    [inputInfos, secondVar],
+  );
+  const secondIsMeasured = secondInfo?.source === "measured";
+  const twoAxis = secondVar.trim() !== "" && secondVar.trim() !== inputVar.trim();
 
   /** The stored values of `varName`, as editable strings, one per sample. */
   const valuesFor = useCallback(
@@ -189,23 +204,45 @@ export function Optimize({ onBack }: { onBack: () => void }) {
       const v = name.trim();
       setInputVar(v);
       setInputs(valuesFor(v, params, inputInfos, samples));
+      // The second-variable list excludes whatever the first one is, so naming
+      // the second variable here would leave that select holding a value it no
+      // longer offers. Drop back to the one-variable run instead.
+      setSecondVar((s) => (s === v ? "" : s));
+    },
+    [params, inputInfos, samples, valuesFor],
+  );
+
+  const chooseSecondVar = useCallback(
+    (name: string) => {
+      const v = name.trim();
+      setSecondVar(v);
+      setSecondInputs(valuesFor(v, params, inputInfos, samples));
     },
     [params, inputInfos, samples, valuesFor],
   );
 
   // Persist one cell, preserving the sample's OTHER variables. Measured
   // variables are instrument-derived and never written back.
-  const saveInput = useCallback(
-    (sampleId: string, raw: string) => {
-      if (!inputVar || isMeasured) return;
+  const saveValue = useCallback(
+    (sampleId: string, raw: string, varName: string, measured: boolean) => {
+      if (!varName || measured) return;
       const rest = { ...(params[sampleId] ?? {}) };
       const value = Number.parseFloat(raw);
-      if (Number.isFinite(value)) rest[inputVar] = value;
-      else delete rest[inputVar];
+      if (Number.isFinite(value)) rest[varName] = value;
+      else delete rest[varName];
       setParams((p) => ({ ...p, [sampleId]: rest }));
       void setSampleParameters(sampleId, rest);
     },
-    [inputVar, isMeasured, params],
+    [params],
+  );
+  const saveInput = useCallback(
+    (sampleId: string, raw: string) => saveValue(sampleId, raw, inputVar, isMeasured),
+    [saveValue, inputVar, isMeasured],
+  );
+  const saveSecond = useCallback(
+    (sampleId: string, raw: string) =>
+      saveValue(sampleId, raw, secondVar.trim(), Boolean(secondIsMeasured)),
+    [saveValue, secondVar, secondIsMeasured],
   );
 
   // The objective options sent with run/freeze, parsed from the controls.
@@ -228,15 +265,23 @@ export function Optimize({ onBack }: { onBack: () => void }) {
     setRunning(true);
     setError(null);
     setResult(null);
+    setNdResult(null);
     setFrozen(null);
     try {
-      setResult(await runOptimize(inputVar, target, opts));
+      // One result at a time: the two shapes answer the same question over
+      // different numbers of axes, and showing both at once would invite
+      // reading a curve as if it were a slice of the surface, which it is not.
+      if (twoAxis) {
+        setNdResult(await runOptimizeNd([inputVar.trim(), secondVar.trim()], target, opts));
+      } else {
+        setResult(await runOptimize(inputVar, target, opts));
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setRunning(false);
     }
-  }, [inputVar, target, opts]);
+  }, [inputVar, secondVar, twoAxis, target, opts]);
 
   const freeze = useCallback(async () => {
     setFreezing(true);
@@ -272,6 +317,12 @@ export function Optimize({ onBack }: { onBack: () => void }) {
   );
 
   const filledCount = Object.values(inputs).filter((v) => v.trim() !== "").length;
+  // On two axes the run is over the samples that have BOTH values, so that
+  // intersection — not either column on its own — is what gates the button.
+  const pairedCount = samples.filter(
+    (s) => (inputs[s.id] ?? "").trim() !== "" && (secondInputs[s.id] ?? "").trim() !== "",
+  ).length;
+  const usableCount = twoAxis ? pairedCount : filledCount;
   const varLabel = humanize(inputVar);
   // How many down-weighted points came from the researcher rather than the
   // physics checks. Read defensively: the sidecar is a separate process and an
@@ -522,6 +573,136 @@ export function Optimize({ onBack }: { onBack: () => void }) {
             </section>
           )}
 
+          {/* Two-variable verdict + surface. Separate from the one-variable
+              block above because almost nothing transfers: there is no curve,
+              the recommendation is a coordinate, and the reliability grade is
+              carried by coverage of a plane rather than a count of points. */}
+          {ndResult && (
+            <section className="space-y-3">
+              {ndResult.quality_flags.length > 0 && (
+                <div className="rounded-lg border border-severity-warning bg-[color-mix(in_srgb,var(--latos-severity-warning)_12%,transparent)] px-5 py-4 text-sm">
+                  <div className="font-medium text-severity-warning">
+                    ⚠ Data-quality warning — this run uses values flagged unreliable
+                  </div>
+                  <ul className="mt-2 space-y-1 text-secondary">
+                    {ndResult.quality_flags.map((f) => (
+                      <li key={`${f.sample_name}:${f.variable}`} data-selectable>
+                        {f.sample_name} — {f.reason}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div className="rounded-lg border border-edge bg-surface px-5 py-4 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={reliabilityChipClass(ndResult.reliability_level)}>
+                    {ndResult.reliability_level}
+                  </span>
+                  <span className="text-xs text-secondary">
+                    {ndResult.points.length} samples over {ndResult.axes.length} variables
+                  </span>
+                </div>
+                <p className="mt-2 text-primary" data-selectable>
+                  {ndResult.verdict}
+                </p>
+                {ndResult.reliability_note && (
+                  <p className="mt-1.5 text-xs text-secondary" data-selectable>
+                    {ndResult.reliability_note}
+                  </p>
+                )}
+                {/* Two axes make "how many points" the wrong question. This is
+                    the right one: how big is the largest region nothing was
+                    measured in, against the largest this grade tolerates. */}
+                {ndResult.fill_limit > 0 && (
+                  <p className="mt-1.5 text-xs text-secondary" data-selectable>
+                    Largest unmeasured gap: {fmtVal(ndResult.fill_distance)} (a{" "}
+                    {ndResult.reliability_level === "exploratory" ? "better" : "calibrated"} grade
+                    needs {fmtVal(ndResult.fill_limit)} or less, in units where each variable&rsquo;s
+                    range is 4). Adding a variable enlarges the space faster than it adds points.
+                  </p>
+                )}
+                {ndResult.n_dropped_for_missing_axis > 0 && (
+                  <p className="mt-1.5 text-xs text-severity-warning" data-selectable>
+                    {ndResult.n_dropped_for_missing_axis} sample
+                    {ndResult.n_dropped_for_missing_axis === 1 ? " was" : "s were"} left out: they
+                    have {humanize(inputVar)} and the property, but no {humanize(secondVar)} value.
+                  </p>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-edge bg-surface p-3">
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  {(
+                    [
+                      ["mean", "Predicted"],
+                      ["sd", "Uncertainty"],
+                      ["ei", "Opportunity"],
+                    ] as [SurfaceMode, string][]
+                  ).map(([m, label]) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setSurfaceMode(m)}
+                      className={`rounded-md border px-3 py-1 text-xs transition ${
+                        surfaceMode === m
+                          ? "border-accent text-accent"
+                          : "border-edge text-secondary hover:border-accent"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <ChartFrame basename="latos-optimization-surface" label="optimization surface">
+                  <OptimizeSurfaceChart result={ndResult} mode={surfaceMode} />
+                </ChartFrame>
+              </div>
+
+              {/* The ARD read. This is the answer a one-variable run cannot
+                  give: which knob the property is actually sensitive to. */}
+              <div className="rounded-lg border border-edge bg-surface px-5 py-4 text-sm">
+                <div className="text-xs font-semibold uppercase tracking-wide text-secondary">
+                  How much each variable matters
+                </div>
+                <ul className="mt-2 space-y-1 text-secondary">
+                  {ndResult.axes.map((a) => (
+                    <li key={a.name} data-selectable>
+                      <span className="font-medium text-primary">{humanize(a.name)}</span> —
+                      searched {fmtVal(a.low)} to {fmtVal(a.high)}; recommended{" "}
+                      <span className="font-medium text-primary">
+                        {fmtVal(
+                          ndResult.recommendation.x[
+                            ndResult.axes.findIndex((x) => x.name === a.name)
+                          ],
+                        )}
+                      </span>
+                      {a.pinned_at === "high"
+                        ? " — the model found no structure along this axis over this range, so it is not driving the result."
+                        : a.pinned_at === "low"
+                          ? " — the model wants finer detail along this axis than it is allowed to fit, so treat the shape here as under-resolved."
+                          : ""}
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-xs text-secondary">
+                  Predicted {ndResult.target_property}:{" "}
+                  <span className="font-medium text-primary">
+                    {fmtVal(ndResult.recommendation.predicted_mean)}
+                  </span>{" "}
+                  (95% predictive [{fmtVal(ndResult.recommendation.predictive_interval_95[0])},{" "}
+                  {fmtVal(ndResult.recommendation.predictive_interval_95[1])}]).
+                </p>
+              </div>
+
+              <p className="text-xs text-secondary">
+                Pre-registration records one variable at a time, so freezing is not offered for a
+                two-variable run. To commit a prospective prediction, run the axis you intend to
+                change on its own.
+              </p>
+            </section>
+          )}
+
           {/* Controls */}
           <section className="flex flex-wrap items-end gap-4 rounded-lg border border-edge bg-surface px-5 py-4">
             <label className="text-sm">
@@ -539,6 +720,31 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                   <option key={v} value={v} />
                 ))}
               </datalist>
+            </label>
+            <label className="text-sm">
+              <span className="mb-1 block text-secondary">
+                Second variable{" "}
+                <span
+                  className="cursor-help text-xs"
+                  title="Optional. With two variables Latos fits a surface instead of a curve and can see how the axes interact — which is the part a one-variable run cannot show."
+                >
+                  (optional)
+                </span>
+              </span>
+              <select
+                value={secondVar}
+                onChange={(e) => chooseSecondVar(e.target.value)}
+                className="w-52 rounded-md border border-edge bg-surface px-2 py-1.5 outline-none focus:border-accent"
+              >
+                <option value="">— one variable —</option>
+                {knownVars
+                  .filter((v) => v !== inputVar.trim())
+                  .map((v) => (
+                    <option key={v} value={v}>
+                      {v}
+                    </option>
+                  ))}
+              </select>
             </label>
             <label className="text-sm">
               <span className="mb-1 block text-secondary">Objective</span>
@@ -596,19 +802,21 @@ export function Optimize({ onBack }: { onBack: () => void }) {
             )}
             <button
               type="button"
-              disabled={running || !target || !inputVar || filledCount < 3 || targetValueMissing}
+              disabled={running || !target || !inputVar || usableCount < 3 || targetValueMissing}
               onClick={() => void run()}
               className="rounded-md bg-accent px-5 py-2 font-medium text-white transition enabled:hover:brightness-110 disabled:opacity-40"
             >
-              {running ? "Running…" : "Run optimization"}
+              {running ? "Running…" : twoAxis ? "Run optimization (2 variables)" : "Run optimization"}
             </button>
-            {(!inputVar || filledCount < 3 || targetValueMissing) && (
+            {(!inputVar || usableCount < 3 || targetValueMissing) && (
               <span className="text-xs text-secondary">
                 {!inputVar
                   ? "Name the variable you want to optimize over."
                   : targetValueMissing
                     ? "Enter the value to aim for."
-                    : `Enter ${varLabel} for at least 3 samples.`}
+                    : twoAxis
+                      ? `Only ${pairedCount} sample${pairedCount === 1 ? " has" : "s have"} both ${varLabel} and ${humanize(secondVar)}. A second axis only counts samples that have both — at least 3 are needed.`
+                      : `Enter ${varLabel} for at least 3 samples.`}
               </span>
             )}
           </section>
@@ -640,6 +848,9 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                   <th className="py-2 font-medium">Sample</th>
                   <th className="py-2 font-medium">Measurements</th>
                   <th className="py-2 font-medium">{varLabel}</th>
+                  {twoAxis && (
+                    <th className="py-2 font-medium">{humanize(secondVar)}</th>
+                  )}
                   <th
                     className="py-2 font-medium"
                     title="Tick a sample you have reason to doubt. It stays in the dataset, fitted with larger assumed noise."
@@ -670,6 +881,23 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                         className="w-28 rounded-md border border-edge bg-surface px-2 py-1 outline-none focus:border-accent disabled:opacity-60"
                       />
                     </td>
+                    {twoAxis && (
+                      <td className="py-2">
+                        <input
+                          type="number"
+                          step="any"
+                          disabled={secondIsMeasured}
+                          value={secondInputs[s.id] ?? ""}
+                          onChange={(e) =>
+                            setSecondInputs((d) => ({ ...d, [s.id]: e.target.value }))
+                          }
+                          onBlur={(e) => saveSecond(s.id, e.target.value)}
+                          placeholder="—"
+                          title={secondIsMeasured ? "Measured value (read-only)" : undefined}
+                          className="w-28 rounded-md border border-edge bg-surface px-2 py-1 outline-none focus:border-accent disabled:opacity-60"
+                        />
+                      </td>
+                    )}
                     <td className="py-2">
                       <input
                         type="checkbox"
