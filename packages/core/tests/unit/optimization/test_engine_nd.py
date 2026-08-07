@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from latos.optimization import OptimizationError, optimize, optimize_nd
+from latos.optimization.engine import _LS_BOUNDS, _LS_BOUNDS_ND
 
 # The frozen drop-impact record: four loadings, the recommendation and interval
 # that were committed to disk before the fifth sample was made.
@@ -79,6 +80,53 @@ class TestOneDimensionalPathUnchanged:
         )
         assert isinstance(r.config.length_scale, float)
         assert np.isfinite(r.config.length_scale)
+
+
+class TestTheLengthScaleFloorIsSplitByDimension:
+    """AX1: `optimize()` and `optimize_nd()` deliberately use different floors.
+
+    The evidence for lowering the floor is entirely multi-dimensional — swept on
+    Branin and Hartmann-3, where it roughly halves worst-case regret. Applying
+    the same value to one dimension is not conservative-by-default caution, it
+    is measurably wrong: on the frozen four-point record a 0.2 floor lets the
+    fit fall to l = 0.29, widening the 95% predictive interval from
+    [31.2, 57.4] to [30.4, 79.1] and dropping leave-one-out coverage from
+    3-of-4 to 2-of-4. Wider intervals *and* worse calibration is overfitting.
+
+    This test exists because collapsing the two constants back into one is an
+    obvious-looking tidy-up that would silently break every pre-registration on
+    disk.
+    """
+
+    def test_the_two_floors_are_different(self):
+        assert _LS_BOUNDS[0] > _LS_BOUNDS_ND[0]
+
+    def test_one_dimension_uses_the_higher_floor(self):
+        """Checked behaviourally, not by reading the constant: the 1-D fit must
+        not be able to go below the 1-D floor."""
+        r = optimize(
+            FROZEN_X,
+            FROZEN_Y,
+            bounds=(float(FROZEN_X.min()), float(FROZEN_X.max())),
+            input_name="wt",
+            target_name="peak_force_n",
+            direction="minimize",
+        )
+        assert r.config.length_scale >= _LS_BOUNDS[0] - 1e-9
+
+    def test_the_multi_axis_path_may_go_lower(self):
+        """A surface with structure finer than the 1-D floor should be allowed
+        to resolve it. sin(3x) puts about 2.4 cycles across the range, whose
+        natural length-scale is well under 1.0."""
+        axis = np.linspace(0.0, 5.0, 7)
+        aa, bb = np.meshgrid(axis, np.linspace(300.0, 600.0, 7), indexing="ij")
+        x = np.column_stack([aa.ravel(), bb.ravel()])
+        y = np.sin(x[:, 0] * 3.0) + 0.01 * (x[:, 1] / 600.0)
+        r = optimize_nd(
+            x, y, bounds=[(0, 5), (300, 600)], input_names=("fast", "flat"), target_name="prop"
+        )
+        assert min(r.config.length_scales) < _LS_BOUNDS[0]
+        assert min(r.config.length_scales) >= _LS_BOUNDS_ND[0] - 1e-9
 
 
 class TestGuards:

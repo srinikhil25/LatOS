@@ -150,8 +150,8 @@ def run_campaign(
             does not depend on it; switch it on to watch the grade evolve.
         n_candidates: Sobol points the acquisition is maximised over each round.
         length_scale_bounds: override the ARD length-scale range. `None` uses
-            the engine default, which is the 1-D value and measurably too
-            coarse for structured multi-axis targets.
+            the engine default, whose floor was chosen by sweeping exactly this
+            function — see the table beside `_LS_BOUNDS` in `engine.py`.
         polish: refine each proposal continuously off the Sobol grid. Set
             False to measure what the refinement is actually worth.
 

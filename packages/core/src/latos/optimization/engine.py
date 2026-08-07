@@ -84,7 +84,40 @@ _XI = 0.01  # EI exploration sweetener
 _GRID_SIZE = 200
 _MIN_POINTS = 3  # a GP over fewer than 3 points isn't worth trusting
 _LS_INIT = 1.5  # RBF length-scale starting point when fitted
-_LS_BOUNDS = (1.0, 5.0)  # bounds the length-scale is fitted within
+# Bounds the length-scale is fitted within, in units where a search span is
+# `_SPAN_UNITS`. The floor is a guard rail: it stops a GP fitting wiggles that
+# sparse data cannot support.
+#
+# One dimension keeps the historical 1.0. That is not caution for its own sake —
+# lowering it visibly changes the one-variable answer. On the frozen 4-point
+# drop-impact record a 0.2 floor lets the fit fall to l = 0.29, which widens the
+# 95% predictive interval from [31.2, 57.4] to [30.4, 79.1] and drops
+# leave-one-out coverage from 3-of-4 to 2-of-4. Wider intervals and worse
+# calibration on four points is the model overfitting, not resolving: there is
+# no 1-D evidence for a lower floor, and those numbers are pre-registered.
+_LS_BOUNDS = (1.0, 5.0)
+
+# Multi-dimensional fits want a much lower floor, and here there IS evidence.
+# Simple regret over eight seeds, floor swept with everything else held fixed:
+#
+#            Branin (2-D)              Hartmann-3 (3-D)
+#   floor    median    max             median    max      mean
+#   1.00     0.1258    0.5403          0.0170    0.7748   0.1351
+#   0.30     0.0939    0.4131          0.0115    0.8351   0.1131
+#   0.20     0.0939    0.4132          0.0105    0.3944   0.0574
+#   0.10     0.0939    0.4132          0.0112    0.3937   0.0575
+#
+# Each benchmark saturates — Branin by 0.3, Hartmann-3 by 0.2 — and below its
+# saturation point the floor stops binding, so nothing further changes. 0.2 is
+# therefore the *largest* value that captures the whole measured gain, which is
+# the one to want: maximum guard rail for zero cost. Worst-case regret on
+# Hartmann-3 roughly halves (0.775 -> 0.394).
+#
+# That higher dimensions want a lower floor is consistent with structure
+# appearing finer along each normalized axis as axes are added, and with Xu et
+# al. (STAM Methods 3, 2210251, 2023), who independently measured ~2% of span as
+# optimal for 2-D/3-D synthesis. 0.2/4.0 is 5% — the same order.
+_LS_BOUNDS_ND = (0.2, 5.0)
 _N_RESTARTS = 8  # marginal-likelihood restarts when the length-scale is fitted
 # X is normalized internally so the search span maps to this many units.
 # 4.0 makes the canonical doping series (bounds 1–5, span 4) numerically
@@ -1328,7 +1361,7 @@ def optimize_nd(
     rel_noise: float = _REL_NOISE,
     measured_noise: float | None = None,
     xi: float = _XI,
-    length_scale_bounds: tuple[float, float] = _LS_BOUNDS,
+    length_scale_bounds: tuple[float, float] = _LS_BOUNDS_ND,
     n_candidates: int = _ND_CANDIDATES,
     polish: bool = True,
     surface_size: int = 0,
@@ -1367,12 +1400,12 @@ def optimize_nd(
             beats `rel_noise` when supplied.
         xi: Exploration sweetener in EI.
         length_scale_bounds: Range the ARD length-scales are fitted within, in
-            normalized units where each search range spans `_SPAN_UNITS`. The
-            default is the 1-D value, which measurably under-resolves in higher
-            dimensions: on Branin, lowering the floor from 1.0 to 0.3 cut simple
-            regret from 2.32 to 0.33 and moved the answer onto a true optimum.
-            Left at the historical default so no existing behaviour shifts
-            silently; lower it deliberately for a structured multi-axis target.
+            normalized units where each search range spans `_SPAN_UNITS`.
+            Defaults to `_LS_BOUNDS_ND`, whose floor of 0.2 was chosen by
+            sweeping both benchmarks over eight seeds — see the table there.
+            This is deliberately lower than the one-variable `_LS_BOUNDS`: the
+            evidence for it is multi-dimensional, and applying it to 1-D
+            measurably degrades interval calibration.
         n_candidates: Sobol points the acquisition is maximised over. Rounded
             up to the next power of two.
         polish: refine the chosen point continuously with L-BFGS-B instead of
