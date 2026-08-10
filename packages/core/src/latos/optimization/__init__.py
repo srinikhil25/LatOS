@@ -13,7 +13,7 @@ a kernel artifact.
 
 from __future__ import annotations
 
-from latos.optimization import benchmarks, spb
+from latos.optimization import benchmarks, spb, sweep, synthesis_sim
 from latos.optimization.campaign import (
     CampaignDrift,
     DriftStep,
@@ -71,6 +71,8 @@ __all__ = [
     "outcome_path_for",
     "recommendation_drift",
     "spb",
+    "sweep",
+    "synthesis_sim",
     "validate_outcome",
     "write_outcome",
     "write_record",

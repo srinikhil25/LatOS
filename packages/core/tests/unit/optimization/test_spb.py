@@ -106,3 +106,127 @@ class TestGuidance:
         assert g.beta is None
         assert g.zt_ceiling is not None and g.zt_ceiling < 0.985
         assert "multi-band" in g.note
+
+
+class TestSpbPrior:
+    """`make_spb_prior` — the bridge from SPB physics to the optimizer's prior.
+
+    The engine wants zT as a function of the *synthesis knob*; SPB gives it as a
+    function of the reduced Fermi level. These pin the join, and in particular
+    that the prior carries the interior optimum a zero-mean GP cannot know
+    about.
+    """
+
+    @staticmethod
+    def _series(beta: float, intercept: float, slope: float, knob):
+        import numpy as np
+
+        knob = np.asarray(knob, dtype=float)
+        eta = intercept + slope * knob
+        seebeck = np.array([abs(spb.seebeck_uv_k(float(e))) for e in eta])
+        zt_vals = np.array([spb.zt(float(e), beta) for e in eta])
+        return knob, seebeck, zt_vals
+
+    def test_round_trips_the_parameters_that_generated_it(self):
+        """A series generated from SPB must be recovered by the fit."""
+        x, s, z = self._series(0.4, -2.0, 1.0, [0.0, 1.0, 2.0, 3.0, 4.0])
+        p = spb.make_spb_prior(x, s, z)
+        assert p.beta == pytest.approx(0.4, rel=1e-3)
+        assert p.eta_intercept == pytest.approx(-2.0, abs=1e-3)
+        assert p.eta_slope == pytest.approx(1.0, abs=1e-3)
+        assert p.n_used == 5
+        assert p.n_excluded == 0
+
+    def test_carries_an_interior_optimum(self):
+        """The whole point: the prior knows the far edge is bad beforehand.
+
+        A zero-mean GP reverts to a flat trend outside the data, so a sparse
+        campaign drifts toward whatever it has not sampled. SPB says zT peaks at
+        an intermediate carrier concentration, and that peak has to survive the
+        eta(x) bridge or the prior is not worth having.
+        """
+        import numpy as np
+
+        x, s, z = self._series(0.4, -2.0, 1.0, [0.0, 1.0, 2.0, 3.0, 4.0])
+        p = spb.make_spb_prior(x, s, z)
+        grid = np.linspace(0.0, 6.0, 61)
+        values = p(grid)
+        peak = int(np.argmax(values))
+        assert 0 < peak < len(grid) - 1, "prior must peak inside the range"
+        expected = (spb.optimal_eta(0.4) - p.eta_intercept) / p.eta_slope
+        assert grid[peak] == pytest.approx(expected, abs=0.2)
+
+    def test_accepts_a_column_of_a_multi_axis_design(self):
+        import numpy as np
+
+        x, s, z = self._series(0.4, -2.0, 1.0, [0.0, 1.0, 2.0, 3.0, 4.0])
+        design = np.column_stack([np.full_like(x, 400.0), x])
+        p = spb.make_spb_prior(design, s, z, axis=1)
+        assert p.eta_slope == pytest.approx(1.0, abs=1e-3)
+        assert p(design) == pytest.approx(p(x), rel=1e-9)
+
+    def test_excludes_samples_above_the_single_band_ceiling(self):
+        """Points SPB cannot describe are dropped and counted, never absorbed.
+
+        Silently fitting through an impossible point would bake a wrong shape
+        into every subsequent recommendation. The count is the signal.
+        """
+        import numpy as np
+
+        x, s, z = self._series(0.4, -2.0, 1.0, [0.0, 1.0, 2.0, 3.0, 4.0])
+        z = np.asarray(z, dtype=float).copy()
+        z[2] = 50.0  # far above the SPB ceiling at that Seebeck
+        p = spb.make_spb_prior(x, s, z)
+        assert p.n_excluded == 1
+        assert p.n_used == 4
+        assert "excluded" in p.note
+
+    def test_refuses_when_fewer_than_two_samples_survive(self):
+        """One point fixes a level but not a trend; an invented slope is worse
+        than no prior at all."""
+        import numpy as np
+
+        x, s, z = self._series(0.4, -2.0, 1.0, [0.0, 1.0, 2.0])
+        z = np.asarray(z, dtype=float).copy()
+        z[1:] = 50.0
+        with pytest.raises(ValueError, match="at least two"):
+            spb.make_spb_prior(x, s, z)
+
+    def test_mismatched_lengths_are_rejected(self):
+        import numpy as np
+
+        with pytest.raises(ValueError, match="align"):
+            spb.make_spb_prior(
+                np.array([0.0, 1.0, 2.0]), np.array([200.0, 150.0]), np.array([0.5, 0.6, 0.7])
+            )
+
+    def test_steers_the_optimizer_to_the_physical_optimum(self):
+        """End to end, with an honest noise figure.
+
+        `measured_noise` matters here and is not incidental. On the 8 % default
+        the noise floor sits above the best expected improvement, the engine
+        concludes no experiment can beat the measurement, and — below ten
+        samples — falls back to exploring the widest gap, discarding the prior
+        entirely. That is correct conservatism given a pessimistic noise input,
+        but it means a prior only pays off once repeatability is measured.
+        """
+        import numpy as np
+
+        from latos.optimization import optimize
+
+        x, s, z = self._series(0.4, -2.0, 1.0, [0.0, 1.0, 2.0, 3.0, 4.0])
+        rng = np.random.default_rng(0)
+        observed = z + rng.normal(0.0, 0.02, z.size)
+        p = spb.make_spb_prior(x, s, z)
+
+        result = optimize(
+            x,
+            observed,
+            bounds=(0.0, 6.0),
+            input_name="doping_pct",
+            target_name="zT",
+            prior_mean=p,
+            measured_noise=0.02,
+        )
+        expected = (spb.optimal_eta(p.beta) - p.eta_intercept) / p.eta_slope
+        assert result.recommendation.x == pytest.approx(expected, abs=0.3)

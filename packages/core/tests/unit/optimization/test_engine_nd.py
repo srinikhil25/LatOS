@@ -9,11 +9,18 @@ step, so they are pinned here explicitly rather than trusted to stay put.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pytest
 
 from latos.optimization import OptimizationError, optimize, optimize_nd
-from latos.optimization.engine import _LS_BOUNDS, _LS_BOUNDS_ND
+from latos.optimization.engine import (
+    _GRID_SIZE,
+    _LS_BOUNDS,
+    _LS_BOUNDS_ND,
+    _PROB_MAX_POINTS,
+)
 
 # The frozen drop-impact record: four loadings, the recommendation and interval
 # that were committed to disk before the fifth sample was made.
@@ -50,7 +57,22 @@ class TestOneDimensionalPathUnchanged:
         assert r.recommendation.x == pytest.approx(47.451, abs=0.01)
         assert lo == pytest.approx(31.215, abs=0.01)
         assert hi == pytest.approx(57.425, abs=0.01)
-        assert r.max_ei == pytest.approx(0.68, abs=0.01)
+        # max_ei moved 0.68 -> 0.646 on 2026-08-10, when `xi` became a fraction
+        # of the observed spread rather than an absolute value in the target's
+        # units (see `_xi_absolute`). Peak force runs 36-72 N, so std(y) = 12.5
+        # and xi resolves to 0.125 instead of 0.01 — a larger sweetener, hence a
+        # slightly smaller EI at the peak.
+        #
+        # Everything this record actually *claims* is untouched: same
+        # recommendation, same predictive interval, same leave-one-out coverage,
+        # same noise floor. Only the acquisition value shifted, and that is an
+        # internal diagnostic, not a statement about the material — which is why
+        # updating this number does not invalidate the pre-registration.
+        #
+        # The change was made because the old absolute constant exceeded real
+        # improvements on zT-scale targets (~0.07) and drove EI to exactly zero
+        # there, so exploration silently depended on the target's units.
+        assert r.max_ei == pytest.approx(0.646, abs=0.01)
         assert r.noise_threshold == pytest.approx(4.45, abs=0.01)
         assert r.reliability is not None
         assert (r.reliability.loo_inside, r.reliability.loo_total) == (3, 4)
@@ -127,6 +149,65 @@ class TestTheLengthScaleFloorIsSplitByDimension:
         )
         assert min(r.config.length_scales) < _LS_BOUNDS[0]
         assert min(r.config.length_scales) >= _LS_BOUNDS_ND[0] - 1e-9
+
+
+class TestTheRegretBoundIsAffordable:
+    """The epsilon-delta bound draws joint posterior paths, which is cubic in the
+    number of points sampled over.
+
+    `optimize()` evaluates on a 200-point grid, where that is free, and the
+    estimator was written for that case. `optimize_nd` maximises over 2048 Sobol
+    candidates — roughly a thousandfold more work in the cubic term — and the
+    cost was paid on every multi-variable call whether or not the caller read the
+    result. It dominated the runtime of the endpoint that draws the 2-D map.
+
+    The fix samples only over candidates that could plausibly *be* the maximum,
+    selected by upper confidence bound. These tests pin both halves: that the cap
+    leaves one dimension alone, and that it does not quietly change the answer.
+    """
+
+    def test_one_dimension_is_below_the_cap(self):
+        """So `optimize()` results, including every frozen record, are
+        bit-identical rather than merely close."""
+        assert _GRID_SIZE <= _PROB_MAX_POINTS
+
+    def test_the_probability_survives_the_cap(self):
+        """Capping is only legitimate if the number it produces is the same
+        number. Compared against an effectively uncapped estimate on the same
+        posterior; the tolerance is a few times the estimator's own Monte-Carlo
+        error, which is what it is being asked to stay inside."""
+        x, y = _grid_2d(n_dop=7, n_temp=7)
+        r = optimize_nd(
+            x, y, bounds=[(0, 5), (300, 600)], input_names=("doping", "temp"), target_name="zt"
+        )
+        uncapped = optimize_nd(
+            x,
+            y,
+            bounds=[(0, 5), (300, 600)],
+            input_names=("doping", "temp"),
+            target_name="zt",
+            prob_max_points=10**9,
+        )
+        assert r.prob_within_epsilon == pytest.approx(uncapped.prob_within_epsilon, abs=0.06)
+
+    def test_it_is_much_faster(self):
+        """The point of the change. A generous threshold — the measured speedup
+        is ~75x — so this fails only if the cap stops working, not on timing
+        noise or a slower machine."""
+        x, y = _grid_2d(n_dop=8, n_temp=8)
+        kw = {
+            "bounds": [(0, 5), (300, 600)],
+            "input_names": ("doping", "temp"),
+            "target_name": "zt",
+            "with_reliability": False,
+        }
+        start = time.perf_counter()
+        optimize_nd(x, y, **kw)
+        capped = time.perf_counter() - start
+        start = time.perf_counter()
+        optimize_nd(x, y, prob_max_points=10**9, **kw)
+        uncapped = time.perf_counter() - start
+        assert capped < uncapped / 3
 
 
 class TestGuards:
