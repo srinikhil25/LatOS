@@ -17,6 +17,11 @@ import openpyxl
 import pytest
 
 from latos.core.enums import Severity, Technique
+from latos.ingestion.ite_workbook_template import (
+    MEASUREMENT_COLUMNS,
+    SAMPLE_COLUMNS,
+    write_template,
+)
 from latos.ingestion.parsers.ite_workbook import IteWorkbookParser, _first_datetime
 
 SAMPLE_COLS = [
@@ -333,3 +338,68 @@ class TestMalformedFiles:
         path = _write(tmp_path, [_sample()], rows)
         (result,) = IteWorkbookParser().parse_all(path)
         json.dumps(result.metadata)  # must not raise
+
+
+class TestTheGeneratorAndTheParserAgree:
+    """The reason the schema and the writer live in one module.
+
+    These two programs are the whole contract between the bench and the code.
+    While the generator sat in an untracked scratch directory with its own copy
+    of the column names, a rename on either side would have produced empty
+    measurements rather than an error, and only a test written against the
+    layout I happened to assume would have caught it.
+    """
+
+    def test_a_freshly_generated_template_is_recognised(self, tmp_path):
+        path = write_template(tmp_path / "blank.xlsx")
+        assert IteWorkbookParser().can_parse(path) == 1.0
+
+    def test_a_blank_template_parses_to_no_samples_rather_than_a_crash(self, tmp_path):
+        path = write_template(tmp_path / "blank.xlsx")
+        results = IteWorkbookParser().parse_all(path)
+        assert len(results) == 1
+        assert "no data rows" in results[0].issues[0].message
+
+    def test_every_column_the_parser_needs_exists_on_the_generated_sheet(self, tmp_path):
+        """Guards the direction a rename would break silently."""
+        import openpyxl
+
+        from latos.ingestion.ite_workbook_template import (
+            HEADER_ROW,
+            MEASUREMENTS_SHEET,
+            REQUIRED_MEASUREMENT_FIELDS,
+            REQUIRED_SAMPLE_FIELDS,
+            SAMPLES_SHEET,
+        )
+
+        wb = openpyxl.load_workbook(write_template(tmp_path / "blank.xlsx"))
+        for sheet, required in (
+            (SAMPLES_SHEET, REQUIRED_SAMPLE_FIELDS),
+            (MEASUREMENTS_SHEET, REQUIRED_MEASUREMENT_FIELDS),
+        ):
+            header = {c.value for c in wb[sheet][HEADER_ROW]}
+            assert set(required) <= header, f"{sheet} is missing {set(required) - header}"
+
+    def test_the_test_fixtures_use_the_real_column_names(self):
+        """Keeps these tests honest.
+
+        Everything above builds its own workbook rather than the generated one,
+        for speed and control. That only proves anything if the column names it
+        invents are the real ones.
+        """
+        assert set(SAMPLE_COLS) <= {c.name for c in SAMPLE_COLUMNS}
+        assert set(MEAS_COLS) <= {c.name for c in MEASUREMENT_COLUMNS}
+
+    def test_required_fields_are_a_subset_of_the_tier_one_columns(self):
+        """The parser may only insist on fields the template asks the bench for."""
+        from latos.ingestion.ite_workbook_template import (
+            REQUIRED_MEASUREMENT_FIELDS,
+            REQUIRED_SAMPLE_FIELDS,
+        )
+
+        for columns, required in (
+            (SAMPLE_COLUMNS, REQUIRED_SAMPLE_FIELDS),
+            (MEASUREMENT_COLUMNS, REQUIRED_MEASUREMENT_FIELDS),
+        ):
+            tier1 = {c.name for c in columns if c.tier == 1}
+            assert set(required) <= tier1

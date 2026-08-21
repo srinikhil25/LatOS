@@ -2,7 +2,8 @@
 
 File format
 -----------
-The workbook written by `docs/make_ite_template.py`, filled in at the bench.
+The workbook written by `latos.ingestion.ite_workbook_template`, filled in at
+the bench.
 Three sheets, of which two carry data:
 
 * **samples** — one row per prepared sample: which two ionic liquids, the
@@ -54,28 +55,22 @@ import openpyxl
 from latos.core.enums import Severity, Technique
 from latos.core.models import ValidationIssue, utc_now
 from latos.ingestion.base_parser import BaseParser
+from latos.ingestion.ite_workbook_template import (
+    FIRST_DATA_ROW,
+    HEADER_ROW,
+    MEASUREMENTS_SHEET,
+    REQUIRED_MEASUREMENT_FIELDS,
+    REQUIRED_SAMPLE_FIELDS,
+    SAMPLES_SHEET,
+)
 from latos.ingestion.parsed_data import ParsedData
 
 __all__ = ["IteWorkbookParser"]
 
-_SAMPLES_SHEET = "samples"
-_MEASUREMENTS_SHEET = "measurements"
-
-# The header sits on row 2; row 1 is the sheet title and row 3 the unit hints.
-_HEADER_ROW = 2
-_FIRST_DATA_ROW = 4
-
-# Fields that cannot be reconstructed after the run. Their absence is reported
-# per row, because a campaign is only as analysable as its worst-recorded run.
-_TIER1_MEASUREMENT = (
-    "RH_percent",
-    "T_hot_C",
-    "T_cold_C",
-    "wait_time_s",
-    "delta_V_mV",
-    "electrode_material",
-)
-_TIER1_SAMPLE = ("mass_IL_A_mg", "mass_IL_B_mg")
+# Sheet names, row offsets and the required-field lists all come from
+# `ite_workbook_template`, which is also what writes the blank workbook. Keeping
+# a second copy here is how the writer and the reader drift apart: a renamed
+# column would produce empty measurements rather than an error.
 
 # Preparation columns copied into metadata so they stay with the numbers they
 # explain. Everything else on the sheet is free text for a human reader.
@@ -140,9 +135,9 @@ class IteWorkbookParser(BaseParser):
             return 0.0
         try:
             names = set(wb.sheetnames)
-            if not {_SAMPLES_SHEET, _MEASUREMENTS_SHEET} <= names:
+            if not {SAMPLES_SHEET, MEASUREMENTS_SHEET} <= names:
                 return 0.0
-            for sheet in (_SAMPLES_SHEET, _MEASUREMENTS_SHEET):
+            for sheet in (SAMPLES_SHEET, MEASUREMENTS_SHEET):
                 if "sample_id" not in _header(wb[sheet]):
                     return 0.0
         finally:
@@ -162,7 +157,7 @@ class IteWorkbookParser(BaseParser):
             return (self._empty(_open_failure(f"could not open workbook: {exc}")),)
 
         try:
-            missing = [s for s in (_SAMPLES_SHEET, _MEASUREMENTS_SHEET) if s not in wb.sheetnames]
+            missing = [s for s in (SAMPLES_SHEET, MEASUREMENTS_SHEET) if s not in wb.sheetnames]
             if missing:
                 return (
                     self._empty(
@@ -173,8 +168,8 @@ class IteWorkbookParser(BaseParser):
                     ),
                 )
 
-            samples = _rows(wb[_SAMPLES_SHEET])
-            measurements = _rows(wb[_MEASUREMENTS_SHEET])
+            samples = _rows(wb[SAMPLES_SHEET])
+            measurements = _rows(wb[MEASUREMENTS_SHEET])
         finally:
             wb.close()
 
@@ -210,7 +205,7 @@ class IteWorkbookParser(BaseParser):
         sample_id = str(sample["sample_id"])
         issues: list[ValidationIssue] = []
 
-        for field in _TIER1_SAMPLE:
+        for field in REQUIRED_SAMPLE_FIELDS:
             if _blank(sample.get(field)):
                 issues.append(
                     _issue(
@@ -294,9 +289,9 @@ class IteWorkbookParser(BaseParser):
 def _header(sheet: Any) -> dict[str, int]:
     """Column name → zero-based index, read from the header row."""
     for index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-        if index == _HEADER_ROW:
+        if index == HEADER_ROW:
             return {str(v).strip(): i for i, v in enumerate(row) if v is not None}
-        if index > _HEADER_ROW:
+        if index > HEADER_ROW:
             break
     return {}
 
@@ -306,10 +301,10 @@ def _rows(sheet: Any) -> list[dict[str, Any]]:
     header: dict[str, int] = {}
     out: list[dict[str, Any]] = []
     for index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-        if index == _HEADER_ROW:
+        if index == HEADER_ROW:
             header = {str(v).strip(): i for i, v in enumerate(row) if v is not None}
             continue
-        if index < _FIRST_DATA_ROW or not header:
+        if index < FIRST_DATA_ROW or not header:
             continue
         record = {name: row[i] if i < len(row) else None for name, i in header.items()}
         if any(not _blank(v) for v in record.values()):
@@ -327,7 +322,7 @@ def _series(
 
     for row in rows:
         label = f"Sample {sample_id}, measurement {row.get('meas_id') or '(unlabelled)'}"
-        for field in _TIER1_MEASUREMENT:
+        for field in REQUIRED_MEASUREMENT_FIELDS:
             if _blank(row.get(field)):
                 issues.append(
                     _issue(field, f"{label}: {field} is empty and cannot be recovered later.")
