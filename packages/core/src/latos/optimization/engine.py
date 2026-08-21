@@ -49,9 +49,10 @@ from __future__ import annotations
 import math
 import os
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any, Protocol
 
 # Single-threaded BLAS keeps memory tiny for these small problems and
 # avoids OpenBLAS over-allocating on constrained boxes. Set before numpy.
@@ -59,6 +60,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import numpy as np
+from scipy.optimize import minimize
 from scipy.spatial import cKDTree
 from scipy.stats import norm, qmc
 from sklearn.exceptions import ConvergenceWarning
@@ -73,6 +75,7 @@ __all__ = [
     "ReliabilityReport",
     "RobustnessEntry",
     "RobustnessReport",
+    "StoppingVerdict",
     "length_scale_robustness",
     "optimize",
 ]
@@ -83,7 +86,40 @@ _XI = 0.01  # EI exploration sweetener
 _GRID_SIZE = 200
 _MIN_POINTS = 3  # a GP over fewer than 3 points isn't worth trusting
 _LS_INIT = 1.5  # RBF length-scale starting point when fitted
-_LS_BOUNDS = (1.0, 5.0)  # bounds the length-scale is fitted within
+# Bounds the length-scale is fitted within, in units where a search span is
+# `_SPAN_UNITS`. The floor is a guard rail: it stops a GP fitting wiggles that
+# sparse data cannot support.
+#
+# One dimension keeps the historical 1.0. That is not caution for its own sake —
+# lowering it visibly changes the one-variable answer. On the frozen 4-point
+# drop-impact record a 0.2 floor lets the fit fall to l = 0.29, which widens the
+# 95% predictive interval from [31.2, 57.4] to [30.4, 79.1] and drops
+# leave-one-out coverage from 3-of-4 to 2-of-4. Wider intervals and worse
+# calibration on four points is the model overfitting, not resolving: there is
+# no 1-D evidence for a lower floor, and those numbers are pre-registered.
+_LS_BOUNDS = (1.0, 5.0)
+
+# Multi-dimensional fits want a much lower floor, and here there IS evidence.
+# Simple regret over eight seeds, floor swept with everything else held fixed:
+#
+#            Branin (2-D)              Hartmann-3 (3-D)
+#   floor    median    max             median    max      mean
+#   1.00     0.1258    0.5403          0.0170    0.7748   0.1351
+#   0.30     0.0939    0.4131          0.0115    0.8351   0.1131
+#   0.20     0.0939    0.4132          0.0105    0.3944   0.0574
+#   0.10     0.0939    0.4132          0.0112    0.3937   0.0575
+#
+# Each benchmark saturates — Branin by 0.3, Hartmann-3 by 0.2 — and below its
+# saturation point the floor stops binding, so nothing further changes. 0.2 is
+# therefore the *largest* value that captures the whole measured gain, which is
+# the one to want: maximum guard rail for zero cost. Worst-case regret on
+# Hartmann-3 roughly halves (0.775 -> 0.394).
+#
+# That higher dimensions want a lower floor is consistent with structure
+# appearing finer along each normalized axis as axes are added, and with Xu et
+# al. (STAM Methods 3, 2210251, 2023), who independently measured ~2% of span as
+# optimal for 2-D/3-D synthesis. 0.2/4.0 is 5% — the same order.
+_LS_BOUNDS_ND = (0.2, 5.0)
 _N_RESTARTS = 8  # marginal-likelihood restarts when the length-scale is fitted
 # X is normalized internally so the search span maps to this many units.
 # 4.0 makes the canonical doping series (bounds 1–5, span 4) numerically
@@ -123,6 +159,13 @@ _RELIABILITY_CALIBRATED_N = 25  # at or above this: "calibrated"
 _FILL_INDICATIVE = _SPAN_UNITS / (2 * (_RELIABILITY_INDICATIVE_N - 1))
 _FILL_CALIBRATED = _SPAN_UNITS / (2 * (_RELIABILITY_CALIBRATED_N - 1))
 _FILL_PROBE = 2**14  # probe points for the multi-dimensional fill estimate
+# Boundary slack. Because the limits are derived to agree with the counts
+# exactly, n evenly spaced points land precisely ON their own threshold, and
+# float arithmetic then settles the tier on the last bit of the mantissa —
+# ten evenly spaced points would fail the tier they define. Comparing against
+# (1 + tol) makes the two rules agree at the boundary instead of fighting over
+# one ULP.
+_FILL_TOL = 1e-6
 # A leave-one-out coverage this poor forces "exploratory" regardless of n —
 # the model demonstrably cannot predict its own data points.
 _LOO_FORCE_EXPLORATORY = 0.5
@@ -133,9 +176,25 @@ _CI95 = 1.96  # 95% Gaussian half-width in standard deviations
 # A measurement our physics checks reject is treated as this many times
 # noisier rather than deleted: the GP still sees it, but stops chasing it.
 _UNRELIABLE_NOISE_FACTOR = 3.0
+# Floor on a per-point noise multiplier, as a fraction of the median multiplier
+# in the same campaign. A reported standard error of zero claims one observation
+# is exact; a GP handed a noiseless point interpolates it exactly and lets that
+# single optimistic error bar dominate every neighbouring prediction. Small
+# uncertainties are believed, impossible ones are not.
+_MIN_POINT_NOISE_FRACTION = 0.05
 # Posterior draws behind the (epsilon, delta) statement. 512 puts the standard
 # error of the reported probability near 2%, which is finer than we quote it.
 _N_POSTERIOR_DRAWS = 512
+# Points the joint posterior draw is taken over. Exact sampling is cubic in this
+# number, and the 1-D grid (200) sits below the cap so that path is untouched;
+# the multi-variable candidate set (2048) is cut down to it. See
+# `_prob_within_epsilon` for why the selection is by upper confidence bound.
+# 512 rather than a smaller, faster cap because that is where the measurement
+# put it: averaged over six seeds the capped estimate sits within 0.5x the
+# estimator's own Monte-Carlo error of the uncapped one, whereas 256 drifted to
+# 1.5x on sparse data. Cheap is only worth having if the answer survives.
+_PROB_MAX_POINTS = 512
+_PROB_UCB_SIGMAS = 4.0  # a candidate this far above its mean is still competitive
 _DEFAULT_DELTA = 0.1  # report "within epsilon" at 90% confidence by default
 
 # y-space transforms (the physics layer). Strictly-positive order-of-magnitude
@@ -228,13 +287,23 @@ class BoConfig:
     length_scale: float  # RBF length-scale actually used (normalized-x units)
     length_scale_fitted: bool  # True if fitted from data, False if held fixed
     length_scale_bounds: tuple[float, float]  # bounds used when fitting
-    xi: float  # EI exploration sweetener
+    xi: float  # EI exploration sweetener, as a FRACTION of the observed spread
     rel_noise: float  # relative measurement-noise level fed to the GP
     noise_std: float  # absolute measurement-noise std, in objective units
     n_observations: int  # number of measured points the GP was fit to
     grid_size: int  # resolution of the posterior/acquisition grid
     seed: int  # RNG seed (GP restarts) — makes the fit reproducible
     created_at: datetime  # when this recommendation was produced
+    # `xi` was an absolute value in objective units until 2026-08-10, so a bare
+    # `xi = 0.01` is ambiguous across versions. Recording what it resolved to
+    # disambiguates every record: absent means the old absolute reading.
+    xi_absolute: float | None = None  # `xi` in objective units, as applied
+    # True when per-observation standard deviations were supplied. Without it
+    # two runs could carry byte-identical configs and still have produced
+    # different recommendations, because a heteroscedastic fit weighs the same
+    # points differently. A frozen record that cannot tell those apart is not a
+    # record of how the answer was produced.
+    point_noise_used: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,6 +385,9 @@ class OptimizationResult:
     delta: float = _DEFAULT_DELTA
     prob_within_epsilon: float = 0.0
     epsilon_delta_met: bool = False
+    # The headline: one action, with the reasoning behind it. The four
+    # fields above are its inputs and stay for callers that want them.
+    stopping: StoppingVerdict | None = None
     # How many observations the physics checks flagged as unreliable, and so
     # were down-weighted in the fit.
     n_unreliable: int = 0
@@ -364,13 +436,263 @@ def _noise_scale(
     return np.where(flags, _UNRELIABLE_NOISE_FACTOR, 1.0), n_flagged
 
 
+def _validate_point_noise(point_noise: np.ndarray | None, n_observations: int) -> np.ndarray | None:
+    """Per-observation measurement uncertainties, checked and returned as floats.
+
+    Rejects rather than repairs. A negative or non-finite standard deviation is
+    not a value to clamp, it is a caller bug, and quietly substituting something
+    plausible would hand the surrogate a confidence nobody computed.
+    """
+    if point_noise is None:
+        return None
+    sigma = np.asarray(point_noise, dtype=float).reshape(-1)
+    if sigma.size != n_observations:
+        raise OptimizationError(
+            f"point_noise must have one entry per observation: got {sigma.size} "
+            f"for {n_observations} points."
+        )
+    if not np.all(np.isfinite(sigma)):
+        raise OptimizationError("point_noise must be finite; got NaN or infinity.")
+    if np.any(sigma < 0):
+        raise OptimizationError("point_noise must be non-negative; got a negative value.")
+    if not np.any(sigma > 0):
+        raise OptimizationError("point_noise is zero everywhere, which claims perfect data.")
+    return sigma
+
+
+def _point_noise_scale(
+    sigma: np.ndarray | None,
+    *,
+    noise_std: float,
+    transform: str,
+    y_linear: np.ndarray,
+) -> np.ndarray | None:
+    """Turn measured per-point uncertainties into multipliers on the shared noise.
+
+    Reliability has reached the surrogate as one bit per datapoint: a physics
+    check either flagged an observation or it did not, and a flagged one had its
+    error bar widened by a fixed factor. That throws away a number the analysis
+    layer already computes. A fitted slope arrives with a standard error, a
+    derived quantity carries propagated uncertainty, and a spread across
+    modelling choices is itself a measurement of how well a value is known.
+    Passing those through makes the Gaussian process heteroscedastic by
+    construction rather than by category.
+
+    The multiplier is `σᵢ / noise_std`, because `_build_gp` forms the diagonal
+    as `(noise_std / std(y))² · scale²`; the shared term then cancels and each
+    point contributes exactly `(σᵢ / std(y))²`.
+
+    Both terms have to live in the same space. In log space a GP sees fractional
+    error, so an absolute `σᵢ` is divided by that observation's own magnitude
+    rather than by the series mean — which is the point of doing this per point.
+
+    A σ of zero is lifted to a small floor. Zero would assert that one
+    observation is exact, and a GP handed a noiseless point interpolates it
+    exactly, letting a single optimistic error bar dominate the fit.
+    """
+    if sigma is None:
+        return None
+
+    if transform == _LOG:
+        magnitude = np.abs(np.asarray(y_linear, dtype=float))
+        safe = np.where(magnitude > 0, magnitude, 1.0)
+        sigma_fit = sigma / safe
+    else:
+        sigma_fit = sigma
+
+    if noise_std <= 0:
+        return None
+    scale = sigma_fit / noise_std
+    floor = _MIN_POINT_NOISE_FRACTION * float(np.median(scale[scale > 0]))
+    return np.maximum(scale, floor)
+
+
+STOP = "stop"
+CONFIRM = "confirm"
+CONTINUE = "continue"
+
+
+@dataclass(frozen=True, slots=True)
+class StoppingVerdict:
+    """Should another experiment be run? One answer, with the grounds for it.
+
+    Everything needed to answer this was already computed, spread across four
+    fields a caller had to combine correctly. In a project whose premise is
+    spending very few experiments, "am I done?" deserves to be the headline of a
+    recommendation rather than something reconstructed from `converged`,
+    `max_ei`, `prob_within_epsilon` and the reliability grade.
+
+    Two independent lines of evidence bear on it, and they can disagree:
+
+    * the **probabilistic regret bound** -- how likely the best sample already
+      taken is to sit within `epsilon` of the true optimum
+    * the **data-sufficiency grade** -- whether the model that produced that
+      probability has enough coverage to be believed at all
+
+    When they agree the answer is easy. When the probability is high and the
+    grade is still exploratory, neither "stop" nor "keep exploring" is honest:
+    the model says it has found the answer, and separately says it is not yet
+    trustworthy enough for that claim to stand alone. That case is CONFIRM --
+    repeat the incumbent and let the two lines settle it, which costs one
+    experiment where continued exploration costs several.
+
+    Measured behaviour that motivated this: on a single-peak objective sampled
+    at six points including the peak, the engine reported probability 0.992,
+    signal exhausted, `converged=False`, and recommended the far edge of the
+    search space. Every number was right and the advice was wrong.
+    """
+
+    action: str  # STOP, CONFIRM or CONTINUE
+    probability: float  # P(incumbent is within `epsilon` of the optimum)
+    epsilon: float  # tolerance the probability is stated against
+    delta: float  # risk level; the claim holds at 1 - delta confidence
+    signal_exhausted: bool  # no expected improvement left above the noise floor
+    data_sufficient: bool  # the reliability grade is past "exploratory"
+    reason: str  # one sentence, addressed to the experimentalist
+
+    @property
+    def should_stop(self) -> bool:
+        """True only for an unambiguous stop, never for a contested one."""
+        return self.action == STOP
+
+
+def _stopping_verdict(
+    *,
+    probability: float,
+    epsilon: float,
+    delta: float,
+    signal_exhausted: bool,
+    reliability: ReliabilityReport | None,
+    best_label: str,
+) -> StoppingVerdict:
+    """Turn the four stopping signals into one statement a person can act on."""
+    met = probability >= 1.0 - delta
+    data_sufficient = reliability is not None and reliability.level != "exploratory"
+
+    if signal_exhausted and met and data_sufficient:
+        action = STOP
+        reason = (
+            f"Stop. The best sample so far ({best_label}) is within {epsilon:.3g} of the "
+            f"optimum with probability {probability:.2f}, no remaining experiment offers "
+            "improvement above the measurement noise, and the data supports the claim."
+        )
+    elif met and not data_sufficient:
+        action = CONFIRM
+        reason = (
+            f"Confirm before stopping. The model puts the best sample so far "
+            f"({best_label}) within {epsilon:.3g} of the optimum with probability "
+            f"{probability:.2f}, but there is too little data for that claim to stand on "
+            "its own. Repeating the incumbent settles it in one experiment; continued "
+            "exploration would cost several."
+        )
+    elif signal_exhausted:
+        action = CONTINUE
+        reason = (
+            f"Keep going. Expected improvement has fallen below the noise floor, but the "
+            f"best sample so far ({best_label}) is within {epsilon:.3g} of the optimum "
+            f"with probability only {probability:.2f}. A flat acquisition here means the "
+            "model is uninformative in the gaps it never sampled, not that the optimum "
+            "is found."
+        )
+    else:
+        action = CONTINUE
+        reason = (
+            f"Keep going. Expected improvement still exceeds the measurement noise, and "
+            f"the best sample so far ({best_label}) is within {epsilon:.3g} of the "
+            f"optimum with probability {probability:.2f}."
+        )
+
+    return StoppingVerdict(
+        action=action,
+        probability=float(probability),
+        epsilon=float(epsilon),
+        delta=float(delta),
+        signal_exhausted=bool(signal_exhausted),
+        data_sufficient=bool(data_sufficient),
+        reason=reason,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _NoiseModel:
+    """How much each observation is trusted, and on what grounds.
+
+    Extracted so the two entry points cannot disagree. Both need the same five
+    facts, and assembling them inline twice is how the 1-D and d-D paths drifted
+    apart before `_fit_surrogate` was pulled out for the same reason.
+    """
+
+    std: float  # the shared level, in fit-space units
+    scale: np.ndarray | None  # per-observation multipliers on it
+    n_unreliable: int  # observations a physics check rejected
+    measured: bool  # the level came from data, not from an assumed percentage
+    per_point: bool  # per-observation standard deviations were supplied
+
+
+def _noise_model(
+    y: np.ndarray,
+    y_work: np.ndarray,
+    *,
+    rel_noise: float,
+    measured_noise: float | None,
+    point_noise: np.ndarray | None,
+    unreliable: np.ndarray | None,
+    transform: str,
+) -> _NoiseModel:
+    """Assemble the shared noise level and the per-observation multipliers.
+
+    A per-point series also has to supply the single number the rest of the
+    engine reasons with, since the exploration sweetener, the convergence floor
+    and the epsilon statement are all scalar. The median is the representative
+    one, chosen over the mean so that a single very uncertain observation cannot
+    inflate the level the whole campaign is judged against.
+    """
+    sigma = _validate_point_noise(point_noise, y.size)
+    if sigma is not None and measured_noise is None:
+        measured_noise = float(np.median(sigma))
+
+    noise_std = _noise_std(y_work, rel_noise, transform, measured_noise, y)
+    from_flags, n_unreliable = _noise_scale(unreliable, y.size)
+    scale = _merge_noise_scales(
+        from_flags,
+        _point_noise_scale(sigma, noise_std=noise_std, transform=transform, y_linear=y),
+    )
+    return _NoiseModel(
+        std=noise_std,
+        scale=scale,
+        n_unreliable=n_unreliable,
+        measured=bool(measured_noise is not None and measured_noise > 0),
+        per_point=sigma is not None,
+    )
+
+
+def _merge_noise_scales(
+    from_flags: np.ndarray | None, from_points: np.ndarray | None
+) -> np.ndarray | None:
+    """Combine the two reasons an observation's error bar might be widened.
+
+    They are not the same claim, so they multiply rather than compete. A per-
+    point standard error says how repeatable a measurement was; a physics flag
+    says the value is inconsistent with something that must hold regardless of
+    how carefully it was taken. A precisely-measured impossible number deserves
+    both penalties — the precision is exactly what makes it worth distrusting.
+    """
+    if from_flags is None:
+        return from_points
+    if from_points is None:
+        return from_flags
+    return np.asarray(from_flags * from_points, dtype=float)
+
+
 def _prob_within_epsilon(
     gp: GaussianProcessRegressor,
     grid_norm: np.ndarray,
     best_x_norm: float,
     epsilon: float,
     seed: int,
+    *,
     n_draws: int = _N_POSTERIOR_DRAWS,
+    max_points: int = _PROB_MAX_POINTS,
 ) -> float:
     """P(the best measured point is within `epsilon` of the true optimum).
 
@@ -383,14 +705,38 @@ def _prob_within_epsilon(
     better, so `epsilon` is in the same units as `noise_std`.
 
     Wilson evaluates this with a random-feature approximation because exact
-    sampling is cubic in the number of points. Our grid is small and 1-D, so
-    we sample exactly and skip the approximation. Note his own caveat: the
+    sampling is cubic in the number of points. Note his own caveat: the
     probability is conditional *on the model*. That is precisely why Latos
     reports it alongside the data-sufficiency grade rather than instead of it.
+
+    Rather than approximate the sampler, we shrink what is sampled over. Only
+    candidates that could plausibly *be* the maximum affect `max(f)`; one whose
+    posterior sits far below the incumbent cannot change the answer however many
+    paths are drawn. So when the candidate set is large it is cut to the top
+    `max_points` by an upper confidence bound, which keeps exactly the points
+    that drive the statistic.
+
+    This is not a micro-optimisation. `optimize()` evaluates on a 200-point grid,
+    where exact sampling is free, and the original version of this function was
+    written for that case. `optimize_nd` maximises over 2048 Sobol candidates,
+    and 2048^3 against 200^3 is roughly a thousandfold more work in the cubic
+    term — enough that the multi-variable endpoint spent most of its time here,
+    computing a number many callers never read. The 1-D path is unaffected: 200
+    is already below the cap, so its results are bit-identical.
+
+    Selecting by upper confidence bound rather than at random matters. A random
+    subsample would usually miss the peak region entirely and report a
+    confidently wrong probability; taking the most competitive points keeps the
+    bias at or below half the estimator's own Monte-Carlo error, measured over
+    six seeds at n = 10, 25 and 60 observations.
     """
     grid = np.asarray(grid_norm, dtype=float)
     grid = grid.reshape(grid.shape[0], -1)
     best = np.asarray(best_x_norm, dtype=float).reshape(1, -1)
+    if grid.shape[0] > max_points:
+        mean, sd = gp.predict(grid, return_std=True)
+        competitive = np.argpartition(mean + _PROB_UCB_SIGMAS * sd, -max_points)[-max_points:]
+        grid = grid[competitive]
     points = np.vstack([grid, best])
     draws = gp.sample_y(points, n_samples=n_draws, random_state=seed)
     incumbent = draws[-1, :]
@@ -436,8 +782,10 @@ def _build_gp(
     noise_std: float,
     length_scale: float | None,
     seed: int,
+    *,
     noise_scale: np.ndarray | None = None,
     n_dims: int = 1,
+    ls_bounds: tuple[float, float] = _LS_BOUNDS,
 ) -> GaussianProcessRegressor:
     """A GP with a smooth RBF trend and a realistic measurement-noise floor.
 
@@ -461,8 +809,9 @@ def _build_gp(
     alpha_scalar = (noise_std / max(float(np.std(y)), 1e-9)) ** 2
     alpha = alpha_scalar if noise_scale is None else alpha_scalar * noise_scale**2
     if length_scale is None:
-        init = _LS_INIT if n_dims == 1 else [_LS_INIT] * n_dims
-        rbf = RBF(length_scale=init, length_scale_bounds=_LS_BOUNDS)
+        start = min(max(_LS_INIT, ls_bounds[0]), ls_bounds[1])
+        init = start if n_dims == 1 else [start] * n_dims
+        rbf = RBF(length_scale=init, length_scale_bounds=ls_bounds)
         n_restarts = _N_RESTARTS
     else:
         fixed = length_scale if n_dims == 1 else [length_scale] * n_dims
@@ -501,10 +850,275 @@ def _fitted_length_scales(gp: GaussianProcessRegressor) -> tuple[float, ...]:
         return ()
 
 
+def _prior_offsets(
+    prior_mean: Callable[[np.ndarray], np.ndarray],
+    x_norm: np.ndarray,
+    *,
+    lows: np.ndarray,
+    x_scales: np.ndarray,
+    sign: float,
+    transform: str,
+    ravel_input: bool,
+) -> np.ndarray:
+    """Evaluate a physical prior at normalized coordinates, in internal space.
+
+    The caller writes `prior_mean` in the units they think in — real parameter
+    values in, real property values out. Everything the engine does to the
+    target afterwards (the log transform, the sign flip for minimization) has
+    to be applied to the prior too, or the residual the GP fits is a mixture of
+    two different spaces. Doing that conversion in one place is why this is a
+    function rather than three lines at each call site.
+    """
+    pts = np.asarray(x_norm, dtype=float)
+    pts = pts.reshape(pts.shape[0], -1)
+    x_orig = lows + pts * x_scales
+    raw = np.asarray(prior_mean(x_orig[:, 0] if ravel_input else x_orig), dtype=float).ravel()
+
+    if raw.shape[0] != pts.shape[0]:
+        raise ValueError(f"prior_mean returned {raw.shape[0]} values for {pts.shape[0]} points.")
+    if not np.all(np.isfinite(raw)):
+        raise ValueError("prior_mean returned a non-finite value.")
+    # A log-space fit of a prior that predicts zero or negative is not a warning
+    # case: log(<=0) is undefined and silently falling back to linear would fit
+    # the residual against a *different* prior than the one reported.
+    if transform == _LOG and bool(np.any(raw <= 0)):
+        raise ValueError(
+            "prior_mean returned a non-positive value but the target is fitted "
+            "in log space. Give a strictly-positive prior, or pass "
+            'y_transform="identity".'
+        )
+    return sign * _forward(raw, transform)
+
+
+def _prior_offsets_at(
+    prior_mean: Callable[[np.ndarray], np.ndarray],
+    *,
+    lows: np.ndarray,
+    x_scales: np.ndarray,
+    sign: float,
+    transform: str,
+    ravel_input: bool,
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Bind a prior to one problem's geometry, leaving a function of points."""
+
+    def offsets(x_norm: np.ndarray) -> np.ndarray:
+        return _prior_offsets(
+            prior_mean,
+            x_norm,
+            lows=lows,
+            x_scales=x_scales,
+            sign=sign,
+            transform=transform,
+            ravel_input=ravel_input,
+        )
+
+    return offsets
+
+
+class _Surrogate(Protocol):
+    """The three things every consumer in this module asks of a fitted model.
+
+    `_fit_surrogate` hands back either a bare `GaussianProcessRegressor` or a
+    `_PriorMeanGP` wrapping one, and nothing downstream cares which. That
+    contract used to be typed as `object`, which is true but useless: it made
+    every `gp.predict(...)` an attribute error under strict typing. Naming it
+    keeps the return honest and documents, in one place, exactly how narrow the
+    surface is that the prior wrapper has to reproduce.
+
+    `predict` is annotated loosely on purpose. It returns an array normally and
+    a `(mean, std)` pair when `return_std=True`, which is scikit-learn's own
+    convention; spelling that as a union would break every call site that
+    unpacks two values.
+    """
+
+    def predict(self, X: np.ndarray, return_std: bool = False) -> Any:  # noqa: N803
+        ...
+
+    def sample_y(
+        self,
+        X: np.ndarray,  # noqa: N803
+        n_samples: int = 1,
+        random_state: int = 0,
+    ) -> np.ndarray: ...
+
+    @property
+    def kernel_(self) -> Any: ...
+
+
+class _PriorMeanGP:
+    """A fitted GP whose posterior mean is shifted by a deterministic prior.
+
+    A stock `GaussianProcessRegressor` assumes the function is zero-mean away
+    from the data (after `normalize_y`), which is why a four-point campaign
+    recommends the middle of the widest gap: with no structure to extrapolate,
+    the only thing that varies across the space is how little we know. Fitting
+    the GP to `observed - physics(x)` and adding `physics(x)` back on prediction
+    replaces that flat default with a real curve, so the acquisition function is
+    reasoning about the material rather than about spacing.
+
+    The prior is deterministic, so it moves the mean and leaves the standard
+    deviation alone — the uncertainty still comes from the data, and a wrong
+    prior therefore shows up as a large residual the GP has to absorb rather
+    than as false confidence.
+
+    This wraps rather than subclasses because every consumer in this module
+    reaches for exactly three things — `predict`, `sample_y` and `kernel_`. A
+    wrapper keeps the acquisition, the L-BFGS-B polish, the posterior surface
+    and the regret bound working unchanged, which is the whole point: the prior
+    must not become a special case threaded through a dozen call sites.
+    """
+
+    __slots__ = ("_gp", "_offsets")
+
+    def __init__(
+        self, gp: GaussianProcessRegressor, offsets: Callable[[np.ndarray], np.ndarray]
+    ) -> None:
+        self._gp = gp
+        self._offsets = offsets
+
+    def predict(self, X: np.ndarray, return_std: bool = False) -> Any:  # noqa: N803
+        shift = self._offsets(X)
+        if return_std:
+            mean, std = self._gp.predict(X, return_std=True)
+            return mean + shift, std
+        return self._gp.predict(X) + shift
+
+    def sample_y(
+        self,
+        X: np.ndarray,  # noqa: N803
+        n_samples: int = 1,
+        random_state: int = 0,
+    ) -> np.ndarray:
+        """Joint posterior draws, each shifted by the prior.
+
+        `_prob_within_epsilon` takes the regret of the incumbent across sample
+        paths. Shifting every path by the same deterministic curve is *not* a
+        no-op there: the incumbent and the running maximum sit at different
+        points, so the offset does not cancel out of `max(f) - f(x_best)`.
+        """
+        draws = self._gp.sample_y(X, n_samples=n_samples, random_state=random_state)
+        return np.asarray(draws + self._offsets(X)[:, None], dtype=float)
+
+    @property
+    def kernel_(self) -> Any:
+        return self._gp.kernel_
+
+
+def _fit_surrogate(
+    x_norm: np.ndarray,
+    y_int: np.ndarray,
+    *,
+    prior_mean: Callable[[np.ndarray], np.ndarray] | None,
+    lows: np.ndarray,
+    x_scales: np.ndarray,
+    sign: float,
+    transform: str,
+    ravel_input: bool,
+    noise_std: float,
+    length_scale: float | None,
+    seed: int,
+    noise_scale: np.ndarray | None,
+    n_dims: int = 1,
+    ls_bounds: tuple[float, float] = _LS_BOUNDS,
+) -> tuple[_Surrogate, np.ndarray]:
+    """Fit the GP — on residuals when a physical prior is supplied.
+
+    Returns the surrogate and the values it was actually fitted to. The second
+    return matters: the leave-one-out reliability check has to run against the
+    same target the model was trained on, or it is grading a different model
+    than the one that made the recommendation.
+
+    Both entry points need identical behaviour here, and duplicating it once
+    already meant the residual and the prior could drift apart between the 1-D
+    and d-D paths. `ravel_input` is the only real difference — `optimize()`
+    hands the caller's prior a flat array because its whole contract is a single
+    variable, while `optimize_nd` hands over (m, d).
+
+    We deliberately bound the length-scale to keep a handful of points from
+    overfitting; sklearn then warns when the optimizer sits on that bound.
+    That is expected, not a problem, so it is suppressed locally.
+    """
+    offsets_at = (
+        _prior_offsets_at(
+            prior_mean,
+            lows=lows,
+            x_scales=x_scales,
+            sign=sign,
+            transform=transform,
+            ravel_input=ravel_input,
+        )
+        if prior_mean is not None
+        else None
+    )
+    y_fit = y_int if offsets_at is None else y_int - offsets_at(x_norm)
+
+    gp_core = _build_gp(
+        y_fit,
+        noise_std,
+        length_scale,
+        seed,
+        noise_scale=noise_scale,
+        n_dims=n_dims,
+        ls_bounds=ls_bounds,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        gp_core.fit(x_norm, y_fit)
+
+    gp = gp_core if offsets_at is None else _PriorMeanGP(gp_core, offsets_at)
+    return gp, y_fit
+
+
+def _scales_per_axis(scales: tuple[float, ...], n_dims: int) -> tuple[float, ...]:
+    """One length-scale per axis, whatever kernel produced them.
+
+    An isotropic fit returns a single shared value. Reporting it once while the
+    ARD path reports d values would make `BoConfigND.length_scales` mean
+    different things depending on a flag, so the shared value is repeated.
+    """
+    if len(scales) == 1 and n_dims > 1:
+        return scales * n_dims
+    return scales
+
+
+def _xi_absolute(xi: float, y_int: np.ndarray, noise_std: float) -> float:
+    """Convert the relative exploration sweetener into the target's own units.
+
+    `xi` is a *fraction of the observed spread*, not a value in the target's
+    units. It has to be, because the same absolute number cannot be right for
+    two targets measured on different scales: zT runs about 0.03-0.07, a power
+    factor runs to several hundred microwatts per metre per kelvin squared. A
+    fixed `xi = 0.01` is a fifth of the entire zT signal — larger than any real
+    improvement, so `mu - f_best - xi` is negative everywhere and Expected
+    Improvement collapses to zero. On the power-factor scale the same constant
+    is invisible and EI turns purely greedy. Exploration silently depending on
+    the units the researcher happened to record in is a bug, not a tuning
+    choice, and it is why EI never functioned on this lab's primary target.
+
+    The scale is the observed standard deviation, which makes `xi` mean exactly
+    what it would in an implementation that standardises `y` before computing
+    EI — the usual convention, and consistent with the GP here already fitting
+    with `normalize_y=True`.
+
+    The floor matters for the sparse campaigns this tool exists for. When every
+    measurement sits within the measurement noise the observed spread is not a
+    meaningful scale — it is scatter — so the noise level takes over as the
+    unit of "an improvement worth having". Without that, a degenerate first
+    round would drive `xi` to zero and make EI perfectly greedy at exactly the
+    moment there is least reason to trust the surrogate.
+    """
+    scale = max(float(np.std(y_int)), float(noise_std))
+    return float(xi) * scale
+
+
 def _expected_improvement(
     mu: np.ndarray, sigma: np.ndarray, f_best: float, xi: float
 ) -> np.ndarray:
-    """Expected improvement over `f_best` (maximization)."""
+    """Expected improvement over `f_best` (maximization).
+
+    `xi` here is absolute, in the fit space's units — call `_xi_absolute` on
+    the caller's relative value first.
+    """
     sigma = np.maximum(sigma, 1e-9)
     improvement = mu - f_best - xi
     z = improvement / sigma
@@ -594,6 +1208,7 @@ def _assess_reliability(
     *,
     noise_std: float,
     seed: int,
+    ls_bounds: tuple[float, float] = _LS_BOUNDS,
 ) -> ReliabilityReport:
     """Count-tier + leave-one-out reliability of the model's intervals.
 
@@ -622,7 +1237,7 @@ def _assess_reliability(
     inside = 0
     for i in range(n):
         mask = np.arange(n) != i
-        gp = _build_gp(y[mask], noise_std, None, seed, n_dims=d)
+        gp = _build_gp(y[mask], noise_std, None, seed, n_dims=d, ls_bounds=ls_bounds)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", ConvergenceWarning)
             gp.fit(x_mat[mask], y[mask])
@@ -667,7 +1282,7 @@ def _assess_reliability(
     # the same asymmetry the leave-one-out gate above uses.
     fill = _fill_distance(x_mat)
     fill_limit = _FILL_CALIBRATED if level == "calibrated" else _FILL_INDICATIVE
-    if fill > _FILL_INDICATIVE and level != "exploratory":
+    if fill > _FILL_INDICATIVE * (1 + _FILL_TOL) and level != "exploratory":
         level = "exploratory"
         note = (
             f"Exploratory: {n} points over {d} "
@@ -676,7 +1291,7 @@ def _assess_reliability(
             f"search range spans {_SPAN_UNITS:g}). The count is not the problem — "
             f"the points do not cover the space."
         )
-    elif fill > _FILL_CALIBRATED and level == "calibrated":
+    elif fill > _FILL_CALIBRATED * (1 + _FILL_TOL) and level == "calibrated":
         level = "indicative"
         note = (
             f"Indicative: {n} points would grade calibrated on count, but the "
@@ -709,9 +1324,11 @@ def optimize(
     y_transform: str = _IDENTITY,
     y_min: float | None = None,
     y_max: float | None = None,
+    prior_mean: Callable[[np.ndarray], np.ndarray] | None = None,
     length_scale: float | None = None,
     rel_noise: float = _REL_NOISE,
     measured_noise: float | None = None,
+    point_noise: np.ndarray | None = None,
     xi: float = _XI,
     grid_size: int = _GRID_SIZE,
     seed: int = 0,
@@ -745,6 +1362,15 @@ def optimize(
             or None. From the physics registry; keeps a positive property's band
             from ever dipping below zero.
         y_max: upper physical bound for the target, or None.
+        prior_mean: Optional physical model of the target. Called with the
+            parameter values in their **original units** (a 1-D array) and must
+            return the predicted property, also in original units — the
+            transform and the maximize/minimize flip are applied here, not by
+            the caller. The GP then fits `observed - prior_mean(x)`. See
+            `optimize_nd` for the full rationale; the short version is that a
+            zero-mean GP has nothing to extrapolate along, which is why sparse
+            campaigns drift to the middle of the widest gap. Must be strictly
+            positive when `y_transform="log"`.
         length_scale: Fix the RBF length-scale to this value; if None it is
             fitted from the data. Fixing it is how `length_scale_robustness`
             probes whether the recommendation is a kernel artifact.
@@ -758,7 +1384,31 @@ def optimize(
             same sample. Overrides `rel_noise` when given: a measured noise
             floor is evidence, a percentage is a guess, and the convergence
             verdict rests entirely on this number.
-        xi: Exploration sweetener in EI.
+        point_noise: Optional per-observation standard deviations, shape (n,),
+            in the target's own units. Where `measured_noise` says how
+            repeatable the technique is, this says how well *each* value is
+            known — a fitted slope's standard error, a propagated uncertainty,
+            the spread of a quantity across defensible modelling choices. The
+            GP becomes heteroscedastic: precise points pull the surface, vague
+            ones are held loosely.
+
+            This is the quantitative form of the `unreliable` flag, and the two
+            compose. A value that is both imprecise and physically implausible
+            earns both penalties.
+
+            Its scalar summary (the median) fills in for `measured_noise` when
+            that is not supplied, since the exploration sweetener, the
+            convergence floor and the epsilon statement all need one number.
+
+            One caveat worth knowing at the call site: a standard error fitted
+            from very few points is itself uncertain and tends to read low, so
+            three-point fits hand the surrogate more confidence than they have
+            earned. `analysis.thermovoltage.slope` documents the size of that
+            effect for the case it produces.
+        xi: Exploration sweetener in EI, as a **fraction of the observed
+            spread** (see `_xi_absolute`) — not a value in the target's
+            units. An absolute constant cannot serve targets measured on
+            different scales, and got EI wrong on zT-scale objectives.
         grid_size: Resolution of the posterior curve.
         seed: RNG seed for the GP restarts — makes the fit reproducible.
         objective_aggregation: How each sample's `y` was reduced (recorded
@@ -814,20 +1464,36 @@ def optimize(
     if transform == _LOG and bool(np.any(y <= 0)):
         transform = _IDENTITY
     y_work = _forward(y, transform)
-    noise_std = _noise_std(y_work, rel_noise, transform, measured_noise, y)
+    noise = _noise_model(
+        y,
+        y_work,
+        rel_noise=rel_noise,
+        measured_noise=measured_noise,
+        point_noise=point_noise,
+        unreliable=unreliable,
+        transform=transform,
+    )
+    noise_std, noise_scale = noise.std, noise.scale
 
     # Minimization is exact negation in the (possibly log) fit space.
     sign = 1.0 if direction == "maximize" else -1.0
     y_int = sign * y_work
 
-    noise_scale, n_unreliable = _noise_scale(unreliable, y_int.size)
-    gp = _build_gp(y_int, noise_std, length_scale, seed, noise_scale=noise_scale)
-    # We deliberately bound the length-scale to keep a handful of points
-    # from overfitting; sklearn then warns when the optimizer sits on that
-    # bound. That's expected, not a problem — suppress it locally.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", ConvergenceWarning)
-        gp.fit(x_norm.reshape(-1, 1), y_int)
+    x_col = x_norm.reshape(-1, 1)
+    gp, y_fit = _fit_surrogate(
+        x_col,
+        y_int,
+        prior_mean=prior_mean,
+        lows=np.array([lo], dtype=float),
+        x_scales=np.array([x_scale], dtype=float),
+        sign=sign,
+        transform=transform,
+        ravel_input=True,
+        noise_std=noise_std,
+        length_scale=length_scale,
+        seed=seed,
+        noise_scale=noise_scale,
+    )
 
     grid = np.linspace(lo, hi, grid_size)
     grid_norm = (grid - lo) / x_scale
@@ -836,7 +1502,10 @@ def optimize(
     best_i = int(np.argmax(y_int))
     f_best_int = float(y_int[best_i])
     best_x = float(x[best_i])
-    ei = _expected_improvement(mean_int, std, f_best_int, xi)
+    best_label = f"{input_name} = {best_x:.4g}"
+    # `xi` arrives as a fraction of the observed spread; EI works in units.
+    xi_abs = _xi_absolute(xi, y_int, noise_std)
+    ei = _expected_improvement(mean_int, std, f_best_int, xi_abs)
 
     # Undo the direction flip, then map the posterior back to physical units,
     # clamped to the property's domain. The band [lower, upper] is exact even
@@ -878,6 +1547,8 @@ def optimize(
         xi=xi,
         rel_noise=rel_noise,
         noise_std=noise_std,
+        xi_absolute=xi_abs,
+        point_noise_used=noise.per_point,
         n_observations=int(x.size),
         grid_size=grid_size,
         seed=seed,
@@ -886,9 +1557,10 @@ def optimize(
 
     reliability: ReliabilityReport | None = None
     if with_reliability:
+        # Residuals when a prior is in play — see the same call in `optimize_nd`.
         reliability = _assess_reliability(
             x_norm,
-            y_int,
+            y_fit,
             noise_std=noise_std,
             seed=seed,
         )
@@ -942,8 +1614,16 @@ def optimize(
         delta=delta,
         prob_within_epsilon=prob_within,
         epsilon_delta_met=prob_within >= 1.0 - delta,
-        n_unreliable=n_unreliable,
-        noise_measured=bool(measured_noise is not None and measured_noise > 0),
+        stopping=_stopping_verdict(
+            probability=prob_within,
+            epsilon=eps,
+            delta=delta,
+            signal_exhausted=signal_exhausted,
+            reliability=reliability,
+            best_label=best_label,
+        ),
+        n_unreliable=noise.n_unreliable,
+        noise_measured=noise.measured,
     )
 
 
@@ -965,7 +1645,14 @@ def optimize(
 
 _ND_CANDIDATES = 2048  # Sobol points the acquisition is maximised over
 _ND_MIN_EXTRA = 2  # a GP over d axes needs at least d + this many points
+# Restarts for the continuous acquisition refinement. The surface is
+# multi-modal, so one descent finds the nearest peak, not the best one.
+_POLISH_STARTS = 4
 _N_MATRIX_DIMS = 2  # observations arrive as a 2-D (n, d) matrix
+# Side of the optional regular grid the posterior is reported on in 2-D. 48 is
+# a compromise: fine enough that a contour reads smoothly, small enough that
+# 48*48 predictions cost about the same as the Sobol candidate set already does.
+_SURFACE_SIZE = 48
 
 
 @dataclass(frozen=True, slots=True)
@@ -1005,17 +1692,46 @@ class BoConfigND:
     input_names: tuple[str, ...]
     bounds: tuple[tuple[float, float], ...]
     kernel: str
+    acquisition: str  # "sobol" or "sobol+lbfgsb"
     n_dims: int
     x_scales: tuple[float, ...]  # raw units per normalized unit, per axis
     length_scales: tuple[float, ...]  # fitted ARD length-scales (normalized)
     length_scale_bounds: tuple[float, float]
-    xi: float
+    xi: float  # a FRACTION of the observed spread — see `_xi_absolute`
     rel_noise: float
     noise_std: float
     n_observations: int
     n_candidates: int
     seed: int
     created_at: datetime
+    xi_absolute: float | None = None  # `xi` in objective units, as applied
+    # True when per-observation standard deviations were supplied. Without it
+    # two runs could carry byte-identical configs and still have produced
+    # different recommendations, because a heteroscedastic fit weighs the same
+    # points differently. A frozen record that cannot tell those apart is not a
+    # record of how the answer was produced.
+    point_noise_used: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SurfaceND:
+    """The fitted posterior on a regular 2-D grid.
+
+    The Sobol candidate set is the right thing to *optimise* over and the wrong
+    thing to *draw*: contouring scattered points needs a triangulation, which a
+    plotting front-end should not have to carry. This is the same posterior
+    resampled onto a lattice, so a heat map is a direct array read.
+
+    Rows are indexed by the second axis and columns by the first, i.e.
+    `mean[j][i]` is the value at `(axis_x[i], axis_y[j])`.
+    """
+
+    axis_names: tuple[str, str]
+    axis_x: tuple[float, ...]
+    axis_y: tuple[float, ...]
+    mean: tuple[tuple[float, ...], ...]
+    sd: tuple[tuple[float, ...], ...]
+    ei: tuple[tuple[float, ...], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1024,7 +1740,8 @@ class OptimizationResultND:
 
     `candidates` is the Sobol set the acquisition was maximised over, with the
     posterior evaluated on it, so a caller can contour a 2-D surface or slice a
-    higher-dimensional one without refitting anything.
+    higher-dimensional one without refitting anything. `surface` is the same
+    posterior on a regular lattice, present only when asked for and only in 2-D.
     """
 
     input_names: tuple[str, ...]
@@ -1048,8 +1765,55 @@ class OptimizationResultND:
     delta: float = _DEFAULT_DELTA
     prob_within_epsilon: float = 0.0
     epsilon_delta_met: bool = False
+    # The headline: one action, with the reasoning behind it. The four
+    # fields above are its inputs and stay for callers that want them.
+    stopping: StoppingVerdict | None = None
     n_unreliable: int = 0
     noise_measured: bool = False
+    surface: SurfaceND | None = None
+
+
+def _posterior_surface(
+    gp: GaussianProcessRegressor,
+    box: np.ndarray,
+    x_scales: np.ndarray,
+    names: tuple[str, ...],
+    size: int,
+    *,
+    sign: float,
+    transform: str,
+    y_min: float | None,
+    y_max: float | None,
+    f_best: float,
+    xi: float,
+) -> SurfaceND:
+    """Evaluate the fitted posterior on a `size` x `size` lattice.
+
+    Only meaningful in two dimensions, which is the only case the caller asks
+    for it. The mean is returned in the target's own physical units — through
+    the same inverse transform and clamp the recommendation goes through — so a
+    colour bar reads in the units the researcher measured, not in the internal
+    maximization frame.
+    """
+    ax = np.linspace(box[0, 0], box[0, 1], size)
+    ay = np.linspace(box[1, 0], box[1, 1], size)
+    gx, gy = np.meshgrid(ax, ay, indexing="xy")
+    pts = np.column_stack([gx.ravel(), gy.ravel()])
+    mu_int, sd = gp.predict((pts - box[:, 0]) / x_scales, return_std=True)
+    ei = _expected_improvement(mu_int, sd, f_best, xi)
+    mean_phys, _lo, _hi, _ = _physical_band(sign * mu_int, sd, transform, y_min, y_max)
+
+    def _rows(v: np.ndarray) -> tuple[tuple[float, ...], ...]:
+        return tuple(tuple(float(c) for c in row) for row in v.reshape(size, size))
+
+    return SurfaceND(
+        axis_names=(names[0], names[1]),
+        axis_x=tuple(float(v) for v in ax),
+        axis_y=tuple(float(v) for v in ay),
+        mean=_rows(mean_phys),
+        sd=_rows(sd),
+        ei=_rows(ei),
+    )
 
 
 def _sobol_candidates(bounds: np.ndarray, n_candidates: int, seed: int) -> np.ndarray:
@@ -1065,7 +1829,9 @@ def _sobol_candidates(bounds: np.ndarray, n_candidates: int, seed: int) -> np.nd
     m = max(4, int(np.ceil(np.log2(max(n_candidates, 2)))))
     engine = qmc.Sobol(d=d, scramble=True, seed=seed)
     unit = engine.random_base2(m)
-    return bounds[:, 0] + unit * (bounds[:, 1] - bounds[:, 0])
+    # scipy ships no type information, so the draw arrives as Any and infects
+    # the arithmetic; the asarray pins the declared return type back down.
+    return np.asarray(bounds[:, 0] + unit * (bounds[:, 1] - bounds[:, 0]), dtype=float)
 
 
 def _prepare_nd_inputs(
@@ -1115,11 +1881,90 @@ def _prepare_nd_inputs(
     return x_obs, y, box, names
 
 
-def _recommend_nd(
-    candidates: np.ndarray,
+def _polish_acquisition(
+    objective: Callable[[np.ndarray], float],
+    starts: np.ndarray,
+    n_dims: int,
+) -> tuple[np.ndarray | None, float]:
+    """Refine an acquisition maximum off the candidate grid, with L-BFGS-B.
+
+    The Sobol set locates the right basin; it cannot place a point inside it
+    more precisely than its own spacing. In two dimensions 2048 points resolve
+    about a fortieth of each axis, so the recommendation carries a quantisation
+    error of roughly that size — real, and avoidable, because the surrogate is
+    a closed-form function that can be optimised continuously between the
+    candidates.
+
+    Several starts, because the acquisition surface is multi-modal and a single
+    descent finds the nearest peak rather than the best one. Gradients are
+    finite-differenced: scikit-learn does not expose a derivative of the
+    posterior, and at these dimensions the extra evaluations are far cheaper
+    than the fit that preceded them.
+
+    Returns `(point, value)` in normalized coordinates, or `(None, -inf)` if
+    every start failed. The caller keeps its grid answer unless this beats it,
+    so a failed or unhelpful polish can never make the recommendation worse.
+    """
+    box = [(0.0, _SPAN_UNITS)] * n_dims
+    best_x: np.ndarray | None = None
+    best_v = -np.inf
+    for x0 in np.atleast_2d(starts):
+        try:
+            res = minimize(
+                lambda p: -objective(np.asarray(p, dtype=float)),
+                x0=np.clip(x0, 0.0, _SPAN_UNITS),
+                method="L-BFGS-B",
+                bounds=box,
+            )
+        except (ValueError, np.linalg.LinAlgError):
+            continue
+        if not np.all(np.isfinite(res.x)):
+            continue
+        value = -float(res.fun)
+        if value > best_v:
+            best_v, best_x = value, np.clip(res.x, 0.0, _SPAN_UNITS)
+    return best_x, best_v
+
+
+def _pick_point(
+    gp: GaussianProcessRegressor,
+    cand_norm: np.ndarray,
+    driver: np.ndarray,
     rec_i: int,
-    mean_int: np.ndarray,
-    std: np.ndarray,
+    *,
+    explore: bool,
+    f_best: float,
+    xi: float,
+    n_dims: int,
+    polish: bool,
+) -> tuple[np.ndarray, str]:
+    """Choose the next point, refining off the grid when that helps.
+
+    `driver` is whichever quantity selected `rec_i` — Expected Improvement
+    normally, posterior spread when the data is too sparse to exploit. The same
+    quantity is what gets refined, so the polish never optimises something
+    other than the criterion that made the choice.
+    """
+    if not polish:
+        return cand_norm[rec_i], "sobol"
+
+    def score(p: np.ndarray) -> float:
+        mu, sd = gp.predict(p.reshape(1, -1), return_std=True)
+        if explore:
+            return float(sd[0])
+        return float(_expected_improvement(mu, sd, f_best, xi)[0])
+
+    top = np.argsort(driver)[-_POLISH_STARTS:][::-1]
+    refined, value = _polish_acquisition(score, cand_norm[top], n_dims)
+    if refined is not None and value > float(driver[rec_i]):
+        return refined, "sobol+lbfgsb"
+    return cand_norm[rec_i], "sobol"
+
+
+def _recommend_nd(
+    point: np.ndarray,
+    mean_at: float,
+    std_at: float,
     *,
     sign: float,
     noise_std: float,
@@ -1129,18 +1974,19 @@ def _recommend_nd(
 ) -> RecommendationND:
     """The d-dimensional twin of `_recommend`.
 
-    Same arithmetic; the recommended point is a row of the candidate set
-    rather than a scalar grid value.
+    Same arithmetic, but takes the recommended point and the posterior there
+    directly rather than an index into a candidate array — the point may have
+    been refined off the grid and so need not be one of the candidates.
     """
-    rec_sigma = float(std[rec_i])
+    rec_sigma = float(std_at)
     predictive_sd = float(np.sqrt(rec_sigma**2 + noise_std**2))
-    pm_work = float(sign * mean_int[rec_i])
+    pm_work = float(sign * mean_at)
     lo_pred = _to_phys(pm_work - _CI95 * predictive_sd, transform, y_min, y_max)
     hi_pred = _to_phys(pm_work + _CI95 * predictive_sd, transform, y_min, y_max)
     lo_model = _to_phys(pm_work - _CI95 * rec_sigma, transform, y_min, y_max)
     hi_model = _to_phys(pm_work + _CI95 * rec_sigma, transform, y_min, y_max)
     return RecommendationND(
-        x=tuple(float(v) for v in candidates[rec_i]),
+        x=tuple(float(v) for v in np.asarray(point, dtype=float).ravel()),
         predicted_mean=_to_phys(pm_work, transform, y_min, y_max),
         ci95=(hi_model - lo_model) / 2.0,
         predictive_sd=predictive_sd,
@@ -1160,10 +2006,17 @@ def optimize_nd(
     y_transform: str = _IDENTITY,
     y_min: float | None = None,
     y_max: float | None = None,
+    prior_mean: Callable[[np.ndarray], np.ndarray] | None = None,
     rel_noise: float = _REL_NOISE,
     measured_noise: float | None = None,
+    point_noise: np.ndarray | None = None,
     xi: float = _XI,
+    length_scale_bounds: tuple[float, float] = _LS_BOUNDS_ND,
     n_candidates: int = _ND_CANDIDATES,
+    polish: bool = True,
+    isotropic: bool = False,
+    prob_max_points: int = _PROB_MAX_POINTS,
+    surface_size: int = 0,
     seed: int = 0,
     objective_aggregation: str = "peak",
     created_at: datetime | None = None,
@@ -1193,13 +2046,63 @@ def optimize_nd(
         y_transform: "identity" (default) or "log", as in `optimize()`.
         y_min: Lower physical bound for the target, or None.
         y_max: Upper physical bound for the target, or None.
+        prior_mean: Optional physical model of the target. Called with an
+            (m, d) array of parameter values in their **original units** and
+            must return m predicted property values, also in original units —
+            the transform and the maximize/minimize flip are applied here, not
+            by the caller. The GP then models `observed - prior_mean(x)`, so
+            the physics carries the trend and the surrogate only corrects it.
+            Where a plain GP reverts to a flat mean away from the data — the
+            behaviour that makes a four-point campaign recommend the middle of
+            the widest gap — this extrapolates along the physics instead. A
+            wrong prior is not silently absorbed: it shows up as a large
+            residual, and the leave-one-out coverage check is run against that
+            residual for exactly that reason. Must be strictly positive when
+            `y_transform="log"`.
         rel_noise: Assumed relative measurement noise, used when
             `measured_noise` is absent.
         measured_noise: Observed repeatability in the target's own units;
             beats `rel_noise` when supplied.
-        xi: Exploration sweetener in EI.
+        point_noise: Optional per-observation standard deviations, shape (n,),
+            in the target's own units — how well each individual value is
+            known, rather than how repeatable the technique is. Makes the GP
+            heteroscedastic; composes with `unreliable`; its median stands in
+            for `measured_noise` when that is absent. See `optimize()` for the
+            full rationale and the caveat about standard errors fitted from
+            very few points.
+        xi: Exploration sweetener in EI, as a **fraction of the observed
+            spread** (see `_xi_absolute`) — not a value in the target's
+            units. An absolute constant cannot serve targets measured on
+            different scales, and got EI wrong on zT-scale objectives.
+        length_scale_bounds: Range the ARD length-scales are fitted within, in
+            normalized units where each search range spans `_SPAN_UNITS`.
+            Defaults to `_LS_BOUNDS_ND`, whose floor of 0.2 was chosen by
+            sweeping both benchmarks over eight seeds — see the table there.
+            This is deliberately lower than the one-variable `_LS_BOUNDS`: the
+            evidence for it is multi-dimensional, and applying it to 1-D
+            measurably degrades interval calibration.
         n_candidates: Sobol points the acquisition is maximised over. Rounded
             up to the next power of two.
+        polish: refine the chosen point continuously with L-BFGS-B instead of
+            leaving it on the Sobol grid (default). The grid answer is kept
+            unless the refinement genuinely beats it, so this can only help;
+            set False to reproduce a pure grid search.
+        isotropic: force one shared length-scale across all axes instead of the
+            ARD default. Exists as the *control* condition for the anisotropy
+            study — an isotropic kernel cannot represent a process window that
+            is tighter in one knob than another, and measuring how much that
+            costs requires being able to switch it off. Not a sensible
+            production setting: it throws away the per-axis sensitivity that is
+            the most useful thing a multi-variable run reports.
+        prob_max_points: how many candidates the epsilon-delta regret bound is
+            estimated over. Joint posterior sampling is cubic in this, so the
+            full candidate set is far more than the estimate needs; the default
+            keeps the bias within half the estimator's own Monte-Carlo error at
+            a fraction of the cost. Raise it only to check that trade-off.
+        surface_size: side of a regular lattice to also report the posterior
+            on, for contouring. Ignored unless d == 2. Zero (default) skips it,
+            so nothing that only wants a recommendation pays for the extra
+            `surface_size**2` predictions.
         seed: RNG seed for the GP restarts and the Sobol scramble.
         objective_aggregation: How each sample's `y` was reduced.
         created_at: Timestamp for the frozen config; defaults to now (UTC).
@@ -1228,23 +2131,50 @@ def optimize_nd(
     if transform == _LOG and bool(np.any(y <= 0)):
         transform = _IDENTITY
     y_work = _forward(y, transform)
-    noise_std = _noise_std(y_work, rel_noise, transform, measured_noise, y)
+    noise = _noise_model(
+        y,
+        y_work,
+        rel_noise=rel_noise,
+        measured_noise=measured_noise,
+        point_noise=point_noise,
+        unreliable=unreliable,
+        transform=transform,
+    )
+    noise_std, noise_scale = noise.std, noise.scale
 
     sign = 1.0 if direction == "maximize" else -1.0
     y_int = sign * y_work
 
-    noise_scale, n_unreliable = _noise_scale(unreliable, y_int.size)
-    gp = _build_gp(y_int, noise_std, None, seed, noise_scale=noise_scale, n_dims=d)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", ConvergenceWarning)
-        gp.fit(x_norm, y_int)
+    # `_build_gp` keys ARD off n_dims, so asking for 1 gives the scalar kernel
+    # regardless of how many columns X has — which is exactly the isotropic arm.
+    gp, y_fit = _fit_surrogate(
+        x_norm,
+        y_int,
+        prior_mean=prior_mean,
+        lows=box[:, 0],
+        x_scales=x_scales,
+        sign=sign,
+        transform=transform,
+        ravel_input=False,
+        noise_std=noise_std,
+        length_scale=None,
+        seed=seed,
+        noise_scale=noise_scale,
+        n_dims=1 if isotropic else d,
+        ls_bounds=length_scale_bounds,
+    )
 
     cand = _sobol_candidates(box, n_candidates, seed)
     cand_norm = (cand - box[:, 0]) / x_scales
     mean_int, std = gp.predict(cand_norm, return_std=True)
 
     best_i = int(np.argmax(y_int))
-    ei = _expected_improvement(mean_int, std, float(y_int[best_i]), xi)
+    best_label = ", ".join(
+        f"{name} = {value:.4g}" for name, value in zip(input_names, x_obs[best_i], strict=True)
+    )
+    # `xi` arrives as a fraction of the observed spread; EI works in units.
+    xi_abs = _xi_absolute(xi, y_int, noise_std)
+    ei = _expected_improvement(mean_int, std, float(y_int[best_i]), xi_abs)
 
     mean_work = sign * mean_int
     cand_mean, cand_lower, cand_upper, _ = _physical_band(mean_work, std, transform, y_min, y_max)
@@ -1254,24 +2184,70 @@ def optimize_nd(
     signal_exhausted = max_ei < noise_std
 
     eps = float(epsilon) if epsilon is not None else noise_std
-    prob_within = _prob_within_epsilon(gp, cand_norm, x_norm[best_i], eps, seed)
+    prob_within = _prob_within_epsilon(
+        gp, cand_norm, x_norm[best_i], eps, seed, max_points=prob_max_points
+    )
 
     reliability: ReliabilityReport | None = None
     if with_reliability:
-        reliability = _assess_reliability(x_norm, y_int, noise_std=noise_std, seed=seed)
+        # Residuals, not raw values, when a prior is in play. The leave-one-out
+        # check asks whether the held-out point falls inside its own interval;
+        # the prior shifts the prediction and the truth by the same fixed
+        # amount, so coverage is identical either way — but only the residual
+        # version is measuring the model that actually made the recommendation.
+        reliability = _assess_reliability(
+            x_norm,
+            y_fit,
+            noise_std=noise_std,
+            seed=seed,
+            ls_bounds=length_scale_bounds,
+        )
 
     # Same reliability-aware rule as the 1-D path: a flat acquisition over
     # data too sparse to trust means "go and look where you have not looked",
     # not "we are done".
     is_exploratory = reliability is not None and reliability.level == "exploratory"
     converged = signal_exhausted and not is_exploratory
-    rec_i = int(np.argmax(std)) if (signal_exhausted and is_exploratory) else ei_i
+    explore = signal_exhausted and is_exploratory
+    rec_i = int(np.argmax(std)) if explore else ei_i
 
-    recommendation = _recommend_nd(
-        cand,
+    # Refine off the candidate grid. Whichever quantity is driving the pick —
+    # Expected Improvement normally, posterior spread when exploring — is the
+    # one that gets refined, so the polish never optimises something other than
+    # the criterion that chose the point.
+    rec_norm, acquisition = _pick_point(
+        gp,
+        cand_norm,
+        std if explore else ei,
         rec_i,
-        mean_int,
-        std,
+        explore=explore,
+        f_best=float(y_int[best_i]),
+        xi=xi_abs,
+        n_dims=d,
+        polish=polish,
+    )
+
+    surface = None
+    if surface_size > 0 and d == _N_MATRIX_DIMS:
+        surface = _posterior_surface(
+            gp,
+            box,
+            x_scales,
+            names,
+            int(surface_size),
+            sign=sign,
+            transform=transform,
+            y_min=y_min,
+            y_max=y_max,
+            f_best=float(y_int[best_i]),
+            xi=xi_abs,
+        )
+
+    rec_mu, rec_sd = gp.predict(rec_norm.reshape(1, -1), return_std=True)
+    recommendation = _recommend_nd(
+        box[:, 0] + rec_norm * x_scales,
+        float(rec_mu[0]),
+        float(rec_sd[0]),
         sign=sign,
         noise_std=noise_std,
         transform=transform,
@@ -1286,14 +2262,17 @@ def optimize_nd(
         objective_aggregation=objective_aggregation,
         input_names=names,
         bounds=tuple((float(a), float(b)) for a, b in box),
-        kernel="ConstantKernel * RBF(ARD)" if d > 1 else "ConstantKernel * RBF",
+        kernel=("ConstantKernel * RBF(ARD)" if d > 1 and not isotropic else "ConstantKernel * RBF"),
+        acquisition=acquisition,
         n_dims=d,
         x_scales=tuple(float(v) for v in x_scales),
-        length_scales=_fitted_length_scales(gp),
-        length_scale_bounds=_LS_BOUNDS,
+        length_scales=_scales_per_axis(_fitted_length_scales(gp), d),
+        length_scale_bounds=length_scale_bounds,
         xi=xi,
         rel_noise=rel_noise,
         noise_std=noise_std,
+        xi_absolute=xi_abs,
+        point_noise_used=noise.per_point,
         n_observations=n,
         n_candidates=int(cand.shape[0]),
         seed=seed,
@@ -1322,8 +2301,17 @@ def optimize_nd(
         delta=delta,
         prob_within_epsilon=prob_within,
         epsilon_delta_met=prob_within >= 1.0 - delta,
-        n_unreliable=n_unreliable,
-        noise_measured=bool(measured_noise is not None and measured_noise > 0),
+        stopping=_stopping_verdict(
+            probability=prob_within,
+            epsilon=eps,
+            delta=delta,
+            signal_exhausted=signal_exhausted,
+            reliability=reliability,
+            best_label=best_label,
+        ),
+        n_unreliable=noise.n_unreliable,
+        noise_measured=noise.measured,
+        surface=surface,
     )
 
 

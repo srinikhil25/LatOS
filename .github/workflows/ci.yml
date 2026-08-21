@@ -1,10 +1,20 @@
 name: CI
 
+# Every push, not just the long-lived branches. Work happens on `feat/**` and
+# `fix/**` here, and restricting CI to main/develop meant a breakage could sit
+# undetected until PR time — which is exactly what happened: the acquisition
+# polish turned three benchmark tests red on a feature branch and nothing ran
+# them for weeks.
 on:
   push:
-    branches: [main, develop, "stage*"]
   pull_request:
     branches: [main]
+  # The slow benchmark set is statistical and expensive, so it does not run on
+  # every push (see the `test-slow` job). A weekly run means it is never more
+  # than seven days since somebody checked.
+  schedule:
+    - cron: "0 3 * * 1" # Mondays, 03:00 UTC
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -67,9 +77,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,ml]"
 
-      - name: Run tests (non-UI)
+      - name: Run tests (fast)
         run: |
-          pytest -m "not ui and not gpu and not ollama" --cov --cov-report=xml --cov-report=term
+          pytest -m "not ui and not gpu and not ollama and not slow" --cov --cov-report=xml --cov-report=term
 
 
       - name: Upload coverage to Codecov
@@ -104,9 +114,43 @@ jobs:
 
       - name: Coverage check
         run: |
-          pytest -m "not ui and not gpu and not ollama" \
+          pytest -m "not ui and not gpu and not ollama and not slow" \
             --cov \
             --cov-fail-under=${COVERAGE_MIN}
+
+  # ─── Slow / statistical benchmark suite ────────────────────────────
+  # Multi-seed campaign comparisons: ~10 minutes, and genuinely statistical, so
+  # it does not belong on the six-way matrix that gates every push. It runs
+  # where a red result gets seen — on main, on PRs into main, weekly, and on
+  # demand. Every AX research claim rests on these tests, and three of them were
+  # red for weeks precisely because nothing ran them.
+  test-slow:
+    name: Slow benchmark suite
+    runs-on: ubuntu-latest
+    needs: lint
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request' ||
+      github.ref == 'refs/heads/main'
+    defaults:
+      run:
+        working-directory: packages/core
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,ml]"
+
+      - name: Run slow tests
+        run: pytest -m "slow" --no-cov -p no:cacheprovider
 
   # ─── Build artifacts (smoke test packaging) ────────────────────────
   build:

@@ -109,19 +109,44 @@ dev = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
 
-    # Test runners
-    "pytest>=8.0",
-    "pytest-cov>=4.1",
-    "httpx>=0.27",  # fastapi.testclient transport
-    "pytest-snapshot>=0.9",
-    "pytest-benchmark>=4.0",
-    "pytest-xdist>=3.5",
-    "hypothesis>=6.98",
+    # Test runners.
+    #
+    # Floors are the versions this suite has actually been run green against,
+    # and caps are the next major. The floors used to trail badly -- pytest said
+    # >=8.0 while CI installed 9.1 -- so CI exercised a different major version
+    # than any developer, and would have failed alone if it ever broke.
+    #
+    # Two of these can fail without any code changing. Hypothesis adds health
+    # checks in minor releases, so a property test that passed can start failing
+    # on timing or filtering alone; a cap at the major does not prevent that, and
+    # nothing short of a lockfile would. httpx is the transport behind
+    # fastapi.testclient and has broken TestClient compatibility across releases
+    # before, which is why it is capped rather than left open like the other
+    # runtime-ish helpers.
+    "pytest>=9.1.1,<10",
+    "pytest-cov>=7.1,<8",
+    "httpx>=0.27,<1",  # fastapi.testclient transport
+    "pytest-snapshot>=0.9,<1",
+    "pytest-benchmark>=4.0,<6",
+    "pytest-xdist>=3.8,<4",
+    "hypothesis>=6.165.10,<7",
 
-    # Code quality
-    "ruff>=0.3",
-    "mypy>=1.9",
-    "pre-commit>=3.6",
+    # Code quality.
+    #
+    # Ruff is capped at a minor version on purpose. It was `>=0.3`, which let CI
+    # install whatever had shipped that morning, and a rule graduating from
+    # preview to stable (PLR0917, in 0.16) turned CI red with no code change and
+    # no local reproduction, because the venv here was still on 0.15. A linter
+    # that can fail spontaneously is worse than a slightly stale one; raise the
+    # cap deliberately and fix what the new rules find in the same commit.
+    "ruff>=0.16.4,<0.17",
+    # Capped for the same reason, and the gap here was wider: this said `>=1.9`
+    # while mypy had reached 2.x, so CI type-checked against a different major
+    # version than any developer ran. It happened to pass, which is luck rather
+    # than a policy. The floor is the version actually verified against this
+    # code, so local and CI agree on something known to be clean.
+    "mypy>=2.3.1,<3",
+    "pre-commit>=4.6.2,<5",
 
     # Type stubs
     "pandas-stubs",
@@ -161,6 +186,19 @@ packages = ["src/latos"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+
+# Untracked local scratch scripts, already listed in .gitignore. They need to be
+# named here as well because `ruff check` and `ruff format` disagree about
+# .gitignore: the linter honours it, the formatter does not for paths handed to
+# it explicitly, and `scripts/check.py` passes `scripts` explicitly. Without
+# this the format gate fails on files that are not in the repository at all, so
+# the check goes red locally while CI — which only ever sees tracked files —
+# stays green. A gate that fails for a reason CI cannot reproduce is a gate
+# people learn to ignore.
+extend-exclude = [
+    "scripts/architecture_diagram*.py",
+    "scripts/dhivya_audit.py",
+]
 
 [tool.ruff.lint]
 select = [

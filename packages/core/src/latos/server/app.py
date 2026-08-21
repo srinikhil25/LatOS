@@ -20,7 +20,7 @@ import json
 import math
 import os
 import queue
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
@@ -61,10 +61,13 @@ from latos.ingestion.orchestrator import IngestionResult
 from latos.optimization import (
     OptimizationError,
     OptimizationResult,
+    OptimizationResultND,
     Recommendation,
+    RecommendationND,
     freeze,
     length_scale_robustness,
     optimize,
+    optimize_nd,
     recommendation_drift,
 )
 from latos.reporting.correlation import correlate
@@ -80,6 +83,7 @@ from latos.server.edits import EditError
 from latos.server.imaging import render_to_png
 from latos.server.schemas import (
     AnalyzerResultOut,
+    AxisOut,
     CampaignDriftOut,
     CorrelationOut,
     CorrelationsOut,
@@ -107,14 +111,18 @@ from latos.server.schemas import (
     MergeSamplesRequest,
     MergeSuggestionOut,
     MoveMeasurementsRequest,
+    NdDatasetPoint,
     OpenProjectRequest,
     OptimizationDataset,
+    OptimizeNdResult,
     OptimizeResult,
+    OptimizeRunNdRequest,
     OptimizeRunRequest,
     OutcomeVerdictOut,
     PreregSummary,
     ProjectSummary,
     QualityFlagOut,
+    RecommendationNdOut,
     RecommendationOut,
     RemoveMeasurementsRequest,
     RenameSampleRequest,
@@ -126,6 +134,7 @@ from latos.server.schemas import (
     SpbCheckResult,
     SpbSampleOut,
     SplitMeasurementsRequest,
+    SurfaceOut,
     ThermoelectricResult,
     ValidateOutcomeRequest,
 )
@@ -968,6 +977,72 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             noise_measured=res.noise_measured,
         )
 
+    @app.post("/optimize/run-nd")
+    def optimize_run_nd(body: OptimizeRunNdRequest) -> OptimizeNdResult:
+        """One BO round over several input axes at once.
+
+        The multi-axis sibling of `/optimize/run`. It exists because a
+        one-variable search on a smooth response has little left to say — the
+        model interpolates a curve and points at its largest gap — whereas the
+        experiment a researcher actually runs varies composition *and*
+        temperature, and the interaction between them is the part no
+        single-axis run can see. The kernel is anisotropic, so the run also
+        reports which axis the target is actually sensitive to.
+
+        Not a replacement: `/optimize/run` remains the route for a
+        one-variable campaign, and is the only one `/optimize/freeze` records.
+        """
+        asm = _assemble_optimization_nd(state, body)
+        try:
+            res = optimize_nd(
+                asm.x,
+                asm.ys,
+                bounds=asm.bounds,
+                input_names=asm.names,
+                target_name=asm.target_label,
+                direction=asm.direction,
+                y_transform=asm.y_transform,
+                y_min=asm.y_min,
+                y_max=asm.y_max,
+                unreliable=asm.unreliable,
+                measured_noise=asm.measured_noise,
+                surface_size=max(0, body.surface_size),
+            )
+        except OptimizationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        rel = res.reliability
+        return OptimizeNdResult(
+            input_variables=list(res.input_names),
+            target_property=res.target_name,
+            objective=body.objective,
+            axes=_axes_out(res),
+            kernel=res.config.kernel,
+            acquisition=res.config.acquisition,
+            reliability_level=rel.level if rel else "unknown",
+            reliability_note=rel.note if rel else "",
+            fill_distance=rel.fill_distance if rel else 0.0,
+            fill_limit=rel.fill_limit if rel else 0.0,
+            quality_flags=asm.quality_flags,
+            surface=_surface_out(res),
+            points=asm.points,
+            n_dropped_for_missing_axis=asm.n_dropped,
+            best_x=list(res.best_x),
+            best_y=res.best_y,
+            recommendation=_rec_nd_out(res.recommendation),
+            max_ei=res.max_ei,
+            noise_threshold=res.noise_threshold,
+            converged=res.converged,
+            verdict=_verdict_nd(res),
+            epsilon=res.epsilon,
+            delta=res.delta,
+            prob_within_epsilon=res.prob_within_epsilon,
+            epsilon_delta_met=res.epsilon_delta_met,
+            n_unreliable=res.n_unreliable,
+            n_distrusted=asm.n_distrusted,
+            noise_measured=res.noise_measured,
+        )
+
 
 def _register_prereg_routes(app: FastAPI, state: ServerState) -> None:
     """The closed loop: freeze a prediction, list the record, score the outcome.
@@ -1217,6 +1292,192 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
     )
 
 
+@dataclass(frozen=True)
+class _AssembledNd:
+    """The (X, y) matrix plus the resolved objective, ready for `optimize_nd`."""
+
+    points: list[NdDatasetPoint]
+    x: np.ndarray  # (n, d)
+    ys: np.ndarray
+    bounds: list[tuple[float, float]]
+    names: list[str]
+    target_label: str
+    direction: str
+    quality_flags: list[QualityFlagOut]
+    unreliable: np.ndarray
+    n_distrusted: int
+    n_dropped: int  # had the target and axis 1, but no value on a later axis
+    measured_noise: float | None
+    y_transform: str
+    y_min: float | None
+    y_max: float | None
+
+
+def _assemble_optimization_nd(state: ServerState, body: OptimizeRunNdRequest) -> _AssembledNd:
+    """Build the multi-axis dataset for `/optimize/run-nd`.
+
+    Deliberately layered on `_assemble_optimization` rather than reimplementing
+    it: the target resolution, the objective modes, the physics transform and
+    clamp, the quality flags and the measured noise are all dimension-blind, and
+    duplicating them is how the two paths would quietly start disagreeing about
+    what "zT at 400 K, maximize" means. The only new work here is widening one
+    column of x into d, and dropping the samples that cannot be widened.
+    """
+    names = list(body.input_variables)
+    if not names:
+        raise HTTPException(status_code=400, detail="Choose at least one input variable")
+    if len(set(names)) != len(names):
+        raise HTTPException(
+            status_code=400,
+            detail="Each input variable may only appear once; a repeated axis is not an axis.",
+        )
+    if body.bounds is not None and len(body.bounds) != len(names):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"bounds needs one (low, high) pair per axis: "
+                f"got {len(body.bounds)} for {len(names)} variables"
+            ),
+        )
+
+    base = _assemble_optimization(
+        state,
+        OptimizeRunRequest(
+            input_variable=names[0],
+            target_property=body.target_property,
+            bounds=None,  # per-axis bounds are resolved below
+            objective=body.objective,
+            target_value=body.target_value,
+            at_temperature_k=body.at_temperature_k,
+        ),
+    )
+    result, root = state.result, state.root
+    assert result is not None and root is not None  # _assemble_optimization guarantees this
+
+    params = synthesis_store.load_params(root)
+    extra = [optimization_data.axis_values(result.project, params, n) for n in names[1:]]
+    keep = [i for i, p in enumerate(base.points) if all(p.sample_id in col for col in extra)]
+    n_dropped = len(base.points) - len(keep)
+    if len(keep) < _MIN_OPTIMIZE_POINTS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Only {len(keep)} samples have a value on every chosen axis "
+                f"({', '.join(names)}) together with '{body.target_property}'; "
+                f"{n_dropped} were dropped for a missing axis value. "
+                f"At least {_MIN_OPTIMIZE_POINTS} are needed."
+            ),
+        )
+
+    columns = [np.array([base.points[i].x for i in keep], dtype=float)]
+    columns += [
+        np.array([col[base.points[i].sample_id] for i in keep], dtype=float) for col in extra
+    ]
+    x = np.column_stack(columns)
+
+    bounds = (
+        [(float(lo), float(hi)) for lo, hi in body.bounds]
+        if body.bounds is not None
+        else [(float(c.min()), float(c.max())) for c in x.T]
+    )
+    for name, (lo, hi) in zip(names, bounds, strict=True):
+        if hi <= lo:
+            # Two different faults share this test, and blaming the wrong one
+            # sends the user to fix the wrong thing.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"The bounds given for '{name}' are empty ({lo:g} to {hi:g}); "
+                    f"the high value must exceed the low one."
+                    if body.bounds is not None
+                    else f"'{name}' does not vary across the qualifying samples "
+                    f"(every value is {lo:g}), so it cannot be an optimization axis."
+                ),
+            )
+
+    distrusted = trust_store.load_distrusted(root)
+    return _AssembledNd(
+        points=[
+            NdDatasetPoint(
+                sample_id=base.points[i].sample_id,
+                sample_name=base.points[i].sample_name,
+                x=[float(v) for v in row],
+                y=float(base.points[i].y),
+            )
+            for i, row in zip(keep, x, strict=True)
+        ],
+        x=x,
+        ys=base.ys[keep],
+        bounds=bounds,
+        names=names,
+        target_label=base.target_label,
+        direction=base.direction,
+        quality_flags=base.quality_flags,
+        unreliable=base.unreliable[keep],
+        n_distrusted=sum(1 for i in keep if base.points[i].sample_id in distrusted),
+        n_dropped=n_dropped,
+        measured_noise=base.measured_noise,
+        y_transform=base.y_transform,
+        y_min=base.y_min,
+        y_max=base.y_max,
+    )
+
+
+def _rec_nd_out(rec: RecommendationND) -> RecommendationNdOut:
+    """Map an engine `RecommendationND` to the API shape."""
+    return RecommendationNdOut(
+        x=list(rec.x),
+        predicted_mean=rec.predicted_mean,
+        ci95=rec.ci95,
+        ci95_predictive=rec.ci95_predictive,
+        predictive_interval_95=rec.predictive_interval_95,
+    )
+
+
+def _axes_out(res: OptimizationResultND) -> list[AxisOut]:
+    """Per-axis search range and fitted ARD length-scale.
+
+    A length-scale that ran into the range it was fitted within is worth
+    surfacing rather than burying in a config blob, because it says something
+    about the experiment — but the two ends say opposite things. At the ceiling
+    the axis does not move the target. At the floor the model is under-resolving
+    structure it can see, which is the known limitation of inheriting the
+    one-variable length-scale range; on sparse multi-axis data it is the common
+    case, so reporting it as "no structure" would be exactly backwards.
+    """
+    cfg = res.config
+    low_b, high_b = cfg.length_scale_bounds
+
+    def pinned_at(scale: float) -> str | None:
+        if scale >= high_b * (1 - 1e-6):
+            return "high"
+        if scale <= low_b * (1 + 1e-6):
+            return "low"
+        return None
+
+    return [
+        AxisOut(name=name, low=lo, high=hi, length_scale=scale, pinned_at=pinned_at(scale))
+        for name, (lo, hi), scale in zip(
+            cfg.input_names, cfg.bounds, cfg.length_scales, strict=True
+        )
+    ]
+
+
+def _surface_out(res: OptimizationResultND) -> SurfaceOut | None:
+    """Map the engine's 2-D posterior lattice to the API shape, if there is one."""
+    s = res.surface
+    if s is None:
+        return None
+    return SurfaceOut(
+        axis_names=s.axis_names,
+        axis_x=list(s.axis_x),
+        axis_y=list(s.axis_y),
+        mean=[list(row) for row in s.mean],
+        sd=[list(row) for row in s.sd],
+        ei=[list(row) for row in s.ei],
+    )
+
+
 def _flag_out(flag: optimization_data.QualityFlag) -> QualityFlagOut:
     """Map a core QualityFlag to the API shape."""
     return QualityFlagOut(
@@ -1398,51 +1659,108 @@ def _verdict(res: OptimizationResult) -> str:
 
     No jargon — this is read by materials scientists, not CS people.
     """
-    rec = res.recommendation
-    best_word = "lowest" if res.config.direction == "minimize" else "best"
-    if res.converged:
+    return _verdict_text(
+        converged=res.converged,
+        direction=res.config.direction,
+        best_y=res.best_y,
+        best_where=f"{res.input_name} = {res.best_x:g}",
+        rec_where=f"{res.input_name} = {res.recommendation.x:.3g}",
+        rec_bare=f"{res.recommendation.x:.3g}",
+        rec_mean=res.recommendation.predicted_mean,
+        rec_ci95_predictive=res.recommendation.ci95_predictive,
+        target_name=res.target_name,
+        max_ei=res.max_ei,
+        noise_threshold=res.noise_threshold,
+        noise_measured=res.noise_measured,
+        level=res.reliability.level if res.reliability else None,
+        n_observations=res.reliability.n_observations if res.reliability else 0,
+    )
+
+
+def _verdict_text(
+    *,
+    converged: bool,
+    direction: str,
+    best_y: float,
+    best_where: str,
+    rec_where: str,
+    rec_bare: str,
+    rec_mean: float,
+    rec_ci95_predictive: float,
+    target_name: str,
+    max_ei: float,
+    noise_threshold: float,
+    noise_measured: bool,
+    level: str | None,
+    n_observations: int,
+) -> str:
+    """The three verdicts, written once.
+
+    Takes already-formatted location strings rather than a result object so the
+    one-variable and multi-variable runs share the exact wording: the only thing
+    dimension changes is that "doping = 3" becomes "doping = 3, temperature =
+    480", and no branch of the reasoning depends on which it is.
+    """
+    best_word = "lowest" if direction == "minimize" else "best"
+    if converged:
         return (
             f"Optimum reached within measurement precision. "
-            f"{best_word.capitalize()} so far: {res.best_y:.3f} at "
-            f"{res.input_name} = {res.best_x:g}. "
-            f"A confirmatory run at {rec.x:.3g} is optional but unlikely to improve."
+            f"{best_word.capitalize()} so far: {best_y:.3f} at "
+            f"{best_where}. "
+            f"A confirmatory run at {rec_bare} is optional but unlikely to improve."
         )
     # Not converged. If the improvement signal is already within measurement
     # noise but the model is still exploratory, the honest verdict is "too few
     # points to confirm an optimum" — not a promise of improvement.
-    # Bind the report before testing it: this branch quotes the observation
-    # count, so it must only be reachable when a report actually exists.
-    reliability = res.reliability
-    if (
-        res.max_ei < res.noise_threshold
-        and reliability is not None
-        and reliability.level == "exploratory"
-    ):
+    if max_ei < noise_threshold and level == "exploratory":
         # Diminishing returns: lead with "you can stop" (the resource-saving
         # signal), then offer ONE optional confirmation. Do not imply a long
         # campaign — the tool's job is the fewest experiments to a good answer.
         # Name where the noise came from. "The gain is below the noise" is the
         # entire basis for stopping, so whether that floor was measured from
         # repeats or assumed as a percentage changes what the sentence is worth.
-        noise_origin = (
-            "measured repeatability" if res.noise_measured else "assumed measurement noise"
-        )
+        noise_origin = "measured repeatability" if noise_measured else "assumed measurement noise"
         return (
-            f"Likely done. The best expected improvement ({res.max_ei:.2g}) is already "
-            f"below the {noise_origin} ({res.noise_threshold:.3g}), so another experiment "
-            f"is unlikely to beat the current {best_word} ({res.best_y:.3f} at "
-            f"{res.input_name} = {res.best_x:g}). With only {reliability.n_observations} "
+            f"Likely done. The best expected improvement ({max_ei:.2g}) is already "
+            f"below the {noise_origin} ({noise_threshold:.3g}), so another experiment "
+            f"is unlikely to beat the current {best_word} ({best_y:.3f} at "
+            f"{best_where}). With only {n_observations} "
             f"measured points this is not yet certified; for more confidence the single most "
-            f"informative check is {res.input_name} = {rec.x:.3g} (predicted {res.target_name} "
-            f"{rec.predicted_mean:.2f} +/- {rec.ci95_predictive:.2f}, 95% predictive). "
+            f"informative check is {rec_where} (predicted {target_name} "
+            f"{rec_mean:.2f} +/- {rec_ci95_predictive:.2f}, 95% predictive). "
             f"Otherwise you can stop here."
         )
     return (
-        f"Recommended next experiment: {res.input_name} = {rec.x:.3g} "
-        f"(predicted {res.target_name} {rec.predicted_mean:.2f} "
-        f"+/- {rec.ci95_predictive:.2f}, 95% predictive). "
-        f"A meaningful improvement over the current {best_word} ({res.best_y:.3f}) "
+        f"Recommended next experiment: {rec_where} "
+        f"(predicted {target_name} {rec_mean:.2f} "
+        f"+/- {rec_ci95_predictive:.2f}, 95% predictive). "
+        f"A meaningful improvement over the current {best_word} ({best_y:.3f}) "
         f"is still expected."
+    )
+
+
+def _coords(names: Sequence[str], point: Sequence[float], fmt: str = ".3g") -> str:
+    """Format a point as `doping = 3.2, temperature = 480`, in axis order."""
+    return ", ".join(f"{n} = {v:{fmt}}" for n, v in zip(names, point, strict=True))
+
+
+def _verdict_nd(res: OptimizationResultND) -> str:
+    """The same three verdicts for a multi-axis run."""
+    return _verdict_text(
+        converged=res.converged,
+        direction=res.config.direction,
+        best_y=res.best_y,
+        best_where=_coords(res.input_names, res.best_x, "g"),
+        rec_where=_coords(res.input_names, res.recommendation.x),
+        rec_bare=_coords(res.input_names, res.recommendation.x),
+        rec_mean=res.recommendation.predicted_mean,
+        rec_ci95_predictive=res.recommendation.ci95_predictive,
+        target_name=res.target_name,
+        max_ei=res.max_ei,
+        noise_threshold=res.noise_threshold,
+        noise_measured=res.noise_measured,
+        level=res.reliability.level if res.reliability else None,
+        n_observations=res.reliability.n_observations if res.reliability else 0,
     )
 
 

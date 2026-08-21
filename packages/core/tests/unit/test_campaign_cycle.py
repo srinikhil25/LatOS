@@ -1,0 +1,280 @@
+"""Tests for the one-command experimental cycle.
+
+This is where the session's pieces meet: the workbook reader, the slope fit, the
+per-point variance, the stopping verdict and the pre-registration. Most of what
+follows checks the joins between them, because each was tested in isolation and
+none of that proves they compose.
+
+The pre-registration is the load-bearing part. It is the whole evidentiary basis
+for the closed-loop claim, and it only counts if it was written before the
+sample existed, so the tests treat "was it written, and does it contain the
+prediction" as the thing that must not break.
+"""
+
+from __future__ import annotations
+
+import json
+
+import numpy as np
+import openpyxl
+import pytest
+
+from latos.campaign_cycle import CycleOutcome, main, run_cycle
+from latos.ingestion.ite_workbook_template import (
+    FIRST_DATA_ROW,
+    HEADER_ROW,
+    MEASUREMENTS_SHEET,
+    SAMPLES_SHEET,
+    write_template,
+)
+
+DELTAS = (2.0, 5.0, 10.0)
+
+
+def _campaign(tmp_path, samples, *, offset=0.35, noise=0.0, deltas=DELTAS):
+    """Write a filled workbook. `samples` maps id -> (composition, true slope)."""
+    path = write_template(tmp_path / "campaign.xlsx")
+    wb = openpyxl.load_workbook(path)
+    s, m = wb[SAMPLES_SHEET], wb[MEASUREMENTS_SHEET]
+    sh = {c.value: c.column for c in s[HEADER_ROW] if c.value}
+    mh = {c.value: c.column for c in m[HEADER_ROW] if c.value}
+    rng = np.random.default_rng(0)
+
+    row = FIRST_DATA_ROW
+    for i, (sid, (x, slope)) in enumerate(samples.items()):
+        r = FIRST_DATA_ROW + i
+        s.cell(r, sh["sample_id"], sid)
+        s.cell(r, sh["mass_IL_A_mg"], round(400.0 * x, 4))
+        s.cell(r, sh["mass_IL_B_mg"], round(400.0 * (1.0 - x), 4))
+        for j, dt in enumerate(deltas, start=1):
+            m.cell(row, mh["meas_id"], f"{sid}-M{j}")
+            m.cell(row, mh["sample_id"], sid)
+            m.cell(row, mh["RH_percent"], 42.0)
+            m.cell(row, mh["T_hot_C"], 25.0 + dt)
+            m.cell(row, mh["T_cold_C"], 25.0)
+            m.cell(row, mh["wait_time_s"], 1800)
+            m.cell(row, mh["delta_V_mV"], slope * dt + offset + rng.normal(0.0, noise))
+            m.cell(row, mh["electrode_material"], "gold")
+            row += 1
+    wb.save(path)
+    return path
+
+
+class TestTooLittleData:
+    def test_two_samples_get_advice_rather_than_a_recommendation(self, tmp_path):
+        """Three points is where a surrogate starts. Below it, say so.
+
+        A recommendation from two samples would be the midpoint of the gap
+        dressed up as a prediction.
+        """
+        path = _campaign(tmp_path, {"IL-001": (0.0, 1.1), "IL-002": (1.0, 1.6)})
+        outcome = run_cycle(path)
+        assert outcome.result is None
+        assert outcome.prereg_path is None
+        assert any("both pure liquids and the midpoint" in m for m in outcome.messages)
+
+    def test_a_sample_with_one_delta_t_contributes_nothing(self, tmp_path):
+        path = _campaign(
+            tmp_path,
+            {"IL-001": (0.0, 1.1), "IL-002": (1.0, 1.6), "IL-003": (0.5, 2.3)},
+            deltas=(5.0,),
+        )
+        outcome = run_cycle(path)
+        assert outcome.fits == ()
+        assert any("contributed no value" in m for m in outcome.messages)
+
+    def test_an_unreadable_workbook_is_reported_not_raised(self, tmp_path):
+        broken = tmp_path / "broken.xlsx"
+        broken.write_bytes(b"not a workbook")
+        outcome = run_cycle(broken)
+        assert outcome.fits == ()
+        assert any("Could not read the workbook" in m for m in outcome.messages)
+
+
+class TestAFullCycle:
+    @pytest.fixture
+    def outcome(self, tmp_path):
+        path = _campaign(
+            tmp_path,
+            {
+                "IL-001": (0.0, 1.1),
+                "IL-002": (1.0, 1.6),
+                "IL-003": (0.5, 2.35),
+                "IL-004": (0.25, 1.8),
+            },
+            noise=0.04,
+        )
+        return run_cycle(path), path
+
+    def test_every_sample_is_fitted(self, outcome):
+        result, _ = outcome
+        assert len(result.fits) == 4
+        assert {f.sample_id for f in result.fits} == {"IL-001", "IL-002", "IL-003", "IL-004"}
+
+    def test_the_slope_and_the_composition_are_both_recovered(self, outcome):
+        result, _ = outcome
+        by_id = {f.sample_id: f for f in result.fits}
+        assert by_id["IL-003"].composition == pytest.approx(0.5)
+        assert by_id["IL-003"].seebeck_mv_k == pytest.approx(2.35, abs=0.05)
+
+    def test_the_electrode_offset_is_surfaced_per_sample(self, outcome):
+        """The number a single-point measurement would have hidden."""
+        result, _ = outcome
+        assert all(f.offset_mv == pytest.approx(0.35, abs=0.1) for f in result.fits)
+
+    def test_a_next_composition_is_recommended_inside_the_range(self, outcome):
+        result, _ = outcome
+        assert result.result is not None
+        assert 0.0 <= result.result.recommendation.x <= 1.0
+
+    def test_the_standard_errors_reach_the_optimizer(self, outcome):
+        """The join that makes the reliability claim more than one bit per point."""
+        result, _ = outcome
+        assert result.result.config.point_noise_used is True
+
+    def test_the_report_names_every_sample_and_the_verdict(self, outcome):
+        result, _ = outcome
+        text = result.report()
+        for fit in result.fits:
+            assert fit.sample_id in text
+        assert "NEXT: mix at x =" in text
+        assert result.result.stopping.action.upper() in text
+
+
+class TestThePreRegistration:
+    @pytest.fixture
+    def written(self, tmp_path):
+        path = _campaign(
+            tmp_path,
+            {"IL-001": (0.0, 1.1), "IL-002": (1.0, 1.6), "IL-003": (0.5, 2.35)},
+            noise=0.04,
+        )
+        return run_cycle(path), path
+
+    def test_it_lands_beside_the_workbook_by_default(self, written):
+        outcome, path = written
+        assert outcome.prereg_path is not None
+        assert outcome.prereg_path.parent == path.parent / "preregistrations"
+
+    def test_it_records_the_prediction_and_its_interval(self, written):
+        """Without these the record cannot be scored against the outcome."""
+        outcome, _ = written
+        record = json.loads(outcome.prereg_path.read_text(encoding="utf-8"))
+        assert record["kind"] == "latos.bo.prereg"
+        prediction = record["prediction_at_recommendation"]
+        assert 0.0 <= prediction["x"] <= 1.0
+        low, high = prediction["predictive_interval_95"]
+        assert low <= prediction["predicted_mean"] <= high
+
+    def test_it_records_whether_each_point_carried_its_own_variance(self, written):
+        """Otherwise the record cannot explain the recommendation it freezes.
+
+        A heteroscedastic fit weighs the same observations differently, so two
+        runs could carry identical frozen configs and have reached different
+        answers.
+        """
+        outcome, _ = written
+        record = json.loads(outcome.prereg_path.read_text(encoding="utf-8"))
+        assert record["frozen_config"]["point_noise_used"] is True
+
+    def test_an_explicit_destination_is_honoured(self, tmp_path):
+        path = _campaign(
+            tmp_path, {"IL-001": (0.0, 1.1), "IL-002": (1.0, 1.6), "IL-003": (0.5, 2.35)}
+        )
+        target = tmp_path / "elsewhere"
+        outcome = run_cycle(path, out_dir=target)
+        assert outcome.prereg_path.parent == target
+
+    def test_declining_to_freeze_writes_nothing_and_says_what_that_costs(self, tmp_path):
+        """A preview must not leave a file that looks like evidence."""
+        path = _campaign(
+            tmp_path, {"IL-001": (0.0, 1.1), "IL-002": (1.0, 1.6), "IL-003": (0.5, 2.35)}
+        )
+        outcome = run_cycle(path, freeze_prereg=False)
+        assert outcome.result is not None
+        assert outcome.prereg_path is None
+        assert not (path.parent / "preregistrations").exists()
+        assert any("cannot later be presented" in m for m in outcome.messages)
+
+
+class TestSignDisagreement:
+    def test_opposite_signs_change_the_target_and_the_report_says_so(self, tmp_path):
+        """The case that would silently waste the whole budget.
+
+        When the coefficient crosses zero the magnitude has an interior minimum,
+        so optimising |S| walks to an endpoint the campaign already measured.
+        """
+        path = _campaign(
+            tmp_path,
+            {"IL-001": (0.0, -1.8), "IL-002": (1.0, 2.1), "IL-003": (0.5, 0.4)},
+            noise=0.02,
+        )
+        outcome = run_cycle(path)
+        assert any("crosses zero" in m for m in outcome.messages)
+        assert any("crossing" in m for m in outcome.messages)
+
+    def test_one_sided_data_says_nothing_about_a_crossing(self, tmp_path):
+        path = _campaign(
+            tmp_path, {"IL-001": (0.0, 1.1), "IL-002": (1.0, 1.6), "IL-003": (0.5, 2.35)}
+        )
+        outcome = run_cycle(path)
+        assert not any("crosses zero" in m for m in outcome.messages)
+
+
+class TestDegenerateUncertainty:
+    def test_perfectly_linear_data_is_refused_as_a_noise_estimate(self, tmp_path):
+        """Noiseless input is not precision, it is the absence of an estimate.
+
+        Passing it through set the convergence floor and the epsilon tolerance to
+        roughly zero, and the engine then reported being within 1e-16 of the
+        optimum — a statement about nothing. Found by running the command on
+        synthetic data, not by reasoning about it.
+        """
+        path = _campaign(
+            tmp_path,
+            {"IL-001": (0.0, 1.1), "IL-002": (1.0, 1.6), "IL-003": (0.5, 2.35)},
+            noise=0.0,
+        )
+        outcome = run_cycle(path)
+        assert any("no measurement-noise estimate" in m for m in outcome.messages)
+        assert outcome.result.config.point_noise_used is False
+        assert outcome.result.epsilon > 1e-6
+
+
+class TestTheCommandLine:
+    def test_it_prints_a_report_and_succeeds(self, tmp_path, capsys):
+        path = _campaign(
+            tmp_path,
+            {"IL-001": (0.0, 1.1), "IL-002": (1.0, 1.6), "IL-003": (0.5, 2.35)},
+            noise=0.04,
+        )
+        assert main([str(path)]) == 0
+        assert "NEXT: mix at x =" in capsys.readouterr().out
+
+    def test_dry_run_leaves_no_file_behind(self, tmp_path, capsys):
+        path = _campaign(
+            tmp_path,
+            {"IL-001": (0.0, 1.1), "IL-002": (1.0, 1.6), "IL-003": (0.5, 2.35)},
+            noise=0.04,
+        )
+        assert main([str(path), "--dry-run"]) == 0
+        capsys.readouterr()
+        assert not (path.parent / "preregistrations").exists()
+
+    def test_a_missing_file_fails_without_a_traceback(self, tmp_path, capsys):
+        assert main([str(tmp_path / "nope.xlsx")]) == 2
+        assert "No such workbook" in capsys.readouterr().out
+
+    def test_an_unusable_workbook_exits_nonzero(self, tmp_path, capsys):
+        path = _campaign(tmp_path, {"IL-001": (0.0, 1.1)}, deltas=(5.0,))
+        assert main([str(path)]) == 1
+        capsys.readouterr()
+
+
+class TestReportWithoutAResult:
+    def test_a_report_is_still_printable_when_nothing_could_be_fitted(self):
+        """The command must say something useful on its worst day."""
+        outcome = CycleOutcome((), None, None, ("nothing to do",))
+        text = outcome.report()
+        assert "(none usable)" in text
+        assert "nothing to do" in text

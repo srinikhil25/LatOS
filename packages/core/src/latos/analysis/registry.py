@@ -131,6 +131,14 @@ def default_registry() -> AnalyzerRegistry:
     - `TransportSummaryAnalyzer`: per-measurement R&S (Seebeck sign, power
       factor) and LFA (κ range) summaries; sample-level zT stays in
       `transport_data.sample_zt`.
+    - `ThermovoltageSlopeAnalyzer`: ionic Seebeck coefficient as the slope of
+      ΔV against ΔT, separating it from the electrode-polarisation intercept
+      that a single-point reading silently absorbs.
+
+    Two analyzers now claim `Technique.THERMOELECTRIC`, which is what the
+    registry's set semantics are for: a resistivity-and-Seebeck run has no
+    ΔV-versus-ΔT series and a thermovoltage run has no κ, so each declines the
+    other's data in `analyze` and reports why.
 
     Microscopy (particle-size from TEM/SEM images) is deliberately absent —
     it needs the Stage 5 vision work, not a numeric kernel.
@@ -139,6 +147,7 @@ def default_registry() -> AnalyzerRegistry:
     # are needed (e.g. by tests that build their own one-analyzer registry).
     from latos.analysis.eds.composition import EdsCompositionAnalyzer  # noqa: PLC0415
     from latos.analysis.hall.metrics import HallMetricsAnalyzer  # noqa: PLC0415
+    from latos.analysis.thermovoltage.slope import ThermovoltageSlopeAnalyzer  # noqa: PLC0415
     from latos.analysis.transport.summary import TransportSummaryAnalyzer  # noqa: PLC0415
     from latos.analysis.uv_drs.tauc import UvDrsTaucAnalyzer  # noqa: PLC0415
     from latos.analysis.xps.regions import XpsRegionsAnalyzer  # noqa: PLC0415
@@ -152,5 +161,6 @@ def default_registry() -> AnalyzerRegistry:
             HallMetricsAnalyzer(),
             XpsRegionsAnalyzer(),
             TransportSummaryAnalyzer(),
+            ThermovoltageSlopeAnalyzer(),
         ],
     )

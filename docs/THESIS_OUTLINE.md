@@ -7,6 +7,13 @@ Characterization, Machine Learning, and Bayesian Optimization**
 This document maps the planned thesis chapters to the Latos stages that
 feed them. Update as the thesis structure firms up.
 
+> **Note (2026-08-04).** "Stage N" here refers to the per-stage write-ups in
+> `docs/stages/`, which is a different numbering from the one that used to be in
+> `STAGES.md`. That file has been rewritten as a single workstream-based roadmap
+> (`MV*`, `AX*`, `TE1*`, …) with no stage ladder and no degree-phase split, so
+> do not try to reconcile the two schemes — this map owns `docs/stages/`, and
+> `STAGES.md` owns what gets built next. New chapters should cite workstream IDs.
+
 ## Chapter map
 
 | Chapter | Working title | Fed by | Status |

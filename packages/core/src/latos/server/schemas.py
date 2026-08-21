@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 __all__ = [
     "DeleteProjectRequest",
@@ -285,6 +285,134 @@ class OptimizeResult(BaseModel):
     # Whether `noise_threshold` is the observed repeatability of repeat
     # measurements, or the assumed relative noise. The verdict is "the expected
     # gain is below the noise", so which one it is changes what that means.
+    noise_measured: bool = False
+
+
+class OptimizeRunNdRequest(BaseModel):
+    """POST /optimize/run-nd — one BO round over several input axes at once.
+
+    The multi-axis sibling of `OptimizeRunRequest`. Kept separate rather than
+    widening that model because `OptimizeRunRequest` is also the body of
+    `/optimize/freeze`, whose records are on disk in a one-variable shape.
+
+    Samples missing a value on *any* chosen axis are dropped, so adding an axis
+    can shrink the dataset — the response reports how many were lost. `bounds`,
+    when given, must have one (low, high) pair per axis in the same order.
+    """
+
+    input_variables: list[str]
+    target_property: str
+    bounds: list[tuple[float, float]] | None = None  # default: observed range per axis
+    objective: str = "maximize"  # "maximize" | "minimize" | "target"
+    target_value: float | None = None  # required when objective == "target"
+    at_temperature_k: float | None = None  # derived-zT only
+    # Side of the lattice the posterior surface is reported on (2 axes only).
+    # Bounded because the cost is the square: 256 is already 65k GP predictions
+    # and finer than any screen resolves, so a larger request is a mistake worth
+    # rejecting rather than a preference worth honouring.
+    # Zero skips it, which is what a caller that only wants the recommendation
+    # should send.
+    surface_size: int = Field(default=48, ge=0, le=256)
+
+
+class NdDatasetPoint(BaseModel):
+    """One observed point in the multi-axis dataset; `x` is a coordinate."""
+
+    sample_id: str
+    sample_name: str
+    x: list[float]
+    y: float
+
+
+class RecommendationNdOut(BaseModel):
+    """The recommended next experiment, one value per input axis."""
+
+    x: list[float]
+    predicted_mean: float
+    ci95: float
+    ci95_predictive: float
+    predictive_interval_95: tuple[float, float]
+
+
+class AxisOut(BaseModel):
+    """One input axis of a multi-dimensional run.
+
+    `length_scale` is the fitted ARD value in normalized units, where each
+    axis's search range spans the same distance, and it is the diagnostic worth
+    reading. `pinned_at` says whether the fit ran into the range it was allowed:
+
+      "high" — the model found no structure along this axis; it does not move
+               the target over this range.
+      "low"  — the model wants finer resolution than the floor permits, so it
+               is under-resolving real structure. Seen on multi-axis fits,
+               where the floor is inherited from the one-variable engine.
+      None   — the scale settled in the interior, which is the healthy case.
+
+    The two mean opposite things, which is why this is not a boolean.
+    """
+
+    name: str
+    low: float
+    high: float
+    length_scale: float
+    pinned_at: str | None = None  # "low" | "high" | None
+
+
+class SurfaceOut(BaseModel):
+    """The posterior on a regular lattice, for a 2-D contour or heat map.
+
+    `mean[j][i]` is the value at `(axis_x[i], axis_y[j])`. Only present when
+    exactly two axes were optimized and a non-zero `surface_size` was asked for.
+    """
+
+    axis_names: tuple[str, str]
+    axis_x: list[float]
+    axis_y: list[float]
+    mean: list[list[float]]
+    sd: list[list[float]]
+    ei: list[list[float]]
+
+
+class OptimizeNdResult(BaseModel):
+    """POST /optimize/run-nd — multi-axis posterior + recommendation + verdict.
+
+    Mirrors `OptimizeResult` field for field except where dimension forces a
+    difference: the 1-D `grid_*` curve becomes `surface` (2-D only), and the
+    scalar `x` fields become coordinates.
+    """
+
+    input_variables: list[str]
+    target_property: str
+    objective: str = "maximize"
+    axes: list[AxisOut]
+    kernel: str
+    acquisition: str  # "sobol" or "sobol+lbfgsb"
+    reliability_level: str = "unknown"
+    reliability_note: str = ""
+    # Geometric half of the grade: the radius of the largest unsampled hole,
+    # and the largest hole the claimed tier tolerates. Counting points cannot
+    # answer coverage once there is more than one axis; this can.
+    fill_distance: float = 0.0
+    fill_limit: float = 0.0
+    quality_flags: list[QualityFlagOut] = []
+    surface: SurfaceOut | None = None
+    points: list[NdDatasetPoint]
+    # Samples that have the target and the first axis but are missing a value on
+    # one of the added axes. Adding an axis costs data, and it should be visible.
+    n_dropped_for_missing_axis: int = 0
+    best_x: list[float]
+    best_y: float
+    recommendation: RecommendationNdOut
+    max_ei: float
+    noise_threshold: float
+    converged: bool
+    verdict: str
+    epsilon: float = 0.0
+    delta: float = 0.1
+    prob_within_epsilon: float = 0.0
+    epsilon_delta_met: bool = False
+    n_unreliable: int = 0
+    n_distrusted: int = 0
     noise_measured: bool = False
 
 

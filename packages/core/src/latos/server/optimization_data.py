@@ -362,6 +362,24 @@ def list_input_variables(project: Project, params: SynthesisParams) -> list[Inpu
     return out
 
 
+def axis_values(project: Project, params: SynthesisParams, input_variable: str) -> dict[str, float]:
+    """Per-sample value of one input axis, keyed by sample id.
+
+    `build_dataset` resolves the *first* axis of a run while also resolving the
+    target and skipping unusable samples. A multi-axis run needs the remaining
+    axes for the samples that survived that pass, and needs them resolved the
+    same way — synthesis parameter first, then measured feature — so a second
+    axis means exactly what a first axis would have meant. Samples with no value
+    are absent rather than filled in; the caller drops them.
+    """
+    out: dict[str, float] = {}
+    for sample in project.samples:
+        value = _resolve_x(sample, params, input_variable)
+        if value is not None:
+            out[sample.id] = value
+    return out
+
+
 def _resolve_x(sample: Sample, params: SynthesisParams, input_variable: str) -> float | None:
     """Input value for a sample: synthesis parameter first, then features."""
     x = params.get(sample.id, {}).get(input_variable)

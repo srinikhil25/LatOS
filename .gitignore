@@ -111,6 +111,26 @@ packages/core/scripts/architecture_diagram*.py
 packages/core/scripts/dhivya_audit.py
 docs/figures/latos_architecture*
 
+# ─── Local research notes and simulation studies ─────────────────────
+# Working documents: experiment planning, literature notes, study material,
+# lab templates, and the simulation harnesses behind them. Useful locally,
+# not part of the shipped package.
+#
+# `docs/*` rather than `docs/`: git cannot re-include a file whose parent
+# directory is excluded, so ignoring the directory outright would make every
+# future edit to the nine tracked docs invisible in `git status` — including
+# the per-stage writeups that docs/README.md asks for after each stage. The
+# negations below keep exactly those visible.
+docs/*
+!docs/README.md
+!docs/THESIS_OUTLINE.md
+!docs/glossary.md
+!docs/references.md
+!docs/stages/
+!docs/figures/
+
+studies/
+
 # ─── Desktop app (apps/desktop — Tauri + React) ──────────────────────
 node_modules/
 apps/desktop/dist/

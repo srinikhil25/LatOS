@@ -13,7 +13,7 @@ a kernel artifact.
 
 from __future__ import annotations
 
-from latos.optimization import spb
+from latos.optimization import benchmarks, spb, sweep, synthesis_sim
 from latos.optimization.campaign import (
     CampaignDrift,
     DriftStep,
@@ -30,11 +30,19 @@ from latos.optimization.engine import (
     ReliabilityReport,
     RobustnessEntry,
     RobustnessReport,
+    SurfaceND,
     length_scale_robustness,
     optimize,
     optimize_nd,
 )
 from latos.optimization.prereg import build_record, freeze, write_record
+from latos.optimization.rehearsal import (
+    RehearsalReport,
+    Shape,
+    ShapeOutcome,
+    default_shapes,
+    rehearse,
+)
 from latos.optimization.validate import (
     OutcomeVerdict,
     PreregEntry,
@@ -46,9 +54,11 @@ from latos.optimization.validate import (
 
 __all__ = [
     "BoConfig",
+    "benchmarks",
     "optimize_nd",
     "RecommendationND",
     "OptimizationResultND",
+    "SurfaceND",
     "BoConfigND",
     "CampaignDrift",
     "DriftStep",
@@ -57,17 +67,24 @@ __all__ = [
     "OutcomeVerdict",
     "PreregEntry",
     "Recommendation",
+    "RehearsalReport",
     "ReliabilityReport",
     "RobustnessEntry",
     "RobustnessReport",
+    "Shape",
+    "ShapeOutcome",
     "build_record",
+    "default_shapes",
     "freeze",
     "length_scale_robustness",
     "list_preregistrations",
     "optimize",
+    "rehearse",
     "outcome_path_for",
     "recommendation_drift",
     "spb",
+    "sweep",
+    "synthesis_sim",
     "validate_outcome",
     "write_outcome",
     "write_record",

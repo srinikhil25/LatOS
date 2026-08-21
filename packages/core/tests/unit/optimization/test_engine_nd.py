@@ -9,10 +9,18 @@ step, so they are pinned here explicitly rather than trusted to stay put.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pytest
 
 from latos.optimization import OptimizationError, optimize, optimize_nd
+from latos.optimization.engine import (
+    _GRID_SIZE,
+    _LS_BOUNDS,
+    _LS_BOUNDS_ND,
+    _PROB_MAX_POINTS,
+)
 
 # The frozen drop-impact record: four loadings, the recommendation and interval
 # that were committed to disk before the fifth sample was made.
@@ -49,7 +57,22 @@ class TestOneDimensionalPathUnchanged:
         assert r.recommendation.x == pytest.approx(47.451, abs=0.01)
         assert lo == pytest.approx(31.215, abs=0.01)
         assert hi == pytest.approx(57.425, abs=0.01)
-        assert r.max_ei == pytest.approx(0.68, abs=0.01)
+        # max_ei moved 0.68 -> 0.646 on 2026-08-10, when `xi` became a fraction
+        # of the observed spread rather than an absolute value in the target's
+        # units (see `_xi_absolute`). Peak force runs 36-72 N, so std(y) = 12.5
+        # and xi resolves to 0.125 instead of 0.01 — a larger sweetener, hence a
+        # slightly smaller EI at the peak.
+        #
+        # Everything this record actually *claims* is untouched: same
+        # recommendation, same predictive interval, same leave-one-out coverage,
+        # same noise floor. Only the acquisition value shifted, and that is an
+        # internal diagnostic, not a statement about the material — which is why
+        # updating this number does not invalidate the pre-registration.
+        #
+        # The change was made because the old absolute constant exceeded real
+        # improvements on zT-scale targets (~0.07) and drove EI to exactly zero
+        # there, so exploration silently depended on the target's units.
+        assert r.max_ei == pytest.approx(0.646, abs=0.01)
         assert r.noise_threshold == pytest.approx(4.45, abs=0.01)
         assert r.reliability is not None
         assert (r.reliability.loo_inside, r.reliability.loo_total) == (3, 4)
@@ -79,6 +102,112 @@ class TestOneDimensionalPathUnchanged:
         )
         assert isinstance(r.config.length_scale, float)
         assert np.isfinite(r.config.length_scale)
+
+
+class TestTheLengthScaleFloorIsSplitByDimension:
+    """AX1: `optimize()` and `optimize_nd()` deliberately use different floors.
+
+    The evidence for lowering the floor is entirely multi-dimensional — swept on
+    Branin and Hartmann-3, where it roughly halves worst-case regret. Applying
+    the same value to one dimension is not conservative-by-default caution, it
+    is measurably wrong: on the frozen four-point record a 0.2 floor lets the
+    fit fall to l = 0.29, widening the 95% predictive interval from
+    [31.2, 57.4] to [30.4, 79.1] and dropping leave-one-out coverage from
+    3-of-4 to 2-of-4. Wider intervals *and* worse calibration is overfitting.
+
+    This test exists because collapsing the two constants back into one is an
+    obvious-looking tidy-up that would silently break every pre-registration on
+    disk.
+    """
+
+    def test_the_two_floors_are_different(self):
+        assert _LS_BOUNDS[0] > _LS_BOUNDS_ND[0]
+
+    def test_one_dimension_uses_the_higher_floor(self):
+        """Checked behaviourally, not by reading the constant: the 1-D fit must
+        not be able to go below the 1-D floor."""
+        r = optimize(
+            FROZEN_X,
+            FROZEN_Y,
+            bounds=(float(FROZEN_X.min()), float(FROZEN_X.max())),
+            input_name="wt",
+            target_name="peak_force_n",
+            direction="minimize",
+        )
+        assert r.config.length_scale >= _LS_BOUNDS[0] - 1e-9
+
+    def test_the_multi_axis_path_may_go_lower(self):
+        """A surface with structure finer than the 1-D floor should be allowed
+        to resolve it. sin(3x) puts about 2.4 cycles across the range, whose
+        natural length-scale is well under 1.0."""
+        axis = np.linspace(0.0, 5.0, 7)
+        aa, bb = np.meshgrid(axis, np.linspace(300.0, 600.0, 7), indexing="ij")
+        x = np.column_stack([aa.ravel(), bb.ravel()])
+        y = np.sin(x[:, 0] * 3.0) + 0.01 * (x[:, 1] / 600.0)
+        r = optimize_nd(
+            x, y, bounds=[(0, 5), (300, 600)], input_names=("fast", "flat"), target_name="prop"
+        )
+        assert min(r.config.length_scales) < _LS_BOUNDS[0]
+        assert min(r.config.length_scales) >= _LS_BOUNDS_ND[0] - 1e-9
+
+
+class TestTheRegretBoundIsAffordable:
+    """The epsilon-delta bound draws joint posterior paths, which is cubic in the
+    number of points sampled over.
+
+    `optimize()` evaluates on a 200-point grid, where that is free, and the
+    estimator was written for that case. `optimize_nd` maximises over 2048 Sobol
+    candidates — roughly a thousandfold more work in the cubic term — and the
+    cost was paid on every multi-variable call whether or not the caller read the
+    result. It dominated the runtime of the endpoint that draws the 2-D map.
+
+    The fix samples only over candidates that could plausibly *be* the maximum,
+    selected by upper confidence bound. These tests pin both halves: that the cap
+    leaves one dimension alone, and that it does not quietly change the answer.
+    """
+
+    def test_one_dimension_is_below_the_cap(self):
+        """So `optimize()` results, including every frozen record, are
+        bit-identical rather than merely close."""
+        assert _GRID_SIZE <= _PROB_MAX_POINTS
+
+    def test_the_probability_survives_the_cap(self):
+        """Capping is only legitimate if the number it produces is the same
+        number. Compared against an effectively uncapped estimate on the same
+        posterior; the tolerance is a few times the estimator's own Monte-Carlo
+        error, which is what it is being asked to stay inside."""
+        x, y = _grid_2d(n_dop=7, n_temp=7)
+        r = optimize_nd(
+            x, y, bounds=[(0, 5), (300, 600)], input_names=("doping", "temp"), target_name="zt"
+        )
+        uncapped = optimize_nd(
+            x,
+            y,
+            bounds=[(0, 5), (300, 600)],
+            input_names=("doping", "temp"),
+            target_name="zt",
+            prob_max_points=10**9,
+        )
+        assert r.prob_within_epsilon == pytest.approx(uncapped.prob_within_epsilon, abs=0.06)
+
+    def test_it_is_much_faster(self):
+        """The point of the change. A generous threshold — the measured speedup
+        is ~75x — so this fails only if the cap stops working, not on timing
+        noise or a slower machine."""
+        x, y = _grid_2d(n_dop=8, n_temp=8)
+        kw = {
+            "bounds": [(0, 5), (300, 600)],
+            "input_names": ("doping", "temp"),
+            "target_name": "zt",
+            "with_reliability": False,
+        }
+        start = time.perf_counter()
+        optimize_nd(x, y, **kw)
+        capped = time.perf_counter() - start
+        start = time.perf_counter()
+        optimize_nd(x, y, prob_max_points=10**9, **kw)
+        uncapped = time.perf_counter() - start
+        assert capped < uncapped / 3
 
 
 class TestGuards:
@@ -165,7 +294,10 @@ class TestTwoDimensional:
         fast, flat = r.config.length_scales
         assert fast < flat
 
-    def test_reliability_flags_the_dimension_and_its_caveat(self):
+    def test_reliability_is_dimension_aware(self):
+        """40 points would grade calibrated on count alone. Spread over a
+        plane they leave holes far bigger than the limit, and the fill-distance
+        gate is what notices."""
         x, y = _grid_2d()
         r = optimize_nd(
             x, y, bounds=[(0, 5), (300, 600)], input_names=("doping", "temp"), target_name="zt"
@@ -173,7 +305,8 @@ class TestTwoDimensional:
         assert r.reliability is not None
         assert r.reliability.n_dims == 2
         assert r.reliability.loo_total == x.shape[0]
-        assert "do not yet scale with dimension" in r.reliability.note
+        assert r.reliability.fill_distance > r.reliability.fill_limit
+        assert r.reliability.level == "exploratory"
 
     def test_candidate_set_is_a_power_of_two_and_inside_bounds(self):
         x, y = _grid_2d()
@@ -231,6 +364,142 @@ class TestTwoDimensional:
             direction="minimize",
         )
         assert r.best_y == pytest.approx(float(y.min()))
+
+
+class TestAcquisitionPolish:
+    """MV2: the Sobol set finds the right basin, L-BFGS-B places the point
+    inside it. 2048 candidates resolve about a fortieth of each axis in 2-D,
+    and that quantisation is avoidable because the surrogate is a closed-form
+    function that can be optimised between the candidates."""
+
+    def _run(self, *, polish: bool):
+        x, y = _grid_2d()
+        return optimize_nd(
+            x,
+            y,
+            bounds=[(0, 5), (300, 600)],
+            input_names=("doping", "temp"),
+            target_name="zt",
+            n_candidates=256,
+            polish=polish,
+        )
+
+    def test_grid_only_recommends_one_of_the_candidates(self):
+        r = self._run(polish=False)
+        cand = np.asarray(r.candidates)
+        assert np.min(np.linalg.norm(cand - np.asarray(r.recommendation.x), axis=1)) < 1e-9
+        assert r.config.acquisition == "sobol"
+
+    def test_polished_point_leaves_the_grid(self):
+        r = self._run(polish=True)
+        cand = np.asarray(r.candidates)
+        off_grid = np.min(np.linalg.norm(cand - np.asarray(r.recommendation.x), axis=1))
+        assert r.config.acquisition == "sobol+lbfgsb"
+        assert off_grid > 0.0
+
+    def test_polished_point_stays_inside_the_bounds(self):
+        r = self._run(polish=True)
+        assert 0.0 <= r.recommendation.x[0] <= 5.0
+        assert 300.0 <= r.recommendation.x[1] <= 600.0
+
+    def test_polish_never_lowers_the_acquisition_it_was_given(self):
+        """The guard that makes this safe: the grid answer is kept unless the
+        refinement genuinely beats it, so a failed polish cannot regress."""
+        grid = self._run(polish=False)
+        fine = self._run(polish=True)
+        assert fine.max_ei >= grid.max_ei - 1e-12
+
+    def test_is_reproducible(self):
+        a, b = self._run(polish=True), self._run(polish=True)
+        assert a.recommendation.x == pytest.approx(b.recommendation.x)
+
+
+class TestPosteriorSurface:
+    """MV4: the same posterior on a lattice, so a front-end can draw a map
+    without triangulating the Sobol set. Off unless asked for."""
+
+    def _run(self, *, surface_size: int, n_dims: int = 2):
+        if n_dims == 2:
+            x, y = _grid_2d()
+            return optimize_nd(
+                x,
+                y,
+                bounds=[(0, 5), (300, 600)],
+                input_names=("doping", "temp"),
+                target_name="zt",
+                surface_size=surface_size,
+            )
+        x = FROZEN_X.reshape(-1, 1)
+        return optimize_nd(
+            x,
+            FROZEN_Y,
+            bounds=[(40.0, 55.0)],
+            input_names=("wt",),
+            target_name="peak_force_n",
+            surface_size=surface_size,
+        )
+
+    def test_absent_by_default(self):
+        x, y = _grid_2d()
+        r = optimize_nd(
+            x, y, bounds=[(0, 5), (300, 600)], input_names=("doping", "temp"), target_name="zt"
+        )
+        assert r.surface is None
+
+    def test_lattice_shape_and_orientation(self):
+        s = self._run(surface_size=9).surface
+        assert s is not None
+        assert s.axis_names == ("doping", "temp")
+        assert len(s.axis_x) == len(s.axis_y) == 9
+        assert len(s.mean) == 9  # rows indexed by axis_y
+        assert all(len(row) == 9 for row in s.mean)
+        assert len(s.sd) == len(s.ei) == 9
+
+    def test_lattice_spans_the_bounds(self):
+        s = self._run(surface_size=9).surface
+        assert (s.axis_x[0], s.axis_x[-1]) == (0.0, 5.0)
+        assert (s.axis_y[0], s.axis_y[-1]) == (300.0, 600.0)
+
+    def test_mean_is_in_physical_units(self):
+        """The colour bar has to read in the units the researcher measured, so
+        the lattice goes through the same inverse transform and clamp as the
+        recommendation — not the internal maximization frame."""
+        _x, y = _grid_2d()
+        r = self._run(surface_size=12)
+        flat = [v for row in r.surface.mean for v in row]
+        assert min(flat) > -1.0
+        assert max(flat) < float(y.max()) * 2.0
+
+    def test_the_posterior_peak_is_near_the_data_peak(self):
+        r = self._run(surface_size=24)
+        s = r.surface
+        mean = np.asarray(s.mean)
+        j, i = np.unravel_index(int(np.argmax(mean)), mean.shape)
+        assert abs(s.axis_x[i] - 3.0) < 1.0  # the surface peaks in doping at 3
+        assert s.axis_y[j] > 550.0  # and rises to the hot end
+
+    def test_uncertainty_is_lowest_where_the_data_is(self):
+        """A sanity check on `sd`: the corner of the box furthest from any
+        observation must not be more certain than the middle of the data."""
+        s = self._run(surface_size=16).surface
+        sd = np.asarray(s.sd)
+        assert sd[0][0] >= sd[len(s.axis_y) // 2][len(s.axis_x) // 2]
+
+    def test_skipped_outside_two_dimensions(self):
+        """A lattice is a 2-D idea. One axis already has `optimize()`'s curve,
+        and three would be a cube nobody asked to be sent."""
+        assert self._run(surface_size=16, n_dims=1).surface is None
+
+    def test_does_not_move_the_recommendation(self):
+        x, y = _grid_2d()
+        kw = {
+            "bounds": [(0, 5), (300, 600)],
+            "input_names": ("doping", "temp"),
+            "target_name": "zt",
+        }
+        assert optimize_nd(x, y, **kw).recommendation.x == pytest.approx(
+            optimize_nd(x, y, surface_size=32, **kw).recommendation.x
+        )
 
 
 class TestOneAxisThroughTheNdPath:

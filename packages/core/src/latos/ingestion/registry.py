@@ -193,6 +193,7 @@ def default_registry() -> ParserRegistry:
         CasaXpsCsvParser,
         EdsEmsaParser,
         HallXlsParser,
+        IteWorkbookParser,
         LfaXlsxParser,
         MicroscopyTifParser,
         PanalyticalXrdmlParser,
@@ -214,6 +215,10 @@ def default_registry() -> ParserRegistry:
             EdsEmsaParser(),
             MicroscopyTifParser(),
             HallXlsParser(),
+            # Two named sheets plus a sample_id header is an unambiguous
+            # signature, so this sits with the specific ones rather than
+            # with the .xlsx sniffers it would otherwise compete against.
+            IteWorkbookParser(),
             # Extension-keyed but with content sniffs — moderately specific.
             LfaXlsxParser(),
             ResistivitySeebeckXlsxParser(),
