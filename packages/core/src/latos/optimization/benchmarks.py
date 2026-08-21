@@ -29,6 +29,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from scipy.stats import qmc
@@ -55,7 +56,8 @@ def branin(x: np.ndarray) -> np.ndarray:
     a, b, c = 1.0, 5.1 / (4 * math.pi**2), 5.0 / math.pi
     r, s, t = 6.0, 10.0, 1.0 / (8 * math.pi)
     x1, x2 = x[:, 0], x[:, 1]
-    return a * (x2 - b * x1**2 + c * x1 - r) ** 2 + s * (1 - t) * np.cos(x1) + s
+    value = a * (x2 - b * x1**2 + c * x1 - r) ** 2 + s * (1 - t) * np.cos(x1) + s
+    return np.asarray(value, dtype=float)
 
 
 _H3_ALPHA = np.array([1.0, 1.2, 3.0, 3.2])
@@ -69,7 +71,7 @@ def hartmann3(x: np.ndarray) -> np.ndarray:
     """Hartmann-3 on [0, 1]^3. One global minimum, several local ones."""
     x = np.atleast_2d(np.asarray(x, dtype=float))
     inner = np.einsum("ij,kij->ki", _H3_A, (x[:, None, :] - _H3_P[None, :, :]) ** 2)
-    return -np.einsum("j,kj->k", _H3_ALPHA, np.exp(-inner))
+    return np.asarray(-np.einsum("j,kj->k", _H3_ALPHA, np.exp(-inner)), dtype=float)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,7 +117,9 @@ def _initial_design(bounds: np.ndarray, n: int, seed: int) -> np.ndarray:
     d = bounds.shape[0]
     m = max(1, int(np.ceil(np.log2(max(n, 2)))))
     unit = qmc.Sobol(d=d, scramble=True, seed=seed).random_base2(m)[:n]
-    return bounds[:, 0] + unit * (bounds[:, 1] - bounds[:, 0])
+    # scipy is untyped, so the Sobol draw arrives as Any and infects the
+    # arithmetic; the asarray pins the declared return type back down.
+    return np.asarray(bounds[:, 0] + unit * (bounds[:, 1] - bounds[:, 0]), dtype=float)
 
 
 def run_campaign(
@@ -170,6 +174,14 @@ def run_campaign(
     history: list[float] = [float(y.min())]
     levels: list[str] = []
 
+    # Passing the length-scale bounds only when the caller supplied them lets
+    # `optimize_nd` own its own default. Built once, and typed as Any-valued:
+    # mypy checks a `**` unpack against every parameter it might land on, so a
+    # narrowly-typed dict reports one error per candidate keyword.
+    ls_kwargs: dict[str, Any] = (
+        {} if length_scale_bounds is None else {"length_scale_bounds": length_scale_bounds}
+    )
+
     for _ in range(n_rounds):
         if strategy == "random":
             nxt = box[:, 0] + rng.random(box.shape[0]) * (box[:, 1] - box[:, 0])
@@ -186,11 +198,7 @@ def run_campaign(
                 n_candidates=n_candidates,
                 with_reliability=with_reliability,
                 polish=polish,
-                **(
-                    {}
-                    if length_scale_bounds is None
-                    else {"length_scale_bounds": length_scale_bounds}
-                ),
+                **ls_kwargs,
             )
             nxt = np.asarray(res.recommendation.x, dtype=float)
             if res.reliability is not None:

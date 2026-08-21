@@ -52,6 +52,7 @@ import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any, Protocol
 
 # Single-threaded BLAS keeps memory tiny for these small problems and
 # avoids OpenBLAS over-allocating on constrained boxes. Set before numpy.
@@ -648,6 +649,36 @@ def _prior_offsets_at(
     return offsets
 
 
+class _Surrogate(Protocol):
+    """The three things every consumer in this module asks of a fitted model.
+
+    `_fit_surrogate` hands back either a bare `GaussianProcessRegressor` or a
+    `_PriorMeanGP` wrapping one, and nothing downstream cares which. That
+    contract used to be typed as `object`, which is true but useless: it made
+    every `gp.predict(...)` an attribute error under strict typing. Naming it
+    keeps the return honest and documents, in one place, exactly how narrow the
+    surface is that the prior wrapper has to reproduce.
+
+    `predict` is annotated loosely on purpose. It returns an array normally and
+    a `(mean, std)` pair when `return_std=True`, which is scikit-learn's own
+    convention; spelling that as a union would break every call site that
+    unpacks two values.
+    """
+
+    def predict(self, X: np.ndarray, return_std: bool = False) -> Any:  # noqa: N803
+        ...
+
+    def sample_y(
+        self,
+        X: np.ndarray,  # noqa: N803
+        n_samples: int = 1,
+        random_state: int = 0,
+    ) -> np.ndarray: ...
+
+    @property
+    def kernel_(self) -> Any: ...
+
+
 class _PriorMeanGP:
     """A fitted GP whose posterior mean is shifted by a deterministic prior.
 
@@ -679,14 +710,19 @@ class _PriorMeanGP:
         self._gp = gp
         self._offsets = offsets
 
-    def predict(self, X: np.ndarray, return_std: bool = False):  # noqa: N803
+    def predict(self, X: np.ndarray, return_std: bool = False) -> Any:  # noqa: N803
         shift = self._offsets(X)
         if return_std:
             mean, std = self._gp.predict(X, return_std=True)
             return mean + shift, std
         return self._gp.predict(X) + shift
 
-    def sample_y(self, X: np.ndarray, n_samples: int = 1, random_state: int = 0):  # noqa: N803
+    def sample_y(
+        self,
+        X: np.ndarray,  # noqa: N803
+        n_samples: int = 1,
+        random_state: int = 0,
+    ) -> np.ndarray:
         """Joint posterior draws, each shifted by the prior.
 
         `_prob_within_epsilon` takes the regret of the incumbent across sample
@@ -695,10 +731,10 @@ class _PriorMeanGP:
         points, so the offset does not cancel out of `max(f) - f(x_best)`.
         """
         draws = self._gp.sample_y(X, n_samples=n_samples, random_state=random_state)
-        return draws + self._offsets(X)[:, None]
+        return np.asarray(draws + self._offsets(X)[:, None], dtype=float)
 
     @property
-    def kernel_(self):
+    def kernel_(self) -> Any:
         return self._gp.kernel_
 
 
@@ -718,7 +754,7 @@ def _fit_surrogate(
     noise_scale: np.ndarray | None,
     n_dims: int = 1,
     ls_bounds: tuple[float, float] = _LS_BOUNDS,
-) -> tuple[object, np.ndarray]:
+) -> tuple[_Surrogate, np.ndarray]:
     """Fit the GP — on residuals when a physical prior is supplied.
 
     Returns the surrogate and the values it was actually fitted to. The second
@@ -1479,7 +1515,9 @@ def _sobol_candidates(bounds: np.ndarray, n_candidates: int, seed: int) -> np.nd
     m = max(4, int(np.ceil(np.log2(max(n_candidates, 2)))))
     engine = qmc.Sobol(d=d, scramble=True, seed=seed)
     unit = engine.random_base2(m)
-    return bounds[:, 0] + unit * (bounds[:, 1] - bounds[:, 0])
+    # scipy ships no type information, so the draw arrives as Any and infects
+    # the arithmetic; the asarray pins the declared return type back down.
+    return np.asarray(bounds[:, 0] + unit * (bounds[:, 1] - bounds[:, 0]), dtype=float)
 
 
 def _prepare_nd_inputs(

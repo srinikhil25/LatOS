@@ -220,7 +220,8 @@ class Peak:
         """Contribution of this peak at grid coordinates `x`, shape (..., d)."""
         c = np.asarray(self.centre, dtype=float)
         s = np.asarray(self.sigma, dtype=float)
-        return self.height * np.exp(-np.sum(((x - c) / s) ** 2, axis=-1) / 2.0)
+        falloff = np.exp(-np.sum(((x - c) / s) ** 2, axis=-1) / 2.0)
+        return np.asarray(self.height * falloff, dtype=float)
 
 
 @dataclass(frozen=True, slots=True)
