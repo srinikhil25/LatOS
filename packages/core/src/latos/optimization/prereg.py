@@ -57,6 +57,11 @@ def build_record(
             "xi": cfg.xi,
             "rel_noise": cfg.rel_noise,
             "noise_std": cfg.noise_std,
+            # Whether each observation carried its own variance. Two runs can
+            # otherwise carry identical frozen configs and have weighed the same
+            # points differently, which would make this record unable to explain
+            # the recommendation it is freezing.
+            "point_noise_used": cfg.point_noise_used,
             "grid_size": cfg.grid_size,
             "seed": cfg.seed,
             "n_observations": cfg.n_observations,
