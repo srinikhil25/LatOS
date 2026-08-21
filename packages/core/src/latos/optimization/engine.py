@@ -175,6 +175,12 @@ _CI95 = 1.96  # 95% Gaussian half-width in standard deviations
 # A measurement our physics checks reject is treated as this many times
 # noisier rather than deleted: the GP still sees it, but stops chasing it.
 _UNRELIABLE_NOISE_FACTOR = 3.0
+# Floor on a per-point noise multiplier, as a fraction of the median multiplier
+# in the same campaign. A reported standard error of zero claims one observation
+# is exact; a GP handed a noiseless point interpolates it exactly and lets that
+# single optimistic error bar dominate every neighbouring prediction. Small
+# uncertainties are believed, impossible ones are not.
+_MIN_POINT_NOISE_FRACTION = 0.05
 # Posterior draws behind the (epsilon, delta) statement. 512 puts the standard
 # error of the reported probability near 2%, which is finer than we quote it.
 _N_POSTERIOR_DRAWS = 512
@@ -291,6 +297,12 @@ class BoConfig:
     # `xi = 0.01` is ambiguous across versions. Recording what it resolved to
     # disambiguates every record: absent means the old absolute reading.
     xi_absolute: float | None = None  # `xi` in objective units, as applied
+    # True when per-observation standard deviations were supplied. Without it
+    # two runs could carry byte-identical configs and still have produced
+    # different recommendations, because a heteroscedastic fit weighs the same
+    # points differently. A frozen record that cannot tell those apart is not a
+    # record of how the answer was produced.
+    point_noise_used: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,6 +430,148 @@ def _noise_scale(
     if not n_flagged:
         return None, 0
     return np.where(flags, _UNRELIABLE_NOISE_FACTOR, 1.0), n_flagged
+
+
+def _validate_point_noise(point_noise: np.ndarray | None, n_observations: int) -> np.ndarray | None:
+    """Per-observation measurement uncertainties, checked and returned as floats.
+
+    Rejects rather than repairs. A negative or non-finite standard deviation is
+    not a value to clamp, it is a caller bug, and quietly substituting something
+    plausible would hand the surrogate a confidence nobody computed.
+    """
+    if point_noise is None:
+        return None
+    sigma = np.asarray(point_noise, dtype=float).reshape(-1)
+    if sigma.size != n_observations:
+        raise OptimizationError(
+            f"point_noise must have one entry per observation: got {sigma.size} "
+            f"for {n_observations} points."
+        )
+    if not np.all(np.isfinite(sigma)):
+        raise OptimizationError("point_noise must be finite; got NaN or infinity.")
+    if np.any(sigma < 0):
+        raise OptimizationError("point_noise must be non-negative; got a negative value.")
+    if not np.any(sigma > 0):
+        raise OptimizationError("point_noise is zero everywhere, which claims perfect data.")
+    return sigma
+
+
+def _point_noise_scale(
+    sigma: np.ndarray | None,
+    *,
+    noise_std: float,
+    transform: str,
+    y_linear: np.ndarray,
+) -> np.ndarray | None:
+    """Turn measured per-point uncertainties into multipliers on the shared noise.
+
+    Reliability has reached the surrogate as one bit per datapoint: a physics
+    check either flagged an observation or it did not, and a flagged one had its
+    error bar widened by a fixed factor. That throws away a number the analysis
+    layer already computes. A fitted slope arrives with a standard error, a
+    derived quantity carries propagated uncertainty, and a spread across
+    modelling choices is itself a measurement of how well a value is known.
+    Passing those through makes the Gaussian process heteroscedastic by
+    construction rather than by category.
+
+    The multiplier is `σᵢ / noise_std`, because `_build_gp` forms the diagonal
+    as `(noise_std / std(y))² · scale²`; the shared term then cancels and each
+    point contributes exactly `(σᵢ / std(y))²`.
+
+    Both terms have to live in the same space. In log space a GP sees fractional
+    error, so an absolute `σᵢ` is divided by that observation's own magnitude
+    rather than by the series mean — which is the point of doing this per point.
+
+    A σ of zero is lifted to a small floor. Zero would assert that one
+    observation is exact, and a GP handed a noiseless point interpolates it
+    exactly, letting a single optimistic error bar dominate the fit.
+    """
+    if sigma is None:
+        return None
+
+    if transform == _LOG:
+        magnitude = np.abs(np.asarray(y_linear, dtype=float))
+        safe = np.where(magnitude > 0, magnitude, 1.0)
+        sigma_fit = sigma / safe
+    else:
+        sigma_fit = sigma
+
+    if noise_std <= 0:
+        return None
+    scale = sigma_fit / noise_std
+    floor = _MIN_POINT_NOISE_FRACTION * float(np.median(scale[scale > 0]))
+    return np.maximum(scale, floor)
+
+
+@dataclass(frozen=True, slots=True)
+class _NoiseModel:
+    """How much each observation is trusted, and on what grounds.
+
+    Extracted so the two entry points cannot disagree. Both need the same five
+    facts, and assembling them inline twice is how the 1-D and d-D paths drifted
+    apart before `_fit_surrogate` was pulled out for the same reason.
+    """
+
+    std: float  # the shared level, in fit-space units
+    scale: np.ndarray | None  # per-observation multipliers on it
+    n_unreliable: int  # observations a physics check rejected
+    measured: bool  # the level came from data, not from an assumed percentage
+    per_point: bool  # per-observation standard deviations were supplied
+
+
+def _noise_model(
+    y: np.ndarray,
+    y_work: np.ndarray,
+    *,
+    rel_noise: float,
+    measured_noise: float | None,
+    point_noise: np.ndarray | None,
+    unreliable: np.ndarray | None,
+    transform: str,
+) -> _NoiseModel:
+    """Assemble the shared noise level and the per-observation multipliers.
+
+    A per-point series also has to supply the single number the rest of the
+    engine reasons with, since the exploration sweetener, the convergence floor
+    and the epsilon statement are all scalar. The median is the representative
+    one, chosen over the mean so that a single very uncertain observation cannot
+    inflate the level the whole campaign is judged against.
+    """
+    sigma = _validate_point_noise(point_noise, y.size)
+    if sigma is not None and measured_noise is None:
+        measured_noise = float(np.median(sigma))
+
+    noise_std = _noise_std(y_work, rel_noise, transform, measured_noise, y)
+    from_flags, n_unreliable = _noise_scale(unreliable, y.size)
+    scale = _merge_noise_scales(
+        from_flags,
+        _point_noise_scale(sigma, noise_std=noise_std, transform=transform, y_linear=y),
+    )
+    return _NoiseModel(
+        std=noise_std,
+        scale=scale,
+        n_unreliable=n_unreliable,
+        measured=bool(measured_noise is not None and measured_noise > 0),
+        per_point=sigma is not None,
+    )
+
+
+def _merge_noise_scales(
+    from_flags: np.ndarray | None, from_points: np.ndarray | None
+) -> np.ndarray | None:
+    """Combine the two reasons an observation's error bar might be widened.
+
+    They are not the same claim, so they multiply rather than compete. A per-
+    point standard error says how repeatable a measurement was; a physics flag
+    says the value is inconsistent with something that must hold regardless of
+    how carefully it was taken. A precisely-measured impossible number deserves
+    both penalties — the precision is exactly what makes it worth distrusting.
+    """
+    if from_flags is None:
+        return from_points
+    if from_points is None:
+        return from_flags
+    return np.asarray(from_flags * from_points, dtype=float)
 
 
 def _prob_within_epsilon(
@@ -1062,6 +1216,7 @@ def optimize(
     length_scale: float | None = None,
     rel_noise: float = _REL_NOISE,
     measured_noise: float | None = None,
+    point_noise: np.ndarray | None = None,
     xi: float = _XI,
     grid_size: int = _GRID_SIZE,
     seed: int = 0,
@@ -1117,6 +1272,27 @@ def optimize(
             same sample. Overrides `rel_noise` when given: a measured noise
             floor is evidence, a percentage is a guess, and the convergence
             verdict rests entirely on this number.
+        point_noise: Optional per-observation standard deviations, shape (n,),
+            in the target's own units. Where `measured_noise` says how
+            repeatable the technique is, this says how well *each* value is
+            known — a fitted slope's standard error, a propagated uncertainty,
+            the spread of a quantity across defensible modelling choices. The
+            GP becomes heteroscedastic: precise points pull the surface, vague
+            ones are held loosely.
+
+            This is the quantitative form of the `unreliable` flag, and the two
+            compose. A value that is both imprecise and physically implausible
+            earns both penalties.
+
+            Its scalar summary (the median) fills in for `measured_noise` when
+            that is not supplied, since the exploration sweetener, the
+            convergence floor and the epsilon statement all need one number.
+
+            One caveat worth knowing at the call site: a standard error fitted
+            from very few points is itself uncertain and tends to read low, so
+            three-point fits hand the surrogate more confidence than they have
+            earned. `analysis.thermovoltage.slope` documents the size of that
+            effect for the case it produces.
         xi: Exploration sweetener in EI, as a **fraction of the observed
             spread** (see `_xi_absolute`) — not a value in the target's
             units. An absolute constant cannot serve targets measured on
@@ -1176,13 +1352,20 @@ def optimize(
     if transform == _LOG and bool(np.any(y <= 0)):
         transform = _IDENTITY
     y_work = _forward(y, transform)
-    noise_std = _noise_std(y_work, rel_noise, transform, measured_noise, y)
+    noise = _noise_model(
+        y,
+        y_work,
+        rel_noise=rel_noise,
+        measured_noise=measured_noise,
+        point_noise=point_noise,
+        unreliable=unreliable,
+        transform=transform,
+    )
+    noise_std, noise_scale = noise.std, noise.scale
 
     # Minimization is exact negation in the (possibly log) fit space.
     sign = 1.0 if direction == "maximize" else -1.0
     y_int = sign * y_work
-
-    noise_scale, n_unreliable = _noise_scale(unreliable, y_int.size)
 
     x_col = x_norm.reshape(-1, 1)
     gp, y_fit = _fit_surrogate(
@@ -1252,6 +1435,7 @@ def optimize(
         rel_noise=rel_noise,
         noise_std=noise_std,
         xi_absolute=xi_abs,
+        point_noise_used=noise.per_point,
         n_observations=int(x.size),
         grid_size=grid_size,
         seed=seed,
@@ -1317,8 +1501,8 @@ def optimize(
         delta=delta,
         prob_within_epsilon=prob_within,
         epsilon_delta_met=prob_within >= 1.0 - delta,
-        n_unreliable=n_unreliable,
-        noise_measured=bool(measured_noise is not None and measured_noise > 0),
+        n_unreliable=noise.n_unreliable,
+        noise_measured=noise.measured,
     )
 
 
@@ -1400,6 +1584,12 @@ class BoConfigND:
     seed: int
     created_at: datetime
     xi_absolute: float | None = None  # `xi` in objective units, as applied
+    # True when per-observation standard deviations were supplied. Without it
+    # two runs could carry byte-identical configs and still have produced
+    # different recommendations, because a heteroscedastic fit weighs the same
+    # points differently. A frozen record that cannot tell those apart is not a
+    # record of how the answer was produced.
+    point_noise_used: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1695,6 +1885,7 @@ def optimize_nd(
     prior_mean: Callable[[np.ndarray], np.ndarray] | None = None,
     rel_noise: float = _REL_NOISE,
     measured_noise: float | None = None,
+    point_noise: np.ndarray | None = None,
     xi: float = _XI,
     length_scale_bounds: tuple[float, float] = _LS_BOUNDS_ND,
     n_candidates: int = _ND_CANDIDATES,
@@ -1748,6 +1939,13 @@ def optimize_nd(
             `measured_noise` is absent.
         measured_noise: Observed repeatability in the target's own units;
             beats `rel_noise` when supplied.
+        point_noise: Optional per-observation standard deviations, shape (n,),
+            in the target's own units — how well each individual value is
+            known, rather than how repeatable the technique is. Makes the GP
+            heteroscedastic; composes with `unreliable`; its median stands in
+            for `measured_noise` when that is absent. See `optimize()` for the
+            full rationale and the caveat about standard errors fitted from
+            very few points.
         xi: Exploration sweetener in EI, as a **fraction of the observed
             spread** (see `_xi_absolute`) — not a value in the target's
             units. An absolute constant cannot serve targets measured on
@@ -1809,12 +2007,19 @@ def optimize_nd(
     if transform == _LOG and bool(np.any(y <= 0)):
         transform = _IDENTITY
     y_work = _forward(y, transform)
-    noise_std = _noise_std(y_work, rel_noise, transform, measured_noise, y)
+    noise = _noise_model(
+        y,
+        y_work,
+        rel_noise=rel_noise,
+        measured_noise=measured_noise,
+        point_noise=point_noise,
+        unreliable=unreliable,
+        transform=transform,
+    )
+    noise_std, noise_scale = noise.std, noise.scale
 
     sign = 1.0 if direction == "maximize" else -1.0
     y_int = sign * y_work
-
-    noise_scale, n_unreliable = _noise_scale(unreliable, y_int.size)
 
     # `_build_gp` keys ARD off n_dims, so asking for 1 gives the scalar kernel
     # regardless of how many columns X has — which is exactly the isotropic arm.
@@ -1940,6 +2145,7 @@ def optimize_nd(
         rel_noise=rel_noise,
         noise_std=noise_std,
         xi_absolute=xi_abs,
+        point_noise_used=noise.per_point,
         n_observations=n,
         n_candidates=int(cand.shape[0]),
         seed=seed,
@@ -1968,8 +2174,8 @@ def optimize_nd(
         delta=delta,
         prob_within_epsilon=prob_within,
         epsilon_delta_met=prob_within >= 1.0 - delta,
-        n_unreliable=n_unreliable,
-        noise_measured=bool(measured_noise is not None and measured_noise > 0),
+        n_unreliable=noise.n_unreliable,
+        noise_measured=noise.measured,
         surface=surface,
     )
 
