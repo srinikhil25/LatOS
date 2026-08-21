@@ -162,6 +162,19 @@ line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
 
+# Untracked local scratch scripts, already listed in .gitignore. They need to be
+# named here as well because `ruff check` and `ruff format` disagree about
+# .gitignore: the linter honours it, the formatter does not for paths handed to
+# it explicitly, and `scripts/check.py` passes `scripts` explicitly. Without
+# this the format gate fails on files that are not in the repository at all, so
+# the check goes red locally while CI — which only ever sees tracked files —
+# stays green. A gate that fails for a reason CI cannot reproduce is a gate
+# people learn to ignore.
+extend-exclude = [
+    "scripts/architecture_diagram*.py",
+    "scripts/dhivya_audit.py",
+]
+
 [tool.ruff.lint]
 select = [
     "E",      # pycodestyle errors
