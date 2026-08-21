@@ -75,6 +75,7 @@ __all__ = [
     "ReliabilityReport",
     "RobustnessEntry",
     "RobustnessReport",
+    "StoppingVerdict",
     "length_scale_robustness",
     "optimize",
 ]
@@ -384,6 +385,9 @@ class OptimizationResult:
     delta: float = _DEFAULT_DELTA
     prob_within_epsilon: float = 0.0
     epsilon_delta_met: bool = False
+    # The headline: one action, with the reasoning behind it. The four
+    # fields above are its inputs and stay for callers that want them.
+    stopping: StoppingVerdict | None = None
     # How many observations the physics checks flagged as unreliable, and so
     # were down-weighted in the fit.
     n_unreliable: int = 0
@@ -501,6 +505,112 @@ def _point_noise_scale(
     scale = sigma_fit / noise_std
     floor = _MIN_POINT_NOISE_FRACTION * float(np.median(scale[scale > 0]))
     return np.maximum(scale, floor)
+
+
+STOP = "stop"
+CONFIRM = "confirm"
+CONTINUE = "continue"
+
+
+@dataclass(frozen=True, slots=True)
+class StoppingVerdict:
+    """Should another experiment be run? One answer, with the grounds for it.
+
+    Everything needed to answer this was already computed, spread across four
+    fields a caller had to combine correctly. In a project whose premise is
+    spending very few experiments, "am I done?" deserves to be the headline of a
+    recommendation rather than something reconstructed from `converged`,
+    `max_ei`, `prob_within_epsilon` and the reliability grade.
+
+    Two independent lines of evidence bear on it, and they can disagree:
+
+    * the **probabilistic regret bound** -- how likely the best sample already
+      taken is to sit within `epsilon` of the true optimum
+    * the **data-sufficiency grade** -- whether the model that produced that
+      probability has enough coverage to be believed at all
+
+    When they agree the answer is easy. When the probability is high and the
+    grade is still exploratory, neither "stop" nor "keep exploring" is honest:
+    the model says it has found the answer, and separately says it is not yet
+    trustworthy enough for that claim to stand alone. That case is CONFIRM --
+    repeat the incumbent and let the two lines settle it, which costs one
+    experiment where continued exploration costs several.
+
+    Measured behaviour that motivated this: on a single-peak objective sampled
+    at six points including the peak, the engine reported probability 0.992,
+    signal exhausted, `converged=False`, and recommended the far edge of the
+    search space. Every number was right and the advice was wrong.
+    """
+
+    action: str  # STOP, CONFIRM or CONTINUE
+    probability: float  # P(incumbent is within `epsilon` of the optimum)
+    epsilon: float  # tolerance the probability is stated against
+    delta: float  # risk level; the claim holds at 1 - delta confidence
+    signal_exhausted: bool  # no expected improvement left above the noise floor
+    data_sufficient: bool  # the reliability grade is past "exploratory"
+    reason: str  # one sentence, addressed to the experimentalist
+
+    @property
+    def should_stop(self) -> bool:
+        """True only for an unambiguous stop, never for a contested one."""
+        return self.action == STOP
+
+
+def _stopping_verdict(
+    *,
+    probability: float,
+    epsilon: float,
+    delta: float,
+    signal_exhausted: bool,
+    reliability: ReliabilityReport | None,
+    best_label: str,
+) -> StoppingVerdict:
+    """Turn the four stopping signals into one statement a person can act on."""
+    met = probability >= 1.0 - delta
+    data_sufficient = reliability is not None and reliability.level != "exploratory"
+
+    if signal_exhausted and met and data_sufficient:
+        action = STOP
+        reason = (
+            f"Stop. The best sample so far ({best_label}) is within {epsilon:.3g} of the "
+            f"optimum with probability {probability:.2f}, no remaining experiment offers "
+            "improvement above the measurement noise, and the data supports the claim."
+        )
+    elif met and not data_sufficient:
+        action = CONFIRM
+        reason = (
+            f"Confirm before stopping. The model puts the best sample so far "
+            f"({best_label}) within {epsilon:.3g} of the optimum with probability "
+            f"{probability:.2f}, but there is too little data for that claim to stand on "
+            "its own. Repeating the incumbent settles it in one experiment; continued "
+            "exploration would cost several."
+        )
+    elif signal_exhausted:
+        action = CONTINUE
+        reason = (
+            f"Keep going. Expected improvement has fallen below the noise floor, but the "
+            f"best sample so far ({best_label}) is within {epsilon:.3g} of the optimum "
+            f"with probability only {probability:.2f}. A flat acquisition here means the "
+            "model is uninformative in the gaps it never sampled, not that the optimum "
+            "is found."
+        )
+    else:
+        action = CONTINUE
+        reason = (
+            f"Keep going. Expected improvement still exceeds the measurement noise, and "
+            f"the best sample so far ({best_label}) is within {epsilon:.3g} of the "
+            f"optimum with probability {probability:.2f}."
+        )
+
+    return StoppingVerdict(
+        action=action,
+        probability=float(probability),
+        epsilon=float(epsilon),
+        delta=float(delta),
+        signal_exhausted=bool(signal_exhausted),
+        data_sufficient=bool(data_sufficient),
+        reason=reason,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1390,6 +1500,7 @@ def optimize(
     best_i = int(np.argmax(y_int))
     f_best_int = float(y_int[best_i])
     best_x = float(x[best_i])
+    best_label = f"{input_name} = {best_x:.4g}"
     # `xi` arrives as a fraction of the observed spread; EI works in units.
     xi_abs = _xi_absolute(xi, y_int, noise_std)
     ei = _expected_improvement(mean_int, std, f_best_int, xi_abs)
@@ -1501,6 +1612,14 @@ def optimize(
         delta=delta,
         prob_within_epsilon=prob_within,
         epsilon_delta_met=prob_within >= 1.0 - delta,
+        stopping=_stopping_verdict(
+            probability=prob_within,
+            epsilon=eps,
+            delta=delta,
+            signal_exhausted=signal_exhausted,
+            reliability=reliability,
+            best_label=best_label,
+        ),
         n_unreliable=noise.n_unreliable,
         noise_measured=noise.measured,
     )
@@ -1644,6 +1763,9 @@ class OptimizationResultND:
     delta: float = _DEFAULT_DELTA
     prob_within_epsilon: float = 0.0
     epsilon_delta_met: bool = False
+    # The headline: one action, with the reasoning behind it. The four
+    # fields above are its inputs and stay for callers that want them.
+    stopping: StoppingVerdict | None = None
     n_unreliable: int = 0
     noise_measured: bool = False
     surface: SurfaceND | None = None
@@ -2045,6 +2167,9 @@ def optimize_nd(
     mean_int, std = gp.predict(cand_norm, return_std=True)
 
     best_i = int(np.argmax(y_int))
+    best_label = ", ".join(
+        f"{name} = {value:.4g}" for name, value in zip(input_names, x_obs[best_i], strict=True)
+    )
     # `xi` arrives as a fraction of the observed spread; EI works in units.
     xi_abs = _xi_absolute(xi, y_int, noise_std)
     ei = _expected_improvement(mean_int, std, float(y_int[best_i]), xi_abs)
@@ -2174,6 +2299,14 @@ def optimize_nd(
         delta=delta,
         prob_within_epsilon=prob_within,
         epsilon_delta_met=prob_within >= 1.0 - delta,
+        stopping=_stopping_verdict(
+            probability=prob_within,
+            epsilon=eps,
+            delta=delta,
+            signal_exhausted=signal_exhausted,
+            reliability=reliability,
+            best_label=best_label,
+        ),
         n_unreliable=noise.n_unreliable,
         noise_measured=noise.measured,
         surface=surface,
