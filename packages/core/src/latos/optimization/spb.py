@@ -38,6 +38,8 @@ import numpy as np
 from scipy import integrate, optimize
 
 __all__ = [
+    "BASIS_INVERSE",
+    "BASIS_LINEAR",
     "K_B_OVER_E_UV_K",
     "SpbGuidance",
     "SpbPrior",
@@ -254,6 +256,31 @@ _ETA_TABLE_POINTS = 401
 # an invented slope is worse than no prior at all.
 _MIN_SAMPLES_FOR_TREND = 2
 
+# How eta is taken to vary with the knob.
+#
+# "linear" suits a doping-like knob, where the carrier concentration rises
+# roughly in step with the dopant fraction. "inverse" is the right form when the
+# knob is temperature: eta = E_F / (k_B T), so eta falls as 1/T and forcing a
+# straight line through it mis-states the shape at both ends of the range. The
+# distinction is not cosmetic — the first Starrydata run used a linear basis on
+# a temperature knob and the prior slightly *hurt*, which is exactly what a
+# wrong basis would look like.
+BASIS_LINEAR = "linear"
+BASIS_INVERSE = "inverse"
+_BASES = (BASIS_LINEAR, BASIS_INVERSE)
+
+
+def _basis_values(knob: np.ndarray, basis: str) -> np.ndarray:
+    """The regressor eta is fitted against, for the chosen basis."""
+    if basis == BASIS_INVERSE:
+        if np.any(knob <= 0):
+            raise ValueError(
+                'basis="inverse" needs a strictly-positive knob (it fits eta '
+                "against 1/x); got a value at or below zero."
+            )
+        return 1.0 / knob
+    return knob
+
 
 @dataclass(frozen=True)
 class SpbPrior:
@@ -266,7 +293,7 @@ class SpbPrior:
     """
 
     beta: float  # quality factor, assumed constant across the series
-    eta_intercept: float  # η(x) = intercept + slope · x
+    eta_intercept: float  # η = intercept + slope · basis(x)
     eta_slope: float
     n_used: int  # samples the fit actually rested on
     n_excluded: int  # samples above the SPB ceiling, dropped
@@ -274,12 +301,13 @@ class SpbPrior:
     axis: int  # which input column carries the doping knob
     _eta_grid: tuple[float, ...]
     _zt_grid: tuple[float, ...]
+    basis: str = BASIS_LINEAR
 
     def __call__(self, x: np.ndarray) -> np.ndarray:
         """Predicted zT at knob values `x`, shape (m,) or (m, d)."""
         points = np.asarray(x, dtype=float)
         knob = points if points.ndim == 1 else points[:, self.axis]
-        eta = self.eta_intercept + self.eta_slope * knob
+        eta = self.eta_intercept + self.eta_slope * _basis_values(knob, self.basis)
         # Clamped at the table edges on purpose: beyond them the single-band
         # picture has stopped describing the material anyway, and a flat
         # continuation is a more honest extrapolation than a fitted tail.
@@ -292,6 +320,7 @@ def make_spb_prior(
     zt_obs: np.ndarray,
     *,
     axis: int = 0,
+    basis: str = BASIS_LINEAR,
 ) -> SpbPrior:
     """Build an SPB prior mean for a doping-like knob, from measured samples.
 
@@ -328,6 +357,11 @@ def make_spb_prior(
             model is symmetric in carrier type.
         zt_obs: Measured zT per sample.
         axis: Which column of a multi-column `x_obs` carries the knob.
+        basis: How eta varies with the knob — `"linear"` for a doping-like
+            knob, `"inverse"` when the knob is temperature (eta = E_F/k_BT
+            falls as 1/T). Getting this wrong does not merely weaken the
+            prior, it bends it: a straight line through a 1/T relationship
+            mis-places the predicted peak.
 
     Returns:
         An `SpbPrior`, callable as `prior(x) -> zT`.
@@ -342,6 +376,8 @@ def make_spb_prior(
     seebeck = np.abs(np.asarray(seebeck_abs_uv_k, dtype=float))
     zt_measured = np.asarray(zt_obs, dtype=float)
 
+    if basis not in _BASES:
+        raise ValueError(f"basis must be one of {_BASES}; got {basis!r}")
     if not (knob.shape == seebeck.shape == zt_measured.shape):
         raise ValueError(
             f"x_obs, seebeck and zt must align: got {knob.shape}, "
@@ -375,17 +411,20 @@ def make_spb_prior(
     # Median rather than mean: one sample sitting just under the ceiling can
     # return a huge β, and with four points a mean would follow it.
     beta = float(np.median(betas))
-    slope, intercept = np.polyfit(np.asarray(kept), np.asarray(etas), 1)
+    regressor = _basis_values(np.asarray(kept), basis)
+    slope, intercept = np.polyfit(regressor, np.asarray(etas), 1)
 
     eta_grid = np.linspace(_ETA_LO, _ETA_HI, _ETA_TABLE_POINTS)
     zt_grid = np.array([zt(float(e), beta) for e in eta_grid], dtype=float)
 
     peak_eta = float(eta_grid[int(np.argmax(zt_grid))])
-    peak_knob = (peak_eta - intercept) / slope if slope != 0 else float("nan")
+    peak_u = (peak_eta - intercept) / slope if slope != 0 else float("nan")
+    # Undo the basis to state the peak in the knob's own units.
+    peak_knob = (1.0 / peak_u) if (basis == BASIS_INVERSE and peak_u not in (0.0,)) else peak_u
     note = (
         f"β ≈ {beta:.3f} from {len(kept)} samples"
         + (f" ({excluded} excluded above the SPB ceiling)" if excluded else "")
-        + f"; η = {intercept:.2f} + {slope:.3f}·x, peak zT at η ≈ {peak_eta:.2f}"
+        + f"; η = {intercept:.2f} + {slope:.3f}·{basis}(x), peak zT at η ≈ {peak_eta:.2f}"
         + (f", i.e. x ≈ {peak_knob:.2f}" if np.isfinite(peak_knob) else "")
     )
 
@@ -397,6 +436,7 @@ def make_spb_prior(
         n_excluded=excluded,
         note=note,
         axis=axis,
+        basis=basis,
         _eta_grid=tuple(float(v) for v in eta_grid),
         _zt_grid=tuple(float(v) for v in zt_grid),
     )

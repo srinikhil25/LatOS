@@ -230,3 +230,69 @@ class TestSpbPrior:
         )
         expected = (spb.optimal_eta(p.beta) - p.eta_intercept) / p.eta_slope
         assert result.recommendation.x == pytest.approx(expected, abs=0.3)
+
+
+class TestSpbPriorBasis:
+    """eta does not always rise with the knob, and the shape matters.
+
+    For a doping-like knob, carrier concentration climbs with the dopant
+    fraction and a straight line through eta is a fair first approximation. For
+    temperature it is simply wrong: eta = E_F / (k_B T) falls as 1/T. Forcing a
+    line through that does not merely weaken the prior, it moves the predicted
+    peak — which is the one thing the prior exists to place.
+    """
+
+    @staticmethod
+    def _inverse_series(beta: float, a: float, b: float, knob):
+        import numpy as np
+
+        knob = np.asarray(knob, dtype=float)
+        eta = a + b / knob  # the temperature-like form
+        seebeck = np.array([abs(spb.seebeck_uv_k(float(e))) for e in eta])
+        zt_vals = np.array([spb.zt(float(e), beta) for e in eta])
+        return knob, seebeck, zt_vals
+
+    def test_inverse_basis_recovers_a_one_over_x_relationship(self):
+        t, s, z = self._inverse_series(0.4, -3.0, 900.0, [300, 400, 500, 600, 700])
+        p = spb.make_spb_prior(t, s, z, basis=spb.BASIS_INVERSE)
+        assert p.beta == pytest.approx(0.4, rel=1e-3)
+        assert p.eta_intercept == pytest.approx(-3.0, abs=1e-2)
+        assert p.eta_slope == pytest.approx(900.0, rel=1e-3)
+        assert p.basis == spb.BASIS_INVERSE
+
+    def test_inverse_basis_places_the_peak_better_than_linear(self):
+        """The measurement that motivated the option, in miniature.
+
+        On a genuinely 1/T series the linear basis misplaces the peak by an
+        order of magnitude more than the inverse one. The first Starrydata run
+        used a linear basis on a temperature knob and the prior came out
+        slightly *worse* than no prior at all, which is what this looks like at
+        scale.
+        """
+        import numpy as np
+
+        beta, a, b = 0.4, -3.0, 900.0
+        t, s, z = self._inverse_series(beta, a, b, [300, 400, 500, 600, 700])
+        true_peak = b / (spb.optimal_eta(beta) - a)
+        grid = np.linspace(300.0, 700.0, 401)
+
+        errors = {}
+        for basis in (spb.BASIS_LINEAR, spb.BASIS_INVERSE):
+            p = spb.make_spb_prior(t, s, z, basis=basis)
+            errors[basis] = abs(grid[int(np.argmax(p(grid)))] - true_peak)
+
+        assert errors[spb.BASIS_INVERSE] < 5.0
+        assert errors[spb.BASIS_INVERSE] < errors[spb.BASIS_LINEAR] / 3.0
+
+    def test_inverse_basis_rejects_a_non_positive_knob(self):
+        """1/x is undefined at zero, and a doping series routinely starts there."""
+        import numpy as np
+
+        _, s, z = self._inverse_series(0.4, -3.0, 900.0, [300, 400, 500])
+        with pytest.raises(ValueError, match="strictly-positive"):
+            spb.make_spb_prior(np.array([0.0, 400.0, 500.0]), s, z, basis=spb.BASIS_INVERSE)
+
+    def test_unknown_basis_is_rejected(self):
+        t, s, z = self._inverse_series(0.4, -3.0, 900.0, [300, 400, 500])
+        with pytest.raises(ValueError, match="basis must be one of"):
+            spb.make_spb_prior(t, s, z, basis="quadratic")
