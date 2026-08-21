@@ -14,6 +14,19 @@ in `RESULTS_LOG.md` and `BENCHMARKS.json`.
 | Materials-science + software terminology | [`glossary.md`](glossary.md) |
 | Architecture diagrams | [`figures/architecture.md`](figures/architecture.md) |
 | Map of stages → thesis chapters | [`THESIS_OUTLINE.md`](THESIS_OUTLINE.md) |
+| Plan for the ionic-liquid campaign work | `DEVELOPMENT_PLAN.md` (local only) |
+
+## What is documented, and what is not
+
+The stage docs cover Stages 1, 2, 3 and 6. **Stages 4 and 5 have partial
+implementations and no stage doc**, and `RESULTS_LOG.md` / `BENCHMARKS.json` skip
+from Stage 2 straight to Stage 6. The gap is recorded in those files rather than
+quietly closed: backfilling it now would be reconstruction, not a record.
+
+Note also that most of `docs/` is gitignored. Only the files listed above are
+tracked, along with everything under `stages/` and `figures/`. Working notes,
+research write-ups and lab templates live here locally but are not part of the
+repository.
 
 ## How to add a new stage doc
 

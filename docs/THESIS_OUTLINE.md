@@ -22,12 +22,26 @@ feed them. Update as the thesis structure firms up.
 | 2 | Related work / literature review | — (continuous) | pending |
 | 3 | Multi-modal ingestion architecture | Stage 1 (1A–1F) | ✅ stages complete; doc backfilled |
 | 4 | Sample identity resolution | Stage 2 (2A–2D) | ✅ stages complete; doc backfilled |
-| 5 | Derived analysis framework | Stage 3 (3A–3D) | 🚧 3A+3B done, doc in progress |
-| 6 | Cross-modal correlation & feature extraction | Stage 4 | pending |
+| 5 | Derived analysis framework | Stage 3 (3A–3D) | ✅ stage doc written; the thermovoltage analyzer (Stage 6) extends it |
+| 6 | Cross-modal correlation & feature extraction | Stage 4 | ⚠️ partly built (`reporting/correlation.py`), no stage doc |
 | 7 | Vision-language inference on micrographs | Stage 5 | pending |
-| 8 | Bayesian optimization of synthesis parameters | Stage 6 | pending |
-| 9 | Case study: Cs₃Bi₂I₉ thermoelectric optimization | Stages 1–8 applied | pending |
-| 10 | Conclusion & future work | — (write last) | pending |
+| 8 | Bayesian optimization of synthesis parameters | Stage 6 | ✅ [stage doc](stages/stage6_closed_loop.md); heteroscedastic surrogate, stopping verdict, pre-registration |
+| 9 | Reliability-gated closed-loop discovery | Stage 6 | ✅ built, ❌ never run on a real sample |
+| 10 | Case study: ionic-liquid mixture thermopower | Stage 6 applied | ⏳ experiment not yet started |
+| 11 | Conclusion & future work | — (write last) | pending |
+
+> **Two honest notes on this table.**
+>
+> Chapter 9 is built but unvalidated. Every number behind Stage 6 comes from
+> synthetic objectives with known optima, which demonstrates the machinery and
+> demonstrates nothing about any material. The chapter cannot be written from
+> the code alone.
+>
+> The case study moved. It was Cs₃Bi₂I₉, whose data is four samples from another
+> project and not cleared for publication. The prospective ionic-liquid mixture
+> campaign replaces it, and is the better case anyway: it has not started, so
+> every prediction in it can be pre-registered before the sample exists, which is
+> the one thing a retrospective dataset can never support.
 
 ## How to use this map
 

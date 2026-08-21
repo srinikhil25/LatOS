@@ -224,6 +224,89 @@ Bayer, M. (2014–). *Alembic — database migrations for SQLAlchemy*.
 
 Schema migrations between Latos versions (Stage 1B onward).
 
+## Bayesian optimization & closed-loop experimentation
+
+### `rasmussen2006`
+Rasmussen, C. E., & Williams, C. K. I. (2006). *Gaussian Processes for
+Machine Learning*. MIT Press.
+[gaussianprocess.org/gpml](https://gaussianprocess.org/gpml/)
+
+The reference text for the surrogate. Section 2.2 gives the noise term
+that Latos exposes per observation: `point_noise` enters as the diagonal
+of the covariance, so an observation known to +/- sigma_i contributes
+`(sigma_i / std(y))^2` rather than sharing one campaign-wide value
+(Stage 6).
+
+### `wilson2024`
+Wilson, J. T. (2024). *Stopping Bayesian optimization with probabilistic
+regret bounds*. Advances in Neural Information Processing Systems 37
+(NeurIPS 2024). [arXiv:2402.16811](https://arxiv.org/abs/2402.16811)
+
+The (epsilon, delta) stopping criterion behind `prob_within_epsilon`:
+the probability that the best sample already taken lies within `epsilon`
+of the true optimum, estimated by Monte Carlo over joint posterior draws.
+Wilson's own caveat -- that the probability is conditional on the model --
+is why Latos reports it beside the data-sufficiency grade rather than
+instead of it, and why `StoppingVerdict` has a CONFIRM state for when the
+two disagree (Stage 6).
+
+### `ishiyama2024`
+Ishiyama, T., et al. (2024). *Bayesian-optimization-assisted discovery*.
+NPG Asia Materials, **16**, 17.
+DOI: [10.1038/s41427-024-00536-w](https://doi.org/10.1038/s41427-024-00536-w)
+
+Uses the distance between successive proposed conditions as evidence that
+an optimization has converged. `optimization/campaign.py` measures the
+same drift across frozen pre-registrations, which is harder to fool than
+an in-model criterion because it is a fact about the record on disk.
+
+### `whenlessismore2025`
+*When Less is More: A Story of Failing Bayesian Optimization Due to
+Additional Expert Knowledge* (2025).
+[arXiv:2511.16230](https://arxiv.org/abs/2511.16230)
+
+Independent report of expert knowledge impairing convergence on a real
+optimization problem, because the prior complicated the objective
+landscape rather than simplifying it. Corroborates Latos's own three
+measured cases (SPB prior, its 1/T variant, the linear mixing law) and is
+the reason `optimization/rehearsal.py` auditions a prior before use rather
+than assuming it helps.
+
+### `draper1998`
+Draper, N. R., & Smith, H. (1998). *Applied Regression Analysis* (3rd
+ed.). Wiley. DOI: [10.1002/9781118625590](https://doi.org/10.1002/9781118625590)
+
+Standard errors of least-squares parameters, and the extra-sum-of-squares
+F test. Both are used in `analysis/thermovoltage/slope.py`: the first
+produces the per-sample `sigma_S`, the second detects curvature that R^2
+cannot see on a short series.
+
+## Ionic thermoelectrics
+
+### `sun2023`
+Sun, S., Li, M., Shi, X.-L., & Chen, Z.-G. (2023). *Advances in Ionic
+Thermoelectrics: From Materials to Devices*. Advanced Energy Materials,
+**13**(19), 2203692.
+DOI: [10.1002/aenm.202203692](https://doi.org/10.1002/aenm.202203692)
+
+The review this campaign is designed against. Supplies the thermodiffusion
+and thermogalvanic mechanisms, the dual-ion Seebeck relation
+`S = (w+ Q+* - w- Q-*)/(eT)` used as a mixing diagnostic, the
+electrode-dependence of the sign, and the humidity and ion-loading
+dependences that the recording workbook exists to capture.
+
+### `hu2025ite`
+*Unlocking new possibilities in ionic thermoelectric materials: a machine
+learning perspective* (2025). National Science Review, **12**(1), nwae411.
+DOI: [10.1093/nsr/nwae411](https://doi.org/10.1093/nsr/nwae411)
+
+Machine learning on 51 i-TE samples. States plainly that the dataset
+"omits variables like electrode materials and humidity" and that its
+predictions therefore "represent optimal scenarios", and recommends future
+work record them. That is Latos's thesis stated by the field about itself,
+and it is the justification for the Tier-1 fields in the recording
+workbook.
+
 ---
 
 ## To be added (placeholders)
@@ -232,7 +315,8 @@ References for future stages will be added as the methods land:
 
 - Vision-language models for micrograph analysis (Stage 5) — VLM
   literature TBD
-- Bayesian optimization with constraints (Stage 6) — Gardner et al.
-  (2014), Gelbart et al. (2014)
-- Constrained / multi-objective acquisition (Stage 6) — Daulton et al.
-  (2020) for qEHVI
+- Bayesian optimization with constraints — Gardner et al. (2014),
+  Gelbart et al. (2014). Not yet used: the campaigns run so far are
+  unconstrained over a single bounded composition axis.
+- Constrained / multi-objective acquisition — Daulton et al. (2020) for
+  qEHVI. Deliberately deferred; there is one objective today.

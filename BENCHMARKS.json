@@ -28,8 +28,15 @@
         "ci_test_duration_sec_avg": 130,
         "ci_jobs_passing": 9,
         "ci_jobs_failing": 0,
-        "platforms_tested": ["ubuntu-latest", "windows-latest", "macos-latest"],
-        "python_versions_tested": ["3.11", "3.12"]
+        "platforms_tested": [
+          "ubuntu-latest",
+          "windows-latest",
+          "macos-latest"
+        ],
+        "python_versions_tested": [
+          "3.11",
+          "3.12"
+        ]
       },
       "notes": "CI fully green. 3 smoke tests passing on all 6 matrix combinations. Foundation in place for Stage 1."
     },
@@ -158,7 +165,14 @@
           "parse_failed": 0,
           "samples_inferred": 12,
           "techniques_recognized": 6,
-          "techniques_list": ["xrd", "xps", "uv_drs", "hall", "thermoelectric", "sem"],
+          "techniques_list": [
+            "xrd",
+            "xps",
+            "uv_drs",
+            "hall",
+            "thermoelectric",
+            "sem"
+          ],
           "wall_clock_first_ingest_sec": 2.6,
           "wall_clock_reingest_cached_sec": 0.2,
           "speedup_on_reopen": "13x"
@@ -173,7 +187,11 @@
         "mypy_strict_errors": 0,
         "ruff_errors": 0,
         "test_runtime_sec": 21.3,
-        "commits": ["0c22bb7", "f0335ce", "90d9193"]
+        "commits": [
+          "0c22bb7",
+          "f0335ce",
+          "90d9193"
+        ]
       },
       "notes": "Crawler walks folders, hashes files (SHA-256 with mtime/size cache), and dispatches by parser confidence. Orchestrator wires crawler → parsers → mappers → repository → array_store, builds a Project with a sample-grouping heuristic (parent folder name, walking past generic technique labels). Integration test verified end-to-end on real Dhivya dataset: 161 files ingested in 2.6s, 76 parsed correctly, 84 correctly identified as non-data (PDFs, JPEGs, .docx). Re-ingestion cached path takes 0.2s, hitting the Stage 1 done-criterion of <1s reopens. Bug surfaced by real data: find_parser(min_confidence=0.0) was letting zero-confidence parsers through, making the first-registered parser a spurious best-match for every unrelated file; fixed with a positive epsilon. Repository factory now a context manager so SQLite engine disposal is guaranteed (otherwise leaked handles block tmp_path cleanup on Windows). Stage 1 done-criteria met; ready for Stage 1E (PySide6 desktop shell)."
     },
@@ -199,10 +217,18 @@
         "test_coverage_ui_dialogs_ingestion_progress_pct": 99,
         "source_files": 54,
         "ui_pages": 4,
-        "ui_pages_list": ["WelcomePage", "ProjectPickerPage", "OverviewPage", "SampleReviewPage"],
+        "ui_pages_list": [
+          "WelcomePage",
+          "ProjectPickerPage",
+          "OverviewPage",
+          "SampleReviewPage"
+        ],
         "ui_dialogs": 1,
         "ui_services": 2,
-        "ui_services_list": ["RecentProjectsService", "IngestionWorker"],
+        "ui_services_list": [
+          "RecentProjectsService",
+          "IngestionWorker"
+        ],
         "new_tests_in_stage": 85,
         "test_breakdown": {
           "1E.1_app_skeleton_main_window_themes_welcome": 12,
@@ -222,7 +248,13 @@
         "mypy_strict_errors": 0,
         "ruff_errors": 0,
         "test_runtime_default_sec": 29.8,
-        "commits": ["163ec8e", "3377028", "7634bdf", "19cd057", "1b2833d"]
+        "commits": [
+          "163ec8e",
+          "3377028",
+          "7634bdf",
+          "19cd057",
+          "1b2833d"
+        ]
       },
       "notes": "Latos is now a real desktop app. `latos-app` launches a FluentWindow with four sidebar pages (Welcome, Open, Overview, Review), one modal IngestionProgressDialog, and two Qt-free services (RecentProjectsService, IngestionWorker). Ingestion runs on a QThread via moveToThread; cancellation uses a threading.Event polled from the orchestrator's on_progress callback (crawl-phase only, by design). RecentProjectsService is pure Python: atomic-write JSON, tolerant load, filter-on-read, MRU semantics, 20-entry cap. UI tests use a stub MagicMock(spec=Orchestrator) so the suite never touches real SQLite/Parquet — wiring is what's verified. Bugs caught and fixed: CardWidget.clicked signature shadowing (renamed to pickRequested), method `list()` shadowing builtins inside class scope (renamed to entries()), QDialog.result() override clash (renamed to ingestion_result()), real ingestion accidentally firing in tests (added orchestrator_factory hook + stub fixture), DeprecationWarning from QMouseEvent ctor (replaced with direct signal emit), and assorted ruff naming-convention noqa annotations for Qt-required mixedCase signals + Qt-required event-handler camelCase names. Stage 1 fully complete: foundation → persistence → parsers → ingestion → desktop shell."
     },
@@ -274,10 +306,10 @@
         "graph_library": "networkx",
         "decisions_storage": "<root>/.latos/cluster_decisions.json (atomic write)",
         "decision_apply_order": "splits -> merges -> renames",
-        "hint_weight_immediate_parent_non_generic": 0.80,
-        "hint_weight_filename_stem": 0.70,
-        "hint_weight_metadata_high_confidence": 1.00,
-        "hint_weight_path_segment_generic": 0.20,
+        "hint_weight_immediate_parent_non_generic": 0.8,
+        "hint_weight_filename_stem": 0.7,
+        "hint_weight_metadata_high_confidence": 1.0,
+        "hint_weight_path_segment_generic": 0.2,
         "real_data_clustering": {
           "dataset": "Dhivya MXene (D:/Materials-Informatics/data_raw/dhivya_data)",
           "stage1_samples": 12,
@@ -285,16 +317,73 @@
           "regression_collapsed_cs_pure_variants": true,
           "cluster_phase_runtime_ms": 42,
           "ingest_runtime_sec": 6.6,
-          "known_overmerge_cases": ["CS / CS-1 / CS-3 / CS-5", "cscbi1 / cscbi5 / cskbi3"],
+          "known_overmerge_cases": [
+            "CS / CS-1 / CS-3 / CS-5",
+            "cscbi1 / cscbi5 / cskbi3"
+          ],
           "overmerge_mitigation": "user can revert / split via ClusterReviewPage; chemistry-aware booster on roadmap"
         },
         "mypy_strict_errors": 0,
         "ruff_errors": 0,
         "ui_test_suite_runtime_sec": 11,
         "test_runtime_default_sec": 50.5,
-        "commits": ["a1eed0c", "5925e09", "ad4bfd6", "b7eb482"]
+        "commits": [
+          "a1eed0c",
+          "5925e09",
+          "ad4bfd6",
+          "b7eb482"
+        ]
       },
       "notes": "Stage 2 replaces Stage 1's per-folder heuristic with a real labeling pipeline. extract_hints (path / filename / future: parser metadata) -> normalize (NFKC + lowercase + prefix scrub + separator strip, idempotent under hypothesis) -> cluster_samples (rapidfuzz + networkx connected components, confidence-weighted file voting, empty-file components filtered) -> apply_decisions (renames + merges + splits with deterministic apply order). On the real Dhivya dataset, Stage 1's 12 samples collapse to 11 clusters with the headline regression (`CS Pure` vs `CS (Pure)`) merged. ClusterReviewPage is the user's escape hatch for over-merging: editable canonical names, multi-select Merge, Apply (atomic write to `.latos/cluster_decisions.json`), Revert. Hint weights re-tuned during integration: immediate-parent jumped from 0.60 to 0.80 so a researcher's deliberate folder structure outranks the filename hint. Ghost clusters from generic path segments are filtered before output. Cross-platform path stringification (str(Path(...))) avoids Windows-vs-POSIX backslash mismatches in split keys. Known limitation: short prefix-similar names chain in the similarity graph (CS-1 / CS-3 / CS-5 over-merge into CS); the cluster review page handles this in the UI loop and a chemistry-aware similarity booster is on the roadmap. Stage 2 done-criteria met; ready for Stage 3 (analysis layer)."
+    },
+    {
+      "date": "2026-08-21",
+      "stage": 6,
+      "stage_name": "Stage 6 — Reliability-Gated Closed Loop",
+      "note": "Stages 3-5 have no entry here; this log skips from Stage 2 to Stage 6 and the gap is real. Every metric below comes from synthetic objectives with known optima -- no real measurement was involved.",
+      "metrics": {
+        "tests_passing_unit_suite": 1600,
+        "tests_failing": 0,
+        "tests_added_this_stage": 124,
+        "source_files": 108,
+        "mypy_strict_errors": 0,
+        "ruff_lint_errors": 0,
+        "ruff_format_violations": 0,
+        "modules_added": [
+          "analysis/thermovoltage/slope.py",
+          "ingestion/ite_workbook_template.py",
+          "ingestion/parsers/ite_workbook.py",
+          "optimization/rehearsal.py",
+          "campaign_cycle.py",
+          "__main__.py"
+        ],
+        "engine_changes": [
+          "point_noise (per-observation variance)",
+          "_noise_model (shared by both entry points)",
+          "StoppingVerdict (STOP / CONFIRM / CONTINUE)",
+          "BoConfig.point_noise_used"
+        ],
+        "curvature_false_alarm_rate_before_pct": 17,
+        "curvature_false_alarm_rate_after_pct": 2,
+        "quadratic_five_point_r_squared": 0.963,
+        "three_point_stderr_median_bias_factor": 0.42,
+        "physics_priors_measured_unhelpful": 3,
+        "prior_audition_mixing_law_solve_rate_without_pct": 92,
+        "prior_audition_mixing_law_solve_rate_with_pct": 62,
+        "dev_tools_pinned": [
+          "ruff",
+          "mypy",
+          "pytest",
+          "hypothesis",
+          "pytest-cov",
+          "pytest-xdist",
+          "pytest-snapshot",
+          "pytest-benchmark",
+          "httpx",
+          "pre-commit"
+        ],
+        "real_samples_measured": 0
+      }
     }
   ]
 }

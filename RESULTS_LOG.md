@@ -691,3 +691,99 @@ now the human-in-the-loop review handles it.
 - User edits round-trip atomically through `cluster_decisions.json`
 - Pipeline is `extract_hints → normalize → cluster_samples → apply_decisions`
   — four pure functions, easy to refactor or rerun with different thresholds
+
+---
+
+## 2026-08-21 — Stage 6 Complete: Reliability-Gated Closed Loop
+
+> **Gap in this log.** The entries above end at Stage 2 (2026-05-11). Stage 3
+> has a stage doc but no entry here, and the optimizer, server, pre-registration
+> and reliability layers were all built and committed without one. This entry
+> does not attempt to backfill them — that would be reconstruction, not a
+> record. It covers only the work of 2026-08-19 to 2026-08-21.
+
+Six modules, delivered ahead of a prospective ionic-liquid experiment that had
+not yet started. Every one is exercised only against synthetic data with known
+answers; see "What is not validated" below.
+
+### What landed
+
+| Commit | What |
+|---|---|
+| `9f9368a` | `analysis/thermovoltage/slope.py` — Seebeck as a fitted slope |
+| `5250406` | `point_noise` on both engine entry points |
+| `4f02e21` | `StoppingVerdict` — STOP / CONFIRM / CONTINUE |
+| `1d2f9de` | `ingestion/parsers/ite_workbook.py` |
+| `765476f` | shared workbook schema, generator moved into the package |
+| `6d98f8e` | `optimization/rehearsal.py` |
+| `922b88f` | `python -m latos next`, plus the prereg gap it exposed |
+
+### Findings worth keeping
+
+**The stopping criterion was not failing to fire — it was discarding its own
+answer.** On a single-peak objective sampled at six points including the peak,
+the engine reported `P(within ε) = 0.992`, `epsilon_delta_met = True`, signal
+exhausted — then `converged = False` and a recommendation at the far edge of the
+search space. The cause is `converged = signal_exhausted and not is_exploratory`:
+two independent lines of evidence disagreed and the code silently picked one.
+`StoppingVerdict` now reports the disagreement as `CONFIRM`.
+
+**A three-point standard error is biased low.** With one degree of freedom the
+residual variance follows a chi-squared whose median is 0.455 of its mean, so
+`σ_S` lands below the truth more often than not — by roughly 2.4× at the median
+here. This matters because `σ_S` is what feeds per-point variance into the GP, so
+a three-ΔT campaign hands the surrogate over-confidence on exactly the sparse
+data where it costs most. Pinned by a test; four ΔT values is the cheap fix.
+
+**R² cannot see curvature on a short series.** A deliberately quadratic
+five-point series scores 0.963. The first fix — comparing end residuals against
+middle ones relative to their spread — was self-defeating, because curvature
+inflates the spread that sets the threshold. Replaced with an
+extra-sum-of-squares F test against a quadratic fit, taking its noise estimate
+from the quadratic residual. False alarms on pure scatter fell from 17 % to ~2 %.
+
+**Excel cannot store a timezone.** `ParsedData.measured_at` requires an aware
+datetime and openpyxl refuses to write one, so the first parser implementation
+would have reported `measured_at = None` on every real workbook, silently,
+forever. Caught by a test. UTC is now attached and the assumption recorded once
+per sample — a lab in JST would otherwise find every measurement dated nine
+hours from when it happened.
+
+**Perfectly linear input is not precision.** Noiseless synthetic data gives every
+fit a vanishing standard error, which collapsed the convergence floor and made
+the engine report being "within 4.23e-16 of the optimum". Found by running
+`latos next` on a demo campaign, not by reasoning about it.
+
+**`point_noise_used` never reached the frozen record.** The field was added to
+`BoConfig` specifically so two runs could not carry identical configs having
+weighed observations differently — but `prereg.py` did not serialise it, so the
+file on disk still could not tell them apart. Fixed with a test.
+
+### CI
+
+CI had been red for several runs on `PLR0917`, with no local reproduction. Cause:
+`ruff>=0.3` with no upper bound, so CI installed whatever had shipped that
+morning while the venv sat on 0.15.12 and a rule graduated from preview in 0.16.
+The three findings were real (parameters with defaults were positionally
+passable) and were fixed by making them keyword-only. Ruff, mypy, pytest,
+hypothesis and the pytest plugins are now capped, with floors set to versions the
+suite has actually been run green against. `scripts/check.py` promised "green
+here implies green there" while linting a different path set than CI; it now
+lints `.` as CI does.
+
+### Numbers
+
+- 124 new tests; **1600 passing** in the unit suite, 0 failing
+- ruff lint, ruff format, mypy strict: clean on **108** source files
+- 3 measured negative results on physics priors now on record (SPB, SPB 1/T,
+  linear mixing law), plus one independent literature corroboration
+
+### What is not validated
+
+No real measurement was involved at any point. Every threshold shipped here —
+`_R_SQUARED_WARN = 0.99`, `_CURVATURE_F = 10.0`, the 10 % offset warning,
+`_DEGENERATE_SIGMA_FRACTION` — is a reasoned guess checked against synthetic
+objectives. They prove the code does what was intended. They prove nothing about
+ionic liquids. Stage 0 of the experiment plan (two samples certifying the
+protocol) is what turns them into measurements, and Phase 2 of the development
+plan is deliberately deferred until then.
