@@ -109,7 +109,13 @@ def main() -> int:
 
     py = python_exe()
     timings: dict[str, float] = {}
-    targets = ["src", "tests", "migrations", "scripts"]
+    # `.`, matching .github/workflows/ci.yml exactly. This used to name the four
+    # source directories, which is nearly the same set and quietly was not: a
+    # lint failure that only `.` reaches would pass here and fail in CI, and the
+    # promise at the top of this file is that green here implies green there.
+    # Anything genuinely out of scope belongs in `extend-exclude`, where both
+    # this script and CI will honour it.
+    targets = ["."]
 
     # ─── 1. Ruff lint ─────────────────────────────────────────────────
     if args.fix:

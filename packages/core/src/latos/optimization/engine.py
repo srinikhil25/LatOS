@@ -690,6 +690,7 @@ def _prob_within_epsilon(
     best_x_norm: float,
     epsilon: float,
     seed: int,
+    *,
     n_draws: int = _N_POSTERIOR_DRAWS,
     max_points: int = _PROB_MAX_POINTS,
 ) -> float:
@@ -781,6 +782,7 @@ def _build_gp(
     noise_std: float,
     length_scale: float | None,
     seed: int,
+    *,
     noise_scale: np.ndarray | None = None,
     n_dims: int = 1,
     ls_bounds: tuple[float, float] = _LS_BOUNDS,

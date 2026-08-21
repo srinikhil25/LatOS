@@ -47,7 +47,7 @@ def _te(sid: str, store: ArrayStore, arrays: dict) -> Measurement:
 
 
 def _sample(
-    pid: str, store: ArrayStore, name: str, rho: float, seebeck: float, kappa: float
+    pid: str, store: ArrayStore, name: str, *, rho: float, seebeck: float, kappa: float
 ) -> Sample:
     sid = new_id()
     t = np.array([300.0, 600.0])
@@ -69,7 +69,7 @@ def _client(root: Path) -> TestClient:
     pid = new_id()
     # Four samples with distinct transport so features vary across samples.
     samples = tuple(
-        _sample(pid, store, name, rho, seebeck, kappa)
+        _sample(pid, store, name, rho=rho, seebeck=seebeck, kappa=kappa)
         for name, rho, seebeck, kappa in [
             ("A", 20.0, 150.0, 1.2),
             ("B", 30.0, 180.0, 1.4),
