@@ -36,6 +36,13 @@ from latos.optimization.engine import (
     optimize_nd,
 )
 from latos.optimization.prereg import build_record, freeze, write_record
+from latos.optimization.rehearsal import (
+    RehearsalReport,
+    Shape,
+    ShapeOutcome,
+    default_shapes,
+    rehearse,
+)
 from latos.optimization.validate import (
     OutcomeVerdict,
     PreregEntry,
@@ -60,14 +67,19 @@ __all__ = [
     "OutcomeVerdict",
     "PreregEntry",
     "Recommendation",
+    "RehearsalReport",
     "ReliabilityReport",
     "RobustnessEntry",
     "RobustnessReport",
+    "Shape",
+    "ShapeOutcome",
     "build_record",
+    "default_shapes",
     "freeze",
     "length_scale_robustness",
     "list_preregistrations",
     "optimize",
+    "rehearse",
     "outcome_path_for",
     "recommendation_drift",
     "spb",
