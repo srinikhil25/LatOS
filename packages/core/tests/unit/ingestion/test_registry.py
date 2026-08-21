@@ -218,6 +218,7 @@ class TestDefaultRegistry:
             "uvdrs-xlsx",
             "uvdrs-txt",
             "hall-xls",
+            "ite-workbook",
             "thermoelectric-xlsx",
             "lfa-xlsx",
             "resistivity-seebeck-xlsx",

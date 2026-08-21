@@ -11,6 +11,7 @@ from __future__ import annotations
 from latos.ingestion.parsers.eds_bruker_spx import BrukerSpxParser
 from latos.ingestion.parsers.eds_emsa import EdsEmsaParser
 from latos.ingestion.parsers.hall_xls import HallXlsParser
+from latos.ingestion.parsers.ite_workbook import IteWorkbookParser
 from latos.ingestion.parsers.lfa_xlsx import LfaXlsxParser
 from latos.ingestion.parsers.microscopy_tif import MicroscopyTifParser
 from latos.ingestion.parsers.resistivity_seebeck_xlsx import (
@@ -39,6 +40,7 @@ __all__ = [
     "RigakuXrdTxtParser",
     "ShockSummaryCsvParser",
     "ShockTektronixCsvParser",
+    "IteWorkbookParser",
     "ThermoelectricXlsxParser",
     "UvDrsTxtParser",
     "UvDrsXlsxParser",
