@@ -24,6 +24,41 @@ class TestStyles:
         assert len(palette()) >= 6
         assert all(c.startswith("#") for c in palette())
 
+    def test_origin_preset_inverts_the_shared_defaults(self):
+        """The ORIGIN look is defined by four deliberate departures from `_BASE`.
+
+        Every other preset leaves the top and right spines off, points ticks
+        outward and drops the legend box. Origin does the opposite on all four,
+        and that combination is what makes a figure read as an Origin figure -
+        so it is pinned rather than left to drift back to the shared default.
+        """
+        rc = rc_params(JournalStyle.ORIGIN)
+        assert rc["axes.spines.top"] is True
+        assert rc["axes.spines.right"] is True
+        assert rc["xtick.direction"] == "in"
+        assert rc["ytick.direction"] == "in"
+        assert rc["legend.frameon"] is True
+
+    def test_origin_preset_draws_ticks_on_all_four_sides_with_minors(self):
+        rc = rc_params(JournalStyle.ORIGIN)
+        assert rc["xtick.top"] is True
+        assert rc["ytick.right"] is True
+        assert rc["xtick.minor.visible"] is True
+        assert rc["ytick.minor.visible"] is True
+        assert rc["xtick.minor.size"] < rc["xtick.major.size"]
+
+    def test_origin_frame_is_heavier_than_a_journal_preset(self):
+        assert (
+            rc_params(JournalStyle.ORIGIN)["axes.linewidth"]
+            > (rc_params(JournalStyle.NATURE)["axes.linewidth"])
+        )
+
+    def test_presets_do_not_share_mutable_state(self):
+        """`rc_params` must hand back a fresh dict, or one caller's edit leaks."""
+        first = rc_params(JournalStyle.ORIGIN)
+        first["axes.linewidth"] = 99
+        assert rc_params(JournalStyle.ORIGIN)["axes.linewidth"] != 99
+
 
 class TestHeatmap:
     def test_renders_svg_with_labels(self):

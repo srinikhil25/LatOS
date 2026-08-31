@@ -25,6 +25,7 @@ class JournalStyle(StrEnum):
     RSC = "rsc"
     THESIS = "thesis"
     PRESENTATION = "presentation"
+    ORIGIN = "origin"
 
 
 # Wong (2011) colourblind-safe qualitative palette.
@@ -120,6 +121,51 @@ _STYLES: dict[JournalStyle, dict[str, object]] = {
         "axes.linewidth": 1.5,
         "lines.linewidth": 2.5,
         "lines.markersize": 9,
+    },
+    # OriginLab house look, for supervisors and collaborators who read figures
+    # in that idiom. Deliberately the inverse of `_BASE` on four points: Origin
+    # draws a CLOSED axis box, points ticks INWARD, adds minor ticks, and boxes
+    # the legend. Nothing here needs Origin installed - it is a set of matplotlib
+    # conventions, so figures stay reproducible without a commercial licence.
+    JournalStyle.ORIGIN: {
+        **_BASE,
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+        "font.size": 10,
+        "axes.titlesize": 11,
+        "axes.labelsize": 11,
+        "figure.figsize": (5.2, 3.9),
+        # The closed frame, drawn heavier than a journal preset would.
+        "axes.spines.top": True,
+        "axes.spines.right": True,
+        "axes.linewidth": 1.2,
+        "axes.edgecolor": "black",
+        # Ticks inward on all four sides, with minors - the signature detail.
+        "xtick.direction": "in",
+        "ytick.direction": "in",
+        "xtick.top": True,
+        "ytick.right": True,
+        "xtick.minor.visible": True,
+        "ytick.minor.visible": True,
+        "xtick.major.size": 6.0,
+        "ytick.major.size": 6.0,
+        "xtick.minor.size": 3.0,
+        "ytick.minor.size": 3.0,
+        "xtick.major.width": 1.2,
+        "ytick.major.width": 1.2,
+        "xtick.minor.width": 0.9,
+        "ytick.minor.width": 0.9,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        # Boxed legend inside the frame, square corners.
+        "legend.frameon": True,
+        "legend.framealpha": 1.0,
+        "legend.edgecolor": "black",
+        "legend.fancybox": False,
+        "legend.borderpad": 0.4,
+        "lines.linewidth": 1.6,
+        "lines.markersize": 6,
+        "lines.markeredgewidth": 1.0,
     },
 }
 

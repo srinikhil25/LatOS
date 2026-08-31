@@ -189,6 +189,7 @@ def default_registry() -> ParserRegistry:
     # registry isn't being used. The parsers themselves do not import
     # the registry, so this stays acyclic.
     from latos.ingestion.parsers import (  # noqa: PLC0415 — see comment above
+        BrukerRaw4TxtParser,
         BrukerSpxParser,
         CasaXpsCsvParser,
         EdsEmsaParser,
@@ -196,7 +197,10 @@ def default_registry() -> ParserRegistry:
         IteWorkbookParser,
         LfaXlsxParser,
         MicroscopyTifParser,
+        MultiRegionXpsTxtParser,
         PanalyticalXrdmlParser,
+        PpmsTtoParser,
+        RenishawRamanTxtParser,
         ResistivitySeebeckXlsxParser,
         RigakuXrdAscParser,
         RigakuXrdTxtParser,
@@ -211,6 +215,12 @@ def default_registry() -> ParserRegistry:
         [
             # Specific signatures first — these never produce false positives.
             PanalyticalXrdmlParser(),
+            # Bruker RAW4 text opens with a ';RAW4' magic line, which nothing
+            # else here writes — as specific as the XML sniffers.
+            BrukerRaw4TxtParser(),
+            # Multi-region XPS opens with a 'Dataset <region>:<n>(<sample>)'
+            # marker, which is as specific a signature as the magic lines above.
+            MultiRegionXpsTxtParser(),
             BrukerSpxParser(),
             EdsEmsaParser(),
             MicroscopyTifParser(),
@@ -227,6 +237,13 @@ def default_registry() -> ParserRegistry:
             UvDrsTxtParser(),
             RigakuXrdTxtParser(),
             RigakuXrdAscParser(),
+            # PPMS thermal-transport exports are .txt with a distinctive
+            # truncated-column header; registered before the generic .csv
+            # sniffers so a transport run never falls through to one.
+            PpmsTtoParser(),
+            # Renishaw exports .txt behind a '#Wave / #Intensity' header, which
+            # no other format here writes, so it never collides.
+            RenishawRamanTxtParser(),
             # Tektronix oscilloscope waveforms (.csv) — matched on the scope
             # header, registered before CasaXPS so a shock file never falls
             # through to it.
