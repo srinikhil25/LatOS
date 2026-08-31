@@ -19,7 +19,13 @@ import numpy as np
 import openpyxl
 import pytest
 
-from latos.campaign_cycle import CycleOutcome, main, run_cycle
+from latos.campaign_cycle import (
+    CycleOutcome,
+    SampleFit,
+    aggregate_replicates,
+    main,
+    run_cycle,
+)
 from latos.ingestion.ite_workbook_template import (
     FIRST_DATA_ROW,
     HEADER_ROW,
@@ -278,3 +284,161 @@ class TestReportWithoutAResult:
         text = outcome.report()
         assert "(none usable)" in text
         assert "nothing to do" in text
+
+
+class TestReplicateAggregation:
+    """Independent specimens at one composition are one observation, not several.
+
+    The point of aggregating them is not tidiness. A slope-fit standard error
+    describes how well a line was drawn through one specimen; the scatter
+    between specimens made the same way describes whether making it again gives
+    the same answer, and that is the quantity the surrogate needs. It is also
+    the larger of the two, because it carries the weighing, the mixing and the
+    mounting as well as the voltmeter.
+    """
+
+    @staticmethod
+    def _fit(sample_id, composition, slope, stderr=0.002):
+        return SampleFit(
+            sample_id=sample_id,
+            composition=composition,
+            seebeck_mv_k=slope,
+            stderr_mv_k=stderr,
+            offset_mv=0.0,
+            n_points=5,
+            notes=(),
+        )
+
+    def test_replicates_collapse_to_one_point_carrying_their_mean(self):
+        fits = (
+            self._fit("A1", 0.0, 1.00),
+            self._fit("A2", 0.0, 1.20),
+            self._fit("B", 0.5, 2.00),
+            self._fit("C", 1.0, 1.40),
+        )
+        points, _ = aggregate_replicates(fits)
+        assert len(points) == 3
+        first = points[0]
+        assert first.n_replicates == 2
+        assert first.value == pytest.approx(1.10)
+        assert first.sample_ids == ("A1", "A2")
+
+    def test_the_uncertainty_comes_from_replicate_scatter_not_the_fit(self):
+        """The fit errors are tiny and the specimens disagree. Believe the specimens."""
+        fits = (
+            self._fit("A1", 0.0, 1.00, stderr=1e-4),
+            self._fit("A2", 0.0, 1.20, stderr=1e-4),
+            self._fit("B", 0.5, 2.00, stderr=1e-4),
+            self._fit("C", 1.0, 1.40, stderr=1e-4),
+        )
+        points, _ = aggregate_replicates(fits)
+        replicated = points[0]
+        assert replicated.sigma_source == "replicates"
+        # sd of (1.00, 1.20) is 0.1414; the mean of two carries sd/sqrt(2).
+        assert replicated.sigma == pytest.approx(0.1414 / np.sqrt(2), rel=1e-3)
+        assert replicated.sigma > 1e-4 * 100  # nothing like the fit error
+
+    def test_an_unreplicated_point_inherits_the_pooled_spread(self):
+        """One specimen tells you nothing about its own reproducibility.
+
+        The right uncertainty for it is the spread measured everywhere else,
+        not its own fit error, which describes a different thing entirely.
+        """
+        fits = (
+            self._fit("A1", 0.0, 1.00, stderr=1e-4),
+            self._fit("A2", 0.0, 1.20, stderr=1e-4),
+            self._fit("B", 0.5, 2.00, stderr=1e-4),
+        )
+        points, _ = aggregate_replicates(fits)
+        lone = next(p for p in points if p.n_replicates == 1)
+        assert lone.sigma_source == "pooled"
+        assert lone.sigma == pytest.approx(0.1414, rel=1e-3)
+
+    def test_without_replicates_the_previous_behaviour_is_unchanged(self):
+        fits = (
+            self._fit("A", 0.0, 1.00, stderr=0.011),
+            self._fit("B", 0.5, 2.00, stderr=0.022),
+            self._fit("C", 1.0, 1.40, stderr=0.033),
+        )
+        points, notes = aggregate_replicates(fits)
+        assert [p.sigma for p in points] == [0.011, 0.022, 0.033]
+        assert all(p.sigma_source == "fit" for p in points)
+        assert notes == []
+
+    def test_compositions_within_weighing_tolerance_are_one_condition(self):
+        """30.00 % and 30.02 % is one condition attempted twice."""
+        fits = (
+            self._fit("A1", 0.300, 1.00),
+            self._fit("A2", 0.3002, 1.10),
+            self._fit("B", 0.6, 2.00),
+            self._fit("C", 0.9, 1.40),
+        )
+        points, _ = aggregate_replicates(fits)
+        assert len(points) == 3
+        assert points[0].n_replicates == 2
+
+    def test_a_sign_disagreement_between_replicates_is_flagged_not_averaged(self):
+        """Two specimens of opposite carrier type is a fault, not scatter."""
+        fits = (
+            self._fit("A1", 0.0, +2.0),
+            self._fit("A2", 0.0, -2.0),
+            self._fit("B", 0.5, 1.0),
+            self._fit("C", 1.0, 1.4),
+        )
+        points, _ = aggregate_replicates(fits)
+        assert any("SIGN" in note for note in points[0].notes)
+
+    def test_identical_replicates_are_refused_as_a_noise_estimate(self):
+        """Perfect agreement between specimens means computed, not measured."""
+        fits = (
+            self._fit("A1", 0.0, 1.0),
+            self._fit("A2", 0.0, 1.0),
+            self._fit("B", 0.5, 2.0),
+            self._fit("C", 1.0, 1.4),
+        )
+        _, notes = aggregate_replicates(fits)
+        assert any("computed" in note for note in notes)
+
+    def test_few_degrees_of_freedom_are_declared_rather_than_hidden(self):
+        fits = (
+            self._fit("A1", 0.0, 1.0),
+            self._fit("A2", 0.0, 1.2),
+            self._fit("B", 0.5, 2.0),
+            self._fit("C", 1.0, 1.4),
+        )
+        _, notes = aggregate_replicates(fits)
+        assert any("itself uncertain" in note for note in notes)
+
+    def test_replicates_of_one_composition_cannot_fit_a_surrogate(self, tmp_path):
+        """Nine samples at three compositions is three points, not nine.
+
+        The gate is on distinct conditions, because replicating one condition
+        nine times teaches the surrogate nothing about the other end of the range.
+        """
+        path = _campaign(
+            tmp_path,
+            {"IL-001": (0.5, 1.1), "IL-002": (0.5, 1.2), "IL-003": (0.5, 1.15)},
+        )
+        outcome = run_cycle(path)
+        assert outcome.result is None
+        assert len(outcome.points) == 1
+        assert any("DISTINCT compositions" in m for m in outcome.messages)
+
+    def test_a_replicated_campaign_runs_end_to_end(self, tmp_path):
+        path = _campaign(
+            tmp_path,
+            {
+                "IL-001": (0.0, 1.10),
+                "IL-002": (0.0, 1.22),
+                "IL-003": (0.5, 2.30),
+                "IL-004": (0.5, 2.18),
+                "IL-005": (1.0, 1.60),
+            },
+        )
+        outcome = run_cycle(path)
+        assert outcome.result is not None
+        assert len(outcome.fits) == 5
+        assert len(outcome.points) == 3
+        assert any(p.sigma_source == "replicates" for p in outcome.points)
+        assert any("pooled standard deviation" in m for m in outcome.messages)
+        assert "Design points given to the surrogate" in outcome.report()

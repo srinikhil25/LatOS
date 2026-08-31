@@ -55,7 +55,14 @@ from latos.ingestion.parsers.ite_workbook import IteWorkbookParser
 from latos.optimization.engine import OptimizationResult, optimize
 from latos.optimization.prereg import freeze
 
-__all__ = ["CycleOutcome", "SampleFit", "main", "run_cycle"]
+__all__ = [
+    "CycleOutcome",
+    "DesignPoint",
+    "SampleFit",
+    "aggregate_replicates",
+    "main",
+    "run_cycle",
+]
 
 # Composition is a mass fraction, so the search range is the whole simplex.
 _BOUNDS = (0.0, 1.0)
@@ -75,6 +82,27 @@ _MIN_SAMPLES_FOR_A_MODEL = 3
 # part in a million.
 _DEGENERATE_SIGMA_FRACTION = 1e-6
 
+# Two samples weighed to 30.00 % and 30.02 % are one condition attempted twice,
+# not two conditions. Compositions within this absolute distance are treated as
+# the same design point. Deliberately larger than a balance's resolution and far
+# smaller than any spacing a campaign would design on purpose.
+_COMPOSITION_TOLERANCE = 0.005
+
+# A within-point standard deviation needs degrees of freedom to mean anything.
+# One replicated point with n = 2 contributes a single degree of freedom, and a
+# variance on one degree of freedom is close to worthless: its sampling
+# distribution is wide enough that the estimate is routinely out by a factor of
+# several. Pooling across every replicated point is the standard remedy and
+# costs nothing, so the pooled figure is used whenever the total reaches this
+# many degrees of freedom. Below it the estimate is still used, with the caveat
+# stated in the report, because a wide honest estimate beats the flat 8 %
+# assumption it replaces.
+_MIN_POOLED_DF = 3
+
+# A condition attempted once has nothing to compare itself with, so it
+# contributes no degrees of freedom to the pooled estimate.
+_MIN_REPLICATES_FOR_SPREAD = 2
+
 
 @dataclass(frozen=True, slots=True)
 class SampleFit:
@@ -90,6 +118,34 @@ class SampleFit:
 
 
 @dataclass(frozen=True, slots=True)
+class DesignPoint:
+    """One composition, and everything measured at it.
+
+    A design point is what the surrogate actually observes. When a composition
+    was made only once it is the sample; when it was made several times it is
+    their mean, and the scatter between them is the honest measure of how well
+    that condition is known.
+
+    That distinction matters more than it looks. The standard error of a slope
+    fit describes how well a line was drawn through one specimen's points. It
+    says nothing about whether making the specimen again would give the same
+    answer, and between-specimen scatter is the larger term: it carries the
+    weighing, the mixing, the mounting and the contacts as well as the voltmeter.
+    Feeding a fit error to the optimizer as though it were the measurement
+    uncertainty therefore understates the noise, and an over-confident surrogate
+    is precisely the failure the reliability layer exists to catch.
+    """
+
+    composition: float  # the mean composition of the replicates
+    value: float  # mean |S| across replicates, in mV/K
+    sigma: float | None  # standard error of that mean, None when undetermined
+    n_replicates: int
+    sample_ids: tuple[str, ...]
+    sigma_source: str  # "replicates" | "pooled" | "fit" | "undetermined"
+    notes: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CycleOutcome:
     """What the cycle concluded, and where it wrote the evidence."""
 
@@ -97,6 +153,7 @@ class CycleOutcome:
     result: OptimizationResult | None
     prereg_path: Path | None
     messages: tuple[str, ...]
+    points: tuple[DesignPoint, ...] = ()
 
     def report(self) -> str:
         """The whole cycle as text, for a terminal or a lab notebook."""
@@ -111,6 +168,17 @@ class CycleOutcome:
                 f"offset {fit.offset_mv:+.3f} mV   ({fit.n_points} points)"
             )
             lines.extend(f"      - {note}" for note in fit.notes)
+
+        # Only worth a second table when aggregation actually did something.
+        if any(p.n_replicates > 1 for p in self.points):
+            lines.extend(("", "Design points given to the surrogate:"))
+            for p in self.points:
+                unc = "undetermined" if p.sigma is None else f"{p.sigma:.4f}"
+                lines.append(
+                    f"  x = {p.composition:.3f}   |S| = {p.value:.3f} +/- {unc} mV/K   "
+                    f"n = {p.n_replicates} ({p.sigma_source})   "
+                    f"[{', '.join(p.sample_ids)}]"
+                )
 
         lines.extend(("", *self.messages))
 
@@ -192,16 +260,28 @@ def run_cycle(
             "matched p-type and n-type pair from one liquid pair."
         )
 
-    if len(fits) < _MIN_SAMPLES_FOR_A_MODEL:
-        messages.append(
-            f"{len(fits)} sample(s) fitted. A surrogate needs at least "
-            f"{_MIN_SAMPLES_FOR_A_MODEL}; measure both pure liquids and the midpoint "
-            "first, which the campaign needs anyway as mixing-law anchors and drift "
-            "controls."
-        )
-        return CycleOutcome(fits, None, None, tuple(messages))
+    # Replicates of one condition are one observation, not several. The surrogate
+    # is fitted over design points, so every count and every gate below refers to
+    # those rather than to samples.
+    points, replicate_notes = aggregate_replicates(fits)
+    messages.extend(replicate_notes)
+    messages.extend(note for point in points for note in point.notes)
 
-    result, noise_note = _optimize(fits)
+    if len(points) < _MIN_SAMPLES_FOR_A_MODEL:
+        extra = (
+            ""
+            if len(points) == len(fits)
+            else f" ({len(fits)} sample(s) collapsed onto {len(points)} distinct composition(s))"
+        )
+        messages.append(
+            f"{len(points)} design point(s) available{extra}. A surrogate needs at least "
+            f"{_MIN_SAMPLES_FOR_A_MODEL} DISTINCT compositions; measure both pure liquids "
+            "and the midpoint first, which the campaign needs anyway as mixing-law anchors "
+            "and drift controls."
+        )
+        return CycleOutcome(fits, None, None, tuple(messages), points)
+
+    result, noise_note = _optimize(points)
     if noise_note:
         messages.append(noise_note)
     if not freeze_prereg:
@@ -209,14 +289,14 @@ def run_cycle(
             "Nothing was pre-registered. This recommendation cannot later be presented "
             "as a prediction made before the sample."
         )
-        return CycleOutcome(fits, result, None, tuple(messages))
+        return CycleOutcome(fits, result, None, tuple(messages), points)
 
     destination = out_dir if out_dir is not None else workbook.parent / "preregistrations"
     destination.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = freeze(result, destination / f"prereg_{stamp}.json", prior_best=result.best_y)
 
-    return CycleOutcome(fits, result, path, tuple(messages))
+    return CycleOutcome(fits, result, path, tuple(messages), points)
 
 
 def _fit_one(entry: ParsedData) -> SampleFit | None:
@@ -248,23 +328,155 @@ def _fit_one(entry: ParsedData) -> SampleFit | None:
     )
 
 
-def _optimize(fits: tuple[SampleFit, ...]) -> tuple[OptimizationResult, str | None]:
-    """Fit the surrogate over composition, weighting each sample by its own error.
+def _cluster(fits: tuple[SampleFit, ...]) -> list[list[SampleFit]]:
+    """Group samples whose compositions are the same condition attempted twice.
 
-    A sample whose standard error could not be determined — a two-point fit has
-    no degrees of freedom left — is given the largest error in the campaign
-    rather than the smallest. Treating "unknown" as "excellent" is how one
-    under-measured point comes to dominate a surface.
+    Single-linkage on a sorted list: a sample joins the open group while it is
+    within `_COMPOSITION_TOLERANCE` of the previous one. Chaining is possible in
+    principle — a run of samples each just inside the tolerance of its neighbour
+    would merge into one group spanning more than the tolerance — but a campaign
+    that dense in composition is not one this module is for, and the alternative
+    (fixed bins) would split a genuine pair that straddles a bin edge, which is
+    the worse failure of the two.
+    """
+    if not fits:
+        return []
+    ordered = sorted(fits, key=lambda f: f.composition)
+    groups: list[list[SampleFit]] = [[ordered[0]]]
+    for fit in ordered[1:]:
+        if abs(fit.composition - groups[-1][-1].composition) <= _COMPOSITION_TOLERANCE:
+            groups[-1].append(fit)
+        else:
+            groups.append([fit])
+    return groups
+
+
+def aggregate_replicates(fits: tuple[SampleFit, ...]) -> tuple[tuple[DesignPoint, ...], list[str]]:
+    """Collapse samples onto design points, measuring the noise where possible.
+
+    Independent specimens made at the same composition are replicates of one
+    condition. Their scatter is what the optimizer should be told, because it
+    includes everything that varies between one attempt and the next: weighing,
+    mixing, mounting, contacts and the voltmeter. A slope-fit standard error
+    includes only the last of those.
+
+    The within-point standard deviations are **pooled** across every replicated
+    condition rather than used one at a time. Two replicates give one degree of
+    freedom, and a variance on one degree of freedom is so noisy as to be
+    misleading; pooling k conditions gives the sum of their degrees of freedom
+    for no extra experiments. Each replicated point then receives the pooled
+    standard deviation divided by the root of its own replicate count, and each
+    unreplicated point receives the pooled standard deviation itself, which is
+    the correct uncertainty for a single observation drawn from that population
+    and is usually larger, and more honest, than its own fit error.
+
+    Returns the design points and any notes for the report.
+    """
+    notes: list[str] = []
+    groups = _cluster(fits)
+
+    # Within-point spread, one entry per replicated condition.
+    ssq = 0.0
+    dof = 0
+    for group in groups:
+        if len(group) < _MIN_REPLICATES_FOR_SPREAD:
+            continue
+        values = np.asarray([abs(f.seebeck_mv_k) for f in group], dtype=float)
+        ssq += float(np.sum((values - values.mean()) ** 2))
+        dof += len(group) - 1
+
+    pooled_sd: float | None = None
+    if dof > 0:
+        pooled_sd = math.sqrt(ssq / dof)
+        replicated = sum(1 for g in groups if len(g) > 1)
+        detail = (
+            f"Replicate scatter measured at {replicated} condition(s): pooled standard "
+            f"deviation {pooled_sd:.4f} mV/K on {dof} degree(s) of freedom. This is the "
+            f"measurement uncertainty the surrogate was given, in place of the engine's "
+            f"assumed default."
+        )
+        if dof < _MIN_POOLED_DF:
+            detail += (
+                f" With only {dof} degree(s) of freedom this estimate is itself uncertain "
+                f"by roughly a factor of two; treat it as an order of magnitude, and "
+                f"replicate a second condition to sharpen it."
+            )
+        if pooled_sd <= 0.0:
+            pooled_sd = None
+            detail = (
+                "Replicates at the same condition gave identical values to full precision. "
+                "That is not agreement, it is a sign the recorded numbers are computed "
+                "rather than measured. The replicate estimate was discarded."
+            )
+        notes.append(detail)
+
+    points: list[DesignPoint] = []
+    for group in groups:
+        values = np.asarray([abs(f.seebeck_mv_k) for f in group], dtype=float)
+        composition = float(np.mean([f.composition for f in group]))
+        ids = tuple(f.sample_id for f in group)
+        local: list[str] = []
+
+        signs = {math.copysign(1.0, f.seebeck_mv_k) for f in group if f.seebeck_mv_k != 0.0}
+        if len(signs) > 1:
+            local.append(
+                "Replicates at this condition disagree in the SIGN of the coefficient. "
+                "That is a difference in carrier type, not measurement scatter, and "
+                "averaging their magnitudes hides it. Check the wiring polarity and the "
+                "specimen orientation before trusting this point."
+            )
+
+        if len(group) > 1 and pooled_sd is not None:
+            sigma: float | None = pooled_sd / math.sqrt(len(group))
+            source = "replicates"
+        elif pooled_sd is not None:
+            # One attempt at this condition. A single draw from a population whose
+            # spread we have measured elsewhere carries that whole spread.
+            sigma = pooled_sd
+            source = "pooled"
+        else:
+            sigma = group[0].stderr_mv_k if len(group) == 1 else None
+            source = "fit" if sigma is not None else "undetermined"
+
+        points.append(
+            DesignPoint(
+                composition=composition,
+                value=float(values.mean()),
+                sigma=sigma,
+                n_replicates=len(group),
+                sample_ids=ids,
+                sigma_source=source,
+                notes=tuple(local),
+            )
+        )
+
+    collapsed = len(fits) - len(points)
+    if collapsed > 0:
+        notes.append(
+            f"{len(fits)} sample(s) collapsed onto {len(points)} design point(s); "
+            f"{collapsed} were replicates of a condition already present."
+        )
+    return tuple(points), notes
+
+
+def _optimize(points: tuple[DesignPoint, ...]) -> tuple[OptimizationResult, str | None]:
+    """Fit the surrogate over composition, weighting each point by its own error.
+
+    A point whose uncertainty could not be determined — a two-point slope fit has
+    no degrees of freedom left, and a lone sample at an unreplicated condition
+    has nothing to compare itself with — is given the largest error in the
+    campaign rather than the smallest. Treating "unknown" as "excellent" is how
+    one under-measured point comes to dominate a surface.
 
     Returns the result and, when one applies, a note for the report.
     """
-    x = np.asarray([fit.composition for fit in fits], dtype=float)
-    y = np.asarray([abs(fit.seebeck_mv_k) for fit in fits], dtype=float)
+    x = np.asarray([p.composition for p in points], dtype=float)
+    y = np.asarray([p.value for p in points], dtype=float)
 
-    known = [fit.stderr_mv_k for fit in fits if fit.stderr_mv_k is not None]
+    known = [p.sigma for p in points if p.sigma is not None]
     fallback = max(known) if known else float(np.std(y)) or 1.0
     sigma = np.asarray(
-        [fit.stderr_mv_k if fit.stderr_mv_k is not None else fallback for fit in fits],
+        [p.sigma if p.sigma is not None else fallback for p in points],
         dtype=float,
     )
 
@@ -279,7 +491,7 @@ def _optimize(fits: tuple[SampleFit, ...]) -> tuple[OptimizationResult, str | No
     scale = float(np.mean(np.abs(y)))
     degenerate = scale > 0 and float(np.median(sigma)) < _DEGENERATE_SIGMA_FRACTION * scale
     note = (
-        "Every fitted standard error was vanishingly small, so this campaign carries "
+        "Every uncertainty was vanishingly small, so this campaign carries "
         "no measurement-noise estimate and the engine's default assumption applies. "
         "Real replicate scatter would not look like this; check that the recorded "
         "voltages are measurements rather than computed values."
