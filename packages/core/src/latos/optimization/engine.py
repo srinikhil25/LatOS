@@ -65,7 +65,7 @@ from scipy.spatial import cKDTree
 from scipy.stats import norm, qmc
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, ConstantKernel
+from sklearn.gaussian_process.kernels import RBF, ConstantKernel, Matern
 
 __all__ = [
     "BoConfig",
@@ -121,6 +121,29 @@ _LS_BOUNDS = (1.0, 5.0)
 # optimal for 2-D/3-D synthesis. 0.2/4.0 is 5% — the same order.
 _LS_BOUNDS_ND = (0.2, 5.0)
 _N_RESTARTS = 8  # marginal-likelihood restarts when the length-scale is fitted
+
+# Kernel family for the stationary factor. RBF is what the engine shipped with.
+# Matern 5/2 is what the field uses almost universally (Snoek, Liang, Rohr,
+# Makarova, Hvarfner, Ishibashi, Shields) and two results argue for it here:
+# Wang, Tuo & Wu prove a correlation function no smoother than the truth is
+# more robust under misspecification, and Srinivas et al.'s GP-UCB regret bound
+# needs nu > 2 — 5/2 is the smallest half-integer satisfying both. This is a
+# switch rather than a swap because the claim is testable and the shipped
+# behaviour has to stay reproducible while it is being tested.
+_KERNELS = ("rbf", "matern52")
+_MATERN_NU = 2.5
+
+# What to recommend when the improvement signal is exhausted but the data is
+# still exploratory (the branch near the end of `optimize`):
+#   "max_std"  argmax posterior sd — the largest unmeasured gap. Shipped.
+#   "ei"       no fallback: keep the max-EI pick and let EI decide alone.
+#   "ucb"      argmax(mean + _UCB_LAMBDA * sd) — optimism, between the two.
+# Note this governs only *where to point*. Whether the engine declares
+# convergence stays gated on the reliability tier either way, which is the part
+# three independent stopping papers support.
+_EXPLORE_POLICIES = ("max_std", "ei", "ucb")
+_UCB_LAMBDA = 2.0
+
 # X is normalized internally so the search span maps to this many units.
 # 4.0 makes the canonical doping series (bounds 1–5, span 4) numerically
 # identical to the historical unnormalized behaviour, while inputs of any
@@ -777,6 +800,22 @@ def _noise_std(
     return rel_noise * float(np.mean(np.abs(y_work)))
 
 
+def _stationary(
+    kernel: str,
+    length_scale: float | list[float],
+    bounds: tuple[float, float] | str,
+):
+    """The stationary factor of the kernel — RBF, or Matern 5/2.
+
+    Both take the same `length_scale` / `length_scale_bounds` contract, so
+    everything downstream (`_fitted_length_scales`, the robustness sweep, the
+    ARD list form) is unchanged by the choice.
+    """
+    if kernel == "matern52":
+        return Matern(length_scale=length_scale, length_scale_bounds=bounds, nu=_MATERN_NU)
+    return RBF(length_scale=length_scale, length_scale_bounds=bounds)
+
+
 def _build_gp(
     y: np.ndarray,
     noise_std: float,
@@ -786,8 +825,9 @@ def _build_gp(
     noise_scale: np.ndarray | None = None,
     n_dims: int = 1,
     ls_bounds: tuple[float, float] = _LS_BOUNDS,
+    kernel: str = "rbf",
 ) -> GaussianProcessRegressor:
-    """A GP with a smooth RBF trend and a realistic measurement-noise floor.
+    """A GP with a smooth stationary trend and a realistic measurement-noise floor.
 
     `noise_std` is the absolute noise in `y`'s (fit-space) units — the caller
     computes it via `_noise_std` so log-space fits get the right floor. When
@@ -800,26 +840,28 @@ def _build_gp(
     of dishonesty — it is simply trusted less, which is what a larger error
     bar means. `None` keeps the single shared noise level, exactly as before.
 
-    `n_dims` > 1 switches the RBF to ARD: one length-scale per input axis
+    `n_dims` > 1 switches the kernel to ARD: one length-scale per input axis
     instead of one shared value. That is what lets the model say *which*
     variable the property actually responds to, and an isotropic kernel
     cannot express it. `n_dims == 1` reproduces the scalar kernel exactly, so
     every existing caller is bit-for-bit unaffected.
+
+    `kernel` selects the stationary factor (`_KERNELS`). The default "rbf" is
+    the shipped behaviour, bit-for-bit.
     """
     alpha_scalar = (noise_std / max(float(np.std(y)), 1e-9)) ** 2
     alpha = alpha_scalar if noise_scale is None else alpha_scalar * noise_scale**2
     if length_scale is None:
         start = min(max(_LS_INIT, ls_bounds[0]), ls_bounds[1])
         init = start if n_dims == 1 else [start] * n_dims
-        rbf = RBF(length_scale=init, length_scale_bounds=ls_bounds)
+        shape = _stationary(kernel, init, ls_bounds)
         n_restarts = _N_RESTARTS
     else:
         fixed = length_scale if n_dims == 1 else [length_scale] * n_dims
-        rbf = RBF(length_scale=fixed, length_scale_bounds="fixed")
+        shape = _stationary(kernel, fixed, "fixed")
         n_restarts = 0
-    kernel = ConstantKernel(1.0, (1e-2, 1e2)) * rbf
     return GaussianProcessRegressor(
-        kernel=kernel,
+        kernel=ConstantKernel(1.0, (1e-2, 1e2)) * shape,
         alpha=alpha,
         normalize_y=True,
         n_restarts_optimizer=n_restarts,
@@ -1020,6 +1062,7 @@ def _fit_surrogate(
     noise_scale: np.ndarray | None,
     n_dims: int = 1,
     ls_bounds: tuple[float, float] = _LS_BOUNDS,
+    kernel: str = "rbf",
 ) -> tuple[_Surrogate, np.ndarray]:
     """Fit the GP — on residuals when a physical prior is supplied.
 
@@ -1060,6 +1103,7 @@ def _fit_surrogate(
         noise_scale=noise_scale,
         n_dims=n_dims,
         ls_bounds=ls_bounds,
+        kernel=kernel,
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", ConvergenceWarning)
@@ -1209,6 +1253,7 @@ def _assess_reliability(
     noise_std: float,
     seed: int,
     ls_bounds: tuple[float, float] = _LS_BOUNDS,
+    kernel: str = "rbf",
 ) -> ReliabilityReport:
     """Count-tier + leave-one-out reliability of the model's intervals.
 
@@ -1237,7 +1282,7 @@ def _assess_reliability(
     inside = 0
     for i in range(n):
         mask = np.arange(n) != i
-        gp = _build_gp(y[mask], noise_std, None, seed, n_dims=d, ls_bounds=ls_bounds)
+        gp = _build_gp(y[mask], noise_std, None, seed, n_dims=d, ls_bounds=ls_bounds, kernel=kernel)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", ConvergenceWarning)
             gp.fit(x_mat[mask], y[mask])
@@ -1313,6 +1358,43 @@ def _assess_reliability(
     )
 
 
+def _validate_inputs(
+    x: np.ndarray,
+    y: np.ndarray,
+    bounds: tuple[float, float],
+    *,
+    direction: str,
+    kernel: str,
+    explore_policy: str,
+) -> None:
+    """Reject argument combinations the optimizer cannot act on.
+
+    Split out of `optimize` so the fitting path reads as one continuous
+    argument, rather than opening with a page of guards.
+
+    Raises:
+        OptimizationError: On mismatched shapes, too few points, or an
+            unrecognised direction, kernel or exploration policy.
+    """
+    if x.shape != y.shape:
+        raise OptimizationError(f"x and y length mismatch: {x.shape} vs {y.shape}")
+    if x.size < _MIN_POINTS:
+        raise OptimizationError(
+            f"Need at least {_MIN_POINTS} measured points to optimize; got {x.size}"
+        )
+    if direction not in _DIRECTIONS:
+        raise OptimizationError(f"direction must be one of {_DIRECTIONS}; got {direction!r}")
+    if kernel not in _KERNELS:
+        raise OptimizationError(f"kernel must be one of {_KERNELS}; got {kernel!r}")
+    if explore_policy not in _EXPLORE_POLICIES:
+        raise OptimizationError(
+            f"explore_policy must be one of {_EXPLORE_POLICIES}; got {explore_policy!r}"
+        )
+    lo, hi = bounds
+    if not hi > lo:
+        raise OptimizationError(f"bounds must have high > low; got {bounds}")
+
+
 def optimize(
     x: np.ndarray,
     y: np.ndarray,
@@ -1338,6 +1420,8 @@ def optimize(
     unreliable: np.ndarray | None = None,
     epsilon: float | None = None,
     delta: float = _DEFAULT_DELTA,
+    kernel: str = "rbf",
+    explore_policy: str = "max_std",
 ) -> OptimizationResult:
     """Run one round of Bayesian optimization over a 1-D parameter.
 
@@ -1427,6 +1511,25 @@ def optimize(
             "within one measurement noise of the optimum".
         delta: Risk level for that statement; `epsilon_delta_met` is True
             when the probability reaches 1 - delta.
+        kernel: Stationary factor of the covariance, one of `_KERNELS`.
+            "rbf" (default) is the shipped behaviour. "matern52" is Matern
+            with nu = 5/2, which is rougher: its sample paths are twice
+            differentiable rather than infinitely so. That matters because an
+            RBF assumes the property varies smoothly everywhere, and the
+            features an audit tool exists to find — a phase boundary, a
+            solubility limit, a percolation threshold — are exactly the ones
+            an over-smooth kernel interpolates away. nu = 5/2 is also the
+            least smooth choice that keeps the GP-UCB regret guarantee, which
+            needs nu > 2.
+        explore_policy: What to recommend when the improvement signal is
+            exhausted but the data is still exploratory, one of
+            `_EXPLORE_POLICIES`. "max_std" (default) is the shipped
+            behaviour: recommend the point of greatest posterior sd, i.e. the
+            largest unmeasured gap. "ei" removes the fallback and keeps the
+            max-EI pick. "ucb" replaces it with `argmax(mean + 2 sd)`, which
+            explores only where the model also thinks the value could be high.
+            This governs the recommendation only — whether convergence is
+            declared stays gated on the reliability tier regardless.
 
     Returns:
         An `OptimizationResult` with the posterior, the recommendation,
@@ -1438,17 +1541,10 @@ def optimize(
     """
     x = np.asarray(x, dtype=float).ravel()
     y = np.asarray(y, dtype=float).ravel()
-    if x.shape != y.shape:
-        raise OptimizationError(f"x and y length mismatch: {x.shape} vs {y.shape}")
-    if x.size < _MIN_POINTS:
-        raise OptimizationError(
-            f"Need at least {_MIN_POINTS} measured points to optimize; got {x.size}"
-        )
-    if direction not in _DIRECTIONS:
-        raise OptimizationError(f"direction must be one of {_DIRECTIONS}; got {direction!r}")
+    _validate_inputs(
+        x, y, bounds, direction=direction, kernel=kernel, explore_policy=explore_policy
+    )
     lo, hi = bounds
-    if not hi > lo:
-        raise OptimizationError(f"bounds must have high > low; got {bounds}")
 
     # Normalize x so the search span maps to _SPAN_UNITS regardless of the
     # variable's magnitude. The RBF is stationary, so the shift is free; the
@@ -1493,6 +1589,7 @@ def optimize(
         length_scale=length_scale,
         seed=seed,
         noise_scale=noise_scale,
+        kernel=kernel,
     )
 
     grid = np.linspace(lo, hi, grid_size)
@@ -1537,7 +1634,7 @@ def optimize(
         objective_aggregation=objective_aggregation,
         input_name=input_name,
         bounds=(float(lo), float(hi)),
-        kernel="ConstantKernel * RBF",
+        kernel=f"ConstantKernel * {'Matern(nu=5/2)' if kernel == 'matern52' else 'RBF'}",
         x_scale=float(x_scale),
         length_scale=(
             float(length_scale) if length_scale is not None else _fitted_length_scale(gp)
@@ -1563,6 +1660,7 @@ def optimize(
             y_fit,
             noise_std=noise_std,
             seed=seed,
+            kernel=kernel,
         )
 
     # Reliability-aware convergence and exploration. When the improvement
@@ -1575,10 +1673,24 @@ def optimize(
     # best. Otherwise recommend the max-EI (exploit) point. When reliability
     # was not assessed (the robustness sweep, which reads neither field), fall
     # back to the plain max-EI pick.
+    #
+    # `explore_policy` selects *where* to point when that fires. "max_std" is
+    # the shipped behaviour — pure uncertainty sampling, which four of the
+    # reviewed papers measure as the weakest available policy when used as a
+    # whole strategy (Borg, Rohr, Srinivas, Shields). "ei" removes the fallback
+    # entirely; "ucb" replaces it with optimism. Which is right is an empirical
+    # question, which is why all three exist rather than one being assumed.
+    # Note the convergence gate is deliberately NOT policy-dependent: a flat EI
+    # on exploratory data still must not be reported as "optimum found".
     is_exploratory = reliability is not None and reliability.level == "exploratory"
     converged = signal_exhausted and not is_exploratory
-    explore = signal_exhausted and is_exploratory
-    rec_i = int(np.argmax(std)) if explore else ei_i
+    explore = signal_exhausted and is_exploratory and explore_policy != "ei"
+    if not explore:
+        rec_i = ei_i
+    elif explore_policy == "ucb":
+        rec_i = int(np.argmax(mean_int + _UCB_LAMBDA * std))
+    else:
+        rec_i = int(np.argmax(std))
     recommendation = _recommend(
         grid,
         rec_i,
