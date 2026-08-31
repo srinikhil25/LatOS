@@ -89,8 +89,6 @@ models/
 
 # ─── Build artifacts ─────────────────────────────────────────────────
 *.spec.bak
-build/
-dist/
 *.exe
 *.app
 *.dmg
@@ -155,9 +153,13 @@ test_output/
 *.tmp
 *.temp
 *.bak
-*~
 .cache/
 .claude/
 proposal/
 BUG_ASSESSMENT.md
 vision.md
+
+# ─── Literature ──────────────────────────────────────────────────────
+# Downloaded papers for the methodology review. Copyrighted third-party
+# PDFs; the notes derived from them live in docs/, which is also local.
+literature/
