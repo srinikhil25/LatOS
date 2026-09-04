@@ -13,6 +13,8 @@ from latos.ingestion.parsers.eds_emsa import EdsEmsaParser
 from latos.ingestion.parsers.hall_xls import HallXlsParser
 from latos.ingestion.parsers.ite_workbook import IteWorkbookParser
 from latos.ingestion.parsers.lfa_xlsx import LfaXlsxParser
+from latos.ingestion.parsers.microscopy_bmp import MicroscopyBmpParser
+from latos.ingestion.parsers.microscopy_jpeg import MicroscopyJpegParser
 from latos.ingestion.parsers.microscopy_tif import MicroscopyTifParser
 from latos.ingestion.parsers.raman_renishaw_txt import RenishawRamanTxtParser
 from latos.ingestion.parsers.resistivity_seebeck_xlsx import (
@@ -40,6 +42,8 @@ __all__ = [
     "EdsEmsaParser",
     "HallXlsParser",
     "LfaXlsxParser",
+    "MicroscopyBmpParser",
+    "MicroscopyJpegParser",
     "MicroscopyTifParser",
     "PanalyticalXrdmlParser",
     "PpmsTtoParser",

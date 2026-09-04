@@ -196,6 +196,8 @@ def default_registry() -> ParserRegistry:
         HallXlsParser,
         IteWorkbookParser,
         LfaXlsxParser,
+        MicroscopyBmpParser,
+        MicroscopyJpegParser,
         MicroscopyTifParser,
         MultiRegionXpsTxtParser,
         PanalyticalXrdmlParser,
@@ -224,6 +226,13 @@ def default_registry() -> ParserRegistry:
             BrukerSpxParser(),
             EdsEmsaParser(),
             MicroscopyTifParser(),
+            # Microscope JPEGs: the JEM-2100F writes these when a frame is
+            # saved rather than exported. Keyed on the SOI marker, so it
+            # cannot collide with anything else registered here.
+            MicroscopyJpegParser(),
+            # JEOL EDS map images. Named `View000 Ti K.bmp`, which is the only
+            # record of which element each one shows.
+            MicroscopyBmpParser(),
             HallXlsParser(),
             # Two named sheets plus a sample_id header is an unambiguous
             # signature, so this sits with the specific ones rather than

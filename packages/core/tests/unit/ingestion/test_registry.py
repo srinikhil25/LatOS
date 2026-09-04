@@ -229,6 +229,8 @@ class TestDefaultRegistry:
             "bruker-eds-spx",
             "eds-emsa",
             "microscopy-tif",
+            "microscopy-jpeg",
+            "microscopy-bmp",
             "shock-tektronix-csv",
             "shock-summary-csv",
         }

@@ -8,6 +8,12 @@
       "field": "measured_at",
       "message": "TIFF DateTime tag has no timezone; attached UTC for consistency. Treat measured_at as approximate \u2014 it is local time at the instrument.",
       "severity": "warning"
+    },
+    {
+      "acknowledged": false,
+      "field": "info_bar",
+      "message": "Frame is square, so it was saved without the instrument info bar. No pixel size can be recovered from it and no length measured on it is meaningful.",
+      "severity": "warning"
     }
   ],
   "measured_at": "2025-04-28T11:21:11+00:00",
@@ -21,8 +27,11 @@
     "compression": 7,
     "datetime": "2025:04:28 11:21:11",
     "dtype": "uint8",
+    "image_area_px": 1024,
     "image_height": 1024,
     "image_width": 1024,
+    "info_bar_height_px": 0,
+    "info_bar_present": false,
     "make": "Olympus Soft Imaging Solutions",
     "model": "Tengra",
     "n_pages": 2,
