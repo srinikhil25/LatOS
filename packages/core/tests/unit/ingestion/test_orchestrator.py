@@ -507,3 +507,42 @@ class TestTechniqueRefinement:
         root = tmp_path / "TEM" / "project"
         f = root / "CS" / "img.tif"
         assert _refine_technique_from_folders(f, root) is None
+
+
+class TestTechniqueSuffixInFolderName:
+    """The modality as a suffix on a descriptive folder, not a folder of its own.
+
+    This is how the MXene tree is filed — `1.TEM/.../MX_Ti3C2Tx_Air_40_TEM/` —
+    and matching whole folder names alone missed every one of them: 609 frames
+    across 13 samples reported as SEM. A wrong modality is worse than a missing
+    one, because nothing downstream has any reason to doubt it.
+
+    Tokens are matched whole. Substring matching would turn `system` into SEM
+    and `item` into TEM, so the separator split is the load-bearing part.
+    """
+
+    @pytest.mark.parametrize(
+        ("folder", "expected"),
+        [
+            ("MX_Ti3C2Tx_Air_40_TEM", Technique.TEM),
+            ("1.TEM", Technique.TEM),
+            ("MAX_Mo2Ti2AlC3_TEM_IMAGE", Technique.TEM),
+            ("MX-ENE_TEM", Technique.TEM),
+            ("sample (STEM)", Technique.STEM),
+            ("run-01-sem", Technique.SEM),
+        ],
+    )
+    def test_suffix_is_read(self, tmp_path: Path, folder: str, expected: Technique):
+        f = tmp_path / folder / "img.jpg"
+        assert _refine_technique_from_folders(f, tmp_path) is expected
+
+    @pytest.mark.parametrize("folder", ["system", "ITEM", "items", "5.PPMS", "SUBSTRATE"])
+    def test_a_word_merely_containing_the_keyword_is_not_a_match(self, tmp_path: Path, folder: str):
+        f = tmp_path / folder / "img.jpg"
+        assert _refine_technique_from_folders(f, tmp_path) is None
+
+    def test_specificity_still_wins_within_one_folder_name(self, tmp_path: Path):
+        # Both keywords in one name: the more specific modality is the answer,
+        # matching how the walk already resolves them across separate folders.
+        f = tmp_path / "TEM_STEM_overview" / "img.jpg"
+        assert _refine_technique_from_folders(f, tmp_path) is Technique.STEM

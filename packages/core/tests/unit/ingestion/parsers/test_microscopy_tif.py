@@ -151,3 +151,37 @@ class TestFailureModes:
         result = self.parser.parse(f)
         assert result.measured_at is not None
         assert result.measured_at.year == 2024
+
+
+class TestInfoBar:
+    """The same test the JPEG parser applies, in the other container.
+
+    It was missing here, and the omission was not free: five square `.tif`
+    frames in the Mo2Ti2AlC3 TEM folder carry no info bar and passed through
+    silently, while the identical defect in a `.jpg` was flagged. A frame with
+    no bar has no pixel size, whatever format it arrived in.
+    """
+
+    @staticmethod
+    def _write(path: Path, width: int, height: int) -> Path:
+        tifffile.imwrite(path, np.zeros((height, width), dtype=np.uint8))
+        return path
+
+    def test_taller_than_wide_carries_a_bar(self, tmp_path: Path):
+        result = MicroscopyTifParser().parse(self._write(tmp_path / "a.tif", 512, 600))
+        assert result.metadata["info_bar_present"] is True
+        assert result.metadata["info_bar_height_px"] == 88
+        assert not [i for i in result.issues if i.field == "info_bar"]
+
+    def test_square_frame_is_flagged(self, tmp_path: Path):
+        result = MicroscopyTifParser().parse(self._write(tmp_path / "b.tif", 512, 512))
+        assert result.metadata["info_bar_present"] is False
+        issue = next(i for i in result.issues if i.field == "info_bar")
+        assert "no pixel size can be recovered" in issue.message.lower()
+
+    def test_multichannel_page_uses_the_spatial_axes(self, tmp_path: Path):
+        # An RGB page is (h, w, 3); the channel axis must not be read as width.
+        path = tmp_path / "c.tif"
+        tifffile.imwrite(path, np.zeros((512, 512, 3), dtype=np.uint8))
+        result = MicroscopyTifParser().parse(path)
+        assert result.metadata["info_bar_present"] is False

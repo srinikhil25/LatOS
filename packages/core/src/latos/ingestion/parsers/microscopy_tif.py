@@ -38,6 +38,7 @@ from latos.core.enums import Severity, Technique
 from latos.core.models import ValidationIssue, utc_now
 from latos.ingestion.base_parser import BaseParser
 from latos.ingestion.parsed_data import ParsedData
+from latos.ingestion.parsers._frames import info_bar_geometry, no_info_bar_issue
 
 __all__ = ["MicroscopyTifParser"]
 
@@ -142,6 +143,17 @@ class MicroscopyTifParser(BaseParser):
                 ),
             )
             return self._empty_result(issues)
+
+        # The same info-bar test the JPEG parser applies. It was missing here,
+        # and the cost was measurable: five square .tif frames in the
+        # Mo2Ti2AlC3 TEM folder carry no bar and were passing through silently,
+        # while the identical defect in a .jpg was flagged. A frame with no bar
+        # has no pixel size, whatever container it arrived in.
+        height, width = _frame_size(metadata)
+        if width and height:
+            metadata.update(info_bar_geometry(width, height))
+            if not metadata["info_bar_present"]:
+                issues.append(no_info_bar_issue())
 
         # Technique inference disclaimer is no longer needed: the
         # orchestrator now examines parent folders (TEM/, STEM/,
@@ -258,3 +270,24 @@ def _parse_tiff_datetime(
         ),
     )
     return dt.replace(tzinfo=UTC)
+
+
+def _frame_size(metadata: dict[str, Any]) -> tuple[int, int]:
+    """`(height, width)` of the frame, from the tags or the page shape.
+
+    The baseline tags are preferred when present; `shape` is the fallback, and
+    its last two axes are the spatial ones for both greyscale (h, w) and
+    multi-channel (h, w, c) pages. Returns `(0, 0)` when neither is readable,
+    which the caller reads as "say nothing" rather than guessing.
+    """
+    width = metadata.get("image_width")
+    height = metadata.get("image_height")
+    if isinstance(width, int) and isinstance(height, int):
+        return height, width
+    shape = metadata.get("shape")
+    n_spatial = 2
+    if isinstance(shape, list) and len(shape) >= n_spatial:
+        h, w = shape[0], shape[1]
+        if isinstance(h, int) and isinstance(w, int):
+            return h, w
+    return 0, 0

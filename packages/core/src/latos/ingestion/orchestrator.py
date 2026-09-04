@@ -39,6 +39,7 @@ parser version skips parsing entirely.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field, replace
@@ -629,6 +630,9 @@ def _canonical_key(name: str) -> str:
 # normalized folder names (whitespace-collapsed via `_normalize_folder`).
 # Microscopy parsers default to SEM because TIFF tags rarely identify
 # the actual modality; the user's folder structure usually does.
+# Separators a researcher puts between a sample name and the modality suffix.
+_FOLDER_TOKEN_RE = re.compile(r"[\s_\-.()\[\]]+")
+
 _MICROSCOPY_FOLDER_TECHNIQUES: dict[str, Technique] = {
     "sem": Technique.SEM,
     "fe-sem": Technique.SEM,
@@ -653,6 +657,35 @@ _TECHNIQUE_SPECIFICITY: tuple[Technique, ...] = (
 )
 
 
+def _folder_technique(name: str) -> Technique | None:
+    """Microscopy technique named by one folder, whole-name or as a token.
+
+    Whole-name first, because that is what the multi-word keys
+    (``hr fe sem``) are written as. Failing that, the name is split on the
+    separators researchers actually use and each token is looked up on its own.
+
+    The token pass is what reads `MX_Ti3C2Tx_Air_40_TEM` and `1.TEM`, which is
+    how this dataset is filed — the modality is a suffix on a descriptive name,
+    not a folder of its own. Without it 609 TEM frames report as SEM: not a gap
+    but a confident wrong answer, which is worse, and the harder kind to notice.
+
+    Tokens are matched whole, never as substrings, so `system` and `item` do
+    not become SEM and TEM.
+    """
+    normalized = _normalize_folder(name)
+    direct = _MICROSCOPY_FOLDER_TECHNIQUES.get(normalized)
+    if direct is not None:
+        return direct
+    best: Technique | None = None
+    for token in _FOLDER_TOKEN_RE.split(normalized):
+        match = _MICROSCOPY_FOLDER_TECHNIQUES.get(token)
+        if match is not None and (
+            best is None or _TECHNIQUE_SPECIFICITY.index(match) < _TECHNIQUE_SPECIFICITY.index(best)
+        ):
+            best = match
+    return best
+
+
 def _refine_technique_from_folders(path: Path, root: Path) -> Technique | None:
     """Return a more specific microscopy technique from parent folder names.
 
@@ -675,7 +708,7 @@ def _refine_technique_from_folders(path: Path, root: Path) -> Technique | None:
     matches: set[Technique] = set()
     p = path.parent
     while p not in (root, p.parent):
-        match = _MICROSCOPY_FOLDER_TECHNIQUES.get(_normalize_folder(p.name))
+        match = _folder_technique(p.name)
         if match is not None:
             matches.add(match)
         p = p.parent
