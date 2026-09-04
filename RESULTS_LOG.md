@@ -1161,3 +1161,127 @@ Still unread: 63 `.txt`, 34 `.raw`, 14 `.wdf`, 12 `.map`, 3 each `.img` / `.pts`
 - `TestInfoBar` in `test_microscopy_tif.py` — 3 tests, including a multichannel
   page so the channel axis is never read as width
 - `microscopy-bmp` added to the registry inventory test; TIFF snapshot updated
+
+## 2026-09-04 — The closed loop was open at its last joint
+
+Setting up the ionic-liquid campaign surfaced a bug in the one claim the audit
+calls Latos's strongest. `python -m latos next` froze pre-registrations into
+`<workbook>/preregistrations/`. The validation module and the desktop app both
+read `<root>/.latos/prereg/`. **Nothing failed.** The bench command printed
+`Pre-registered: ...`, wrote a real record with a real prediction, and the
+screen that scores it listed nothing.
+
+Measured on a record the rehearsal harness actually wrote:
+
+```
+records on disk            : ['prereg_20260904T100338Z.json']
+list_preregistrations(root): []
+```
+
+Worse than invisible: `app.py` confines `/optimize/validate` requests to
+`.latos/prereg/`, so the server would have **refused** a bench record even if
+handed the path directly. Freeze → measure → validate, and the last arrow was
+broken in both directions.
+
+### Cause
+
+The path was declared four times across three modules and one copy disagreed —
+the same failure mode the workbook template's docstring already warns about for
+sheet names, in a module that had not adopted the remedy.
+
+### Fix
+
+`prereg.prereg_dir(root)` declares it once; `validate.py`, `server/app.py`
+(both the writer and the confinement check) and `campaign_cycle.py` all read
+that declaration. No hard-coded copies remain in `src/`.
+
+The regression guard is the join, not the constant: `run_cycle` freezes, then
+`list_preregistrations` must find *that* file. Verified to fail against the old
+behaviour — reader returns `[]` while the record sits in `preregistrations/`.
+
+After:
+
+```
+froze to        : ...\loop_check\.latos\prereg\prereg_20260904T112135Z.json
+reader found    : ['prereg_20260904T112135Z.json']
+same file       : True
+```
+
+### Also this session
+
+`latos rehearse` run before any sample exists, at 5 / 10 / 15 % noise:
+**median 5 experiments** to within 5 % of the optimum, 96 / 90 / 92 % of runs
+inside a budget of 12. Noise barely moves it — the campaign's risk is the
+*shape* of S(x), not measurement precision. The rehearsal flags its own
+`sign flip` shape as *optimum at an endpoint*, pricing the degeneracy
+independently of any reading of the literature.
+
+Two template columns claimed to be derived and were computed by nothing:
+`mole_fraction_x` and `IL_loading_mg_cm2`. Both were tier 0, which the guide
+sheet renders blue above the line *"Leave them; Latos computes them from what
+you typed."* Moved to tier 2 with the arithmetic stated.
+
+### Shipped
+
+- `optimization/prereg.py` — `prereg_dir()`, exported from `latos.optimization`
+- `optimization/validate.py`, `server/app.py`, `campaign_cycle.py` — all four
+  hard-coded copies replaced
+- `test_campaign_cycle.py` — `test_the_record_is_findable_by_the_reader_that_scores_it`
+- `ingestion/ite_workbook_template.py` — the two false DERIVED columns
+- `data/ionic-liquid-campaign/` — seeded workbook + printable A4 bench sheet
+
+1943 unit tests pass.
+
+## 2026-09-05 — The frozen record now identifies its own training set
+
+`n_observations` was a count. Two pre-registrations fit to entirely different
+measurements were distinguishable only by their timestamps, which is the
+obvious question to ask of a pre-registration: *how do we know this prediction
+was made on the data you say it was?*
+
+Added to every record: `latos_version`, and a `training_data` block carrying a
+SHA-256 over the observations, the observations themselves, and the per-point
+weights.
+
+### Three decisions worth recording
+
+**Rows are sorted before hashing, so order does not matter.** A reordering is
+the same set of measurements. A digest that cried mismatch over row order would
+be a check nobody trusts, and an audit check nobody trusts is worse than none.
+
+**The weights are part of the training set.** `BoConfig.point_noise_used`
+already said a fit was heteroscedastic; it did not say *with what*, so two runs
+weighting the same points differently were still indistinguishable — the exact
+failure that field's own comment describes. `BoConfig.point_noise_scale` now
+records them, and the digest covers them.
+
+**The observations are stored at full precision.** Found by trying to verify a
+record the way an auditor would: recomputing the digest from the |S| values as
+printed in the report gave a mismatch, because a fitted slope is a float64 and
+a report rounds. A hash advertised as falsifiable while withholding its inputs
+is not checkable, so the record now carries them.
+
+### Verified from the file alone
+
+```
+x                : [0.0, 0.5, 1.0]
+y                : [0.44723999999999997, 0.15050999999999998, 0.78138]
+weights          : [3.1950718685831716, 1.0, 0.8911704312114979]
+recorded  sha256 : 577bb30a8fd33035dd067d8f29b284ad69d8e19759eeb6a65e77d2c96435df48
+recomputed sha256: 577bb30a8fd33035dd067d8f29b284ad69d8e19759eeb6a65e77d2c96435df48
+VERIFIED         : True
+after a 1e-12 edit to one measurement: False
+```
+
+### Shipped
+
+- `optimization/prereg.py` — `observations_digest()`, the `training_data`
+  block, `latos_version`, and both rendered into the Markdown note
+- `optimization/engine.py` — `BoConfig.point_noise_scale`
+- `test_prereg.py` — 26 tests, including order-independence, that pairing
+  survives the sort, that rounded values do *not* reproduce the digest, and
+  that the record alone suffices to recompute it
+- `_to_markdown` reads older records that predate both fields
+
+Pre-existing and untouched: two mypy `type-arg` errors in
+`analysis/microscopy/calibration.py`.
