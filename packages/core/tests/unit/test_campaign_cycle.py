@@ -33,6 +33,7 @@ from latos.ingestion.ite_workbook_template import (
     SAMPLES_SHEET,
     write_template,
 )
+from latos.optimization import list_preregistrations, prereg_dir
 
 DELTAS = (2.0, 5.0, 10.0)
 
@@ -157,10 +158,28 @@ class TestThePreRegistration:
         )
         return run_cycle(path), path
 
-    def test_it_lands_beside_the_workbook_by_default(self, written):
+    def test_it_lands_where_the_validation_screen_reads(self, written):
+        """Not merely "beside the workbook" — in the one directory readers use.
+
+        This previously asserted `preregistrations/`, which is beside the
+        workbook and which nothing reads. The test passed, the record was
+        written, and the loop was open at its last joint.
+        """
         outcome, path = written
         assert outcome.prereg_path is not None
-        assert outcome.prereg_path.parent == path.parent / "preregistrations"
+        assert outcome.prereg_path.parent == prereg_dir(path.parent)
+
+    def test_the_record_is_findable_by_the_reader_that_scores_it(self, written):
+        """The join the path bug broke: writer and reader must agree.
+
+        `list_preregistrations` is what the desktop app lists and what the
+        outcome screen validates against. If a freeze made at the bench does
+        not appear here, the pre-registration is evidence nobody can reach.
+        """
+        outcome, path = written
+        found = list_preregistrations(path.parent)
+        assert [e.path for e in found] == [str(outcome.prereg_path)]
+        assert found[0].recommended_x == pytest.approx(outcome.result.recommendation.x)
 
     def test_it_records_the_prediction_and_its_interval(self, written):
         """Without these the record cannot be scored against the outcome."""
@@ -199,7 +218,7 @@ class TestThePreRegistration:
         outcome = run_cycle(path, freeze_prereg=False)
         assert outcome.result is not None
         assert outcome.prereg_path is None
-        assert not (path.parent / "preregistrations").exists()
+        assert not prereg_dir(path.parent).exists()
         assert any("cannot later be presented" in m for m in outcome.messages)
 
 
@@ -265,7 +284,7 @@ class TestTheCommandLine:
         )
         assert main([str(path), "--dry-run"]) == 0
         capsys.readouterr()
-        assert not (path.parent / "preregistrations").exists()
+        assert not prereg_dir(path.parent).exists()
 
     def test_a_missing_file_fails_without_a_traceback(self, tmp_path, capsys):
         assert main([str(tmp_path / "nope.xlsx")]) == 2

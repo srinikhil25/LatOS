@@ -53,7 +53,7 @@ from latos.core.enums import Severity
 from latos.ingestion.parsed_data import ParsedData
 from latos.ingestion.parsers.ite_workbook import IteWorkbookParser
 from latos.optimization.engine import OptimizationResult, optimize
-from latos.optimization.prereg import freeze
+from latos.optimization.prereg import freeze, prereg_dir
 
 __all__ = [
     "CycleOutcome",
@@ -215,10 +215,10 @@ def run_cycle(
 
     Args:
         workbook: The filled recording workbook.
-        out_dir: Where the pre-registration is written. Defaults to a
-            `preregistrations/` directory beside the workbook, so the evidence
-            lands next to the record it came from rather than wherever the
-            command happened to be run.
+        out_dir: Where the pre-registration is written. Defaults to
+            `.latos/prereg/` beside the workbook — the one place the validation
+            module and the desktop app read, so a freeze made at the bench is
+            visible to the screen that later scores it.
         freeze_prereg: Write the pre-registration (default). False is for
             previewing a recommendation without committing to it. Note what
             that costs: a prediction that was not frozen before the sample
@@ -291,7 +291,10 @@ def run_cycle(
         )
         return CycleOutcome(fits, result, None, tuple(messages), points)
 
-    destination = out_dir if out_dir is not None else workbook.parent / "preregistrations"
+    # The workbook sits at the campaign root, so its parent is the project the
+    # validation screen opens. Going through `prereg_dir` is what makes a
+    # freeze written at the bench visible to the screen that scores it.
+    destination = out_dir if out_dir is not None else prereg_dir(workbook.parent)
     destination.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = freeze(result, destination / f"prereg_{stamp}.json", prior_best=result.best_y)
@@ -523,7 +526,7 @@ def main(argv: list[str] | None = None) -> int:
         "--out",
         type=Path,
         default=None,
-        help="where to write the pre-registration (default: preregistrations/ beside the workbook)",
+        help="where to write the pre-registration (default: .latos/prereg/ beside the workbook)",
     )
     parser.add_argument(
         "--dry-run",

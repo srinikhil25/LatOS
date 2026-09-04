@@ -363,6 +363,11 @@ class BoConfig:
     # points differently. A frozen record that cannot tell those apart is not a
     # record of how the answer was produced.
     point_noise_used: bool = False
+    # ...and the weights themselves, in the same order as the observations.
+    # The flag above says the fit was heteroscedastic; this says with what, so
+    # the pre-registration's training-data digest covers the weighting too.
+    # Effective per-point sd is `noise_std * point_noise_scale[i]`.
+    point_noise_scale: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1693,6 +1698,11 @@ def optimize(
         noise_std=noise_std,
         xi_absolute=xi_abs,
         point_noise_used=noise.per_point,
+        point_noise_scale=(
+            tuple(float(v) for v in noise.scale)
+            if noise.per_point and noise.scale is not None
+            else None
+        ),
         n_observations=int(x.size),
         grid_size=grid_size,
         seed=seed,

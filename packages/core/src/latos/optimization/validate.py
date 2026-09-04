@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from latos.core.models import utc_now
+from latos.optimization.prereg import prereg_dir
 
 __all__ = [
     "OutcomeVerdict",
@@ -231,10 +232,6 @@ class PreregEntry:
     search_bounds: tuple[float, float] | None = None
 
 
-def _prereg_dir(root: Path) -> Path:
-    return root / ".latos" / "prereg"
-
-
 def _search_bounds(objective: dict[str, Any]) -> tuple[float, float] | None:
     """The frozen search range, or None if the record predates the field."""
     raw = objective.get("search_bounds")
@@ -254,7 +251,7 @@ def list_preregistrations(root: Path) -> list[PreregEntry]:
     recorded outcome (if present) to its parent entry. Malformed records
     are skipped, not fatal.
     """
-    directory = _prereg_dir(root)
+    directory = prereg_dir(root)
     if not directory.is_dir():
         return []
     entries: list[PreregEntry] = []

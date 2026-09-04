@@ -68,6 +68,7 @@ from latos.optimization import (
     length_scale_robustness,
     optimize,
     optimize_nd,
+    prereg_dir,
     recommendation_drift,
 )
 from latos.reporting.correlation import correlate
@@ -1133,7 +1134,7 @@ def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> Free
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     stamp = res.config.created_at.strftime("%Y%m%dT%H%M%SZ")
-    out_path = _unused_prereg_path(state.root / ".latos" / "prereg", stamp)
+    out_path = _unused_prereg_path(prereg_dir(state.root), stamp)
     freeze(res, out_path, prior_best=res.best_y, robustness=robustness)
     return FreezeResult(
         path=str(out_path),
@@ -1525,7 +1526,7 @@ def _validate_prereg(state: ServerState, body: ValidateOutcomeRequest) -> Outcom
     """
     if state.root is None:
         raise HTTPException(status_code=404, detail="No project is open")
-    expected_dir = (state.root / ".latos" / "prereg").resolve()
+    expected_dir = prereg_dir(state.root).resolve()
     try:
         resolved = Path(body.prereg_path).resolve()
         in_dir = resolved.parent == expected_dir

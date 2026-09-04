@@ -15,15 +15,88 @@ The later validation reads directly off this record:
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from latos import __version__
+
 if TYPE_CHECKING:
     from latos.optimization.engine import OptimizationResult, RobustnessReport
 
-__all__ = ["build_record", "freeze", "write_record"]
+__all__ = ["build_record", "freeze", "observations_digest", "prereg_dir", "write_record"]
+
+# Where frozen records live, declared once because it was previously declared
+# four times across three modules and one copy disagreed: `campaign_cycle`
+# froze into `<workbook>/preregistrations/` while the validation module and the
+# server both read `<root>/.latos/prereg/`. Nothing failed loudly. The bench
+# command printed "Pre-registered: ..." and wrote a real record; the screen
+# that scores it simply listed nothing, and the server's path-confinement
+# check would have refused the record even if handed it directly. So the
+# closed loop was open at its last joint, silently. A freeze no reader can
+# find is not a commitment, which is the one thing a pre-registration is for.
+_PREREG_PARENT = ".latos"
+_PREREG_SUBDIR = "prereg"
+
+
+def prereg_dir(root: Path) -> Path:
+    """The directory holding frozen pre-registrations for the project at `root`.
+
+    Every writer and every reader goes through this. See the comment above for
+    what happened when they did not.
+    """
+    return Path(root) / _PREREG_PARENT / _PREREG_SUBDIR
+
+
+# How the observations are canonicalised before hashing, recorded inside every
+# record so an auditor can recompute the digest without reading this source.
+_CANONICAL_FORM = (
+    "rows of x, y[, sigma] as Python float repr, tab-separated, sorted ascending, "
+    "newline-joined, UTF-8, SHA-256"
+)
+
+
+def observations_digest(
+    x: Sequence[float],
+    y: Sequence[float],
+    *,
+    sigma: Sequence[float] | None = None,
+) -> str:
+    """SHA-256 of the observations a model was fit to.
+
+    The record already pins the configuration. What it could not pin was the
+    *data*: `n_observations` is a count, so two records fit to entirely
+    different measurements were distinguishable only by their timestamps. A
+    frozen prediction whose training set cannot be identified is not evidence
+    of anything, which matters because pre-registration is the claim this whole
+    module exists to support.
+
+    `sigma` is included when per-observation standard deviations were supplied.
+    Two runs with identical (x, y) and different weights are different fits and
+    produce different recommendations — `BoConfig.point_noise_used` says that
+    happened, and this says with what.
+
+    Rows are **sorted**, so the same dataset listed in a different order gives
+    the same digest. That is deliberate: a reordering is the same set of
+    measurements, and a check that cried mismatch over row order would be a
+    check nobody trusts. `repr` of a float round-trips exactly in Python, so
+    the canonical text loses no precision.
+    """
+    if len(x) != len(y):
+        raise ValueError(f"x has {len(x)} points and y has {len(y)}")
+    if sigma is not None and len(sigma) != len(x):
+        raise ValueError(f"sigma has {len(sigma)} points and x has {len(x)}")
+
+    rows: list[tuple[float, ...]]
+    if sigma is None:
+        rows = [(float(a), float(b)) for a, b in zip(x, y, strict=True)]
+    else:
+        rows = [(float(a), float(b), float(c)) for a, b, c in zip(x, y, sigma, strict=True)]
+    text = "\n".join("\t".join(repr(v) for v in row) for row in sorted(rows))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def build_record(
@@ -41,6 +114,10 @@ def build_record(
     record: dict[str, Any] = {
         "kind": "latos.bo.prereg",
         "created_at": cfg.created_at.isoformat(),
+        # Which build produced this. The engine's defaults have already moved
+        # once (`xi` changed from absolute to fractional on 2026-08-10), so a
+        # record that does not say which version wrote it cannot be replayed.
+        "latos_version": __version__,
         "objective": {
             "property": cfg.objective,
             "direction": cfg.direction,
@@ -62,9 +139,32 @@ def build_record(
             # points differently, which would make this record unable to explain
             # the recommendation it is freezing.
             "point_noise_used": cfg.point_noise_used,
+            # The weights themselves, so the training-data digest below can
+            # actually be recomputed. Claiming a hash is falsifiable while
+            # withholding an input to it is not a claim anyone can check.
+            "point_noise_scale": (
+                list(cfg.point_noise_scale) if cfg.point_noise_scale is not None else None
+            ),
             "grid_size": cfg.grid_size,
             "seed": cfg.seed,
             "n_observations": cfg.n_observations,
+        },
+        # What the model actually saw. See `observations_digest`.
+        "training_data": {
+            "sha256": observations_digest(
+                result.observed_x, result.observed_y, sigma=cfg.point_noise_scale
+            ),
+            # The observations themselves, at full precision. A digest whose
+            # inputs are absent is only checkable by someone who can re-run the
+            # fit; carrying them makes the record auditable on its own, and the
+            # values are exact floats because a hash over rounded ones will not
+            # reproduce.
+            "x": list(result.observed_x),
+            "y": list(result.observed_y),
+            "n_observations": len(result.observed_x),
+            "point_noise_used": cfg.point_noise_used,
+            "digest_covers_point_noise": cfg.point_noise_scale is not None,
+            "canonical_form": _CANONICAL_FORM,
         },
         "prediction_at_recommendation": {
             "x": rec.x,
@@ -119,6 +219,8 @@ def _to_markdown(record: dict[str, Any]) -> str:
     obj = record["objective"]
     cfg = record["frozen_config"]
     pred = record["prediction_at_recommendation"]
+    # Records written before 2026-09-05 carry no training-data block.
+    data = record.get("training_data", {})
     lo, hi = pred["predictive_interval_95"]
     lines = [
         "# Bayesian-optimization pre-registration",
@@ -140,6 +242,20 @@ def _to_markdown(record: dict[str, Any]) -> str:
         f"- Noise: rel {cfg['rel_noise']}, std {cfg['noise_std']:.4g}",
         f"- Grid size: {cfg['grid_size']} · seed: {cfg['seed']} · "
         f"observations: {cfg['n_observations']}",
+        f"- Produced by: latos {record.get('latos_version', 'unknown')}",
+        "",
+        "## Training data (frozen)",
+        f"- SHA-256: `{data.get('sha256', 'unknown')}`",
+        f"- {data.get('n_observations', cfg['n_observations'])} observations"
+        + (
+            ", digest covers the per-point weights"
+            if data.get("digest_covers_point_noise")
+            else ", equal weighting"
+        ),
+        "- The observations and any weights are stored beside the digest in the "
+        "JSON, at full precision, so it can be recomputed from this record alone.",
+        "- **Falsifiable by:** re-hashing them. A different digest means a "
+        "different training set, whatever the timestamps say.",
         "",
         "## Prediction at the recommended experiment (committed in advance)",
         f"- Recommended `{obj['input_variable']}` = **{pred['x']:.4g}**",

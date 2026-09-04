@@ -6,11 +6,14 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
+from latos import __version__
 from latos.optimization import (
     build_record,
     freeze,
     length_scale_robustness,
+    observations_digest,
     optimize,
 )
 
@@ -158,3 +161,168 @@ class TestStoppingClaimValidation:
         v = validate_outcome(rec, measured=51.0)
         assert v.stopping_claim_held is None
         assert "stopping claim" not in v.summary.lower()
+
+
+class TestObservationsDigest:
+    """The digest identifies the training set. Everything here is about that."""
+
+    X = (0.0, 1.0, 3.0, 5.0)
+    Y = (0.587, 0.362, 0.967, 0.482)
+
+    def test_the_same_data_hashes_the_same(self):
+        assert observations_digest(self.X, self.Y) == observations_digest(self.X, self.Y)
+
+    def test_row_order_does_not_change_it(self):
+        """Deliberate: a reordering is the same set of measurements.
+
+        An auditor recomputing the digest from their own notebook will not
+        list the rows in the order the code happened to hold them, and a check
+        that cried mismatch over that would be a check nobody trusts.
+        """
+        order = [2, 0, 3, 1]
+        shuffled_x = tuple(self.X[i] for i in order)
+        shuffled_y = tuple(self.Y[i] for i in order)
+        assert observations_digest(shuffled_x, shuffled_y) == observations_digest(self.X, self.Y)
+
+    def test_pairing_is_preserved_when_sorting(self):
+        """Sorting must not decouple x from its own y."""
+        swapped_y = (self.Y[1], self.Y[0], self.Y[2], self.Y[3])
+        assert observations_digest(self.X, swapped_y) != observations_digest(self.X, self.Y)
+
+    def test_a_changed_measurement_changes_it(self):
+        nudged = (self.Y[0] + 1e-9, *self.Y[1:])
+        assert observations_digest(self.X, nudged) != observations_digest(self.X, self.Y)
+
+    def test_weights_are_part_of_the_training_set(self):
+        """Same (x, y), different per-point noise, is a different fit."""
+        bare = observations_digest(self.X, self.Y)
+        weighted = observations_digest(self.X, self.Y, sigma=(0.1, 0.1, 0.1, 0.1))
+        other = observations_digest(self.X, self.Y, sigma=(0.1, 0.2, 0.1, 0.1))
+        assert bare != weighted != other
+        assert bare != other
+
+    def test_mismatched_lengths_are_refused(self):
+        with pytest.raises(ValueError, match="x has 4 points and y has 3"):
+            observations_digest(self.X, self.Y[:3])
+        with pytest.raises(ValueError, match="sigma has 2 points"):
+            observations_digest(self.X, self.Y, sigma=(0.1, 0.2))
+
+
+class TestTheRecordIdentifiesItsTrainingSet:
+    """The gap this closes: `n_observations` is a count, not an identity."""
+
+    def test_the_digest_recomputes_from_the_observations(self):
+        res, x, y = _result()
+        record = build_record(res, prior_best=res.best_y)
+        assert record["training_data"]["sha256"] == observations_digest(x, y)
+        assert record["training_data"]["n_observations"] == len(x)
+
+    def test_the_record_alone_is_enough_to_recompute_the_digest(self):
+        """No workbook, no re-run, no rounding: just the JSON on disk.
+
+        Recomputing from the values printed in a report does NOT work, because
+        the digest is over exact float64 and a report rounds. That is why the
+        observations are stored here at full precision.
+        """
+        res, _, _ = _result()
+        record = json.loads(json.dumps(build_record(res, prior_best=res.best_y)))
+        data = record["training_data"]
+        assert (
+            observations_digest(
+                data["x"], data["y"], sigma=record["frozen_config"]["point_noise_scale"]
+            )
+            == data["sha256"]
+        )
+
+    def test_rounded_values_do_not_reproduce_the_digest(self):
+        """The trap this guards against, stated as a test.
+
+        A fitted slope is a full-precision float. Typing the 4-decimal figure
+        off a report and hashing that gives a mismatch which means nothing —
+        hence storing the observations rather than expecting a human to
+        re-enter them.
+        """
+        x = (0.0, 1.0, 3.0)
+        y = (0.5871234567890123, 0.3621111111111111, 0.9673333333333333)
+        rounded = [round(v, 4) for v in y]
+        assert rounded != list(y)  # the fixture must actually exercise this
+        assert observations_digest(x, rounded) != observations_digest(x, y)
+
+    def test_two_records_on_different_data_are_now_distinguishable(self):
+        """Before this, only the timestamps differed."""
+        res_a, _, _ = _result()
+        x = np.array([0.0, 1.0, 3.0, 5.0])
+        y = np.array([0.587, 0.362, 0.967, 0.9])  # one sample measured differently
+        res_b = optimize(
+            x, y, bounds=(0.0, 5.0), input_name="doping_pct", target_name="peak_zt", seed=0
+        )
+        a = build_record(res_a, prior_best=res_a.best_y)
+        b = build_record(res_b, prior_best=res_b.best_y)
+        assert a["frozen_config"]["n_observations"] == b["frozen_config"]["n_observations"]
+        assert a["training_data"]["sha256"] != b["training_data"]["sha256"]
+
+    def test_the_digest_covers_the_weights_when_they_were_used(self):
+        x = np.array([0.0, 1.0, 3.0, 5.0])
+        y = np.array([0.587, 0.362, 0.967, 0.482])
+        kw = {"bounds": (0.0, 5.0), "input_name": "doping_pct", "target_name": "peak_zt", "seed": 0}
+        even = optimize(x, y, point_noise=np.full(4, 0.05), **kw)
+        uneven = optimize(x, y, point_noise=np.array([0.05, 0.2, 0.05, 0.05]), **kw)
+        rec_even = build_record(even, prior_best=even.best_y)["training_data"]
+        rec_uneven = build_record(uneven, prior_best=uneven.best_y)["training_data"]
+        assert rec_even["digest_covers_point_noise"] is True
+        assert rec_even["sha256"] != rec_uneven["sha256"]
+
+    def test_the_recorded_weights_make_the_digest_recomputable(self):
+        """A hash advertised as falsifiable must ship every input to it."""
+        x = np.array([0.0, 1.0, 3.0, 5.0])
+        y = np.array([0.587, 0.362, 0.967, 0.482])
+        res = optimize(
+            x,
+            y,
+            bounds=(0.0, 5.0),
+            input_name="doping_pct",
+            target_name="peak_zt",
+            seed=0,
+            point_noise=np.array([0.05, 0.2, 0.05, 0.05]),
+        )
+        record = build_record(res, prior_best=res.best_y)
+        weights = record["frozen_config"]["point_noise_scale"]
+        assert weights is not None
+        # Recompute using only what the record itself carries.
+        assert (
+            observations_digest(res.observed_x, res.observed_y, sigma=weights)
+            == record["training_data"]["sha256"]
+        )
+
+    def test_equal_weighting_says_so(self):
+        res, _, _ = _result()
+        data = build_record(res, prior_best=res.best_y)["training_data"]
+        assert data["digest_covers_point_noise"] is False
+        assert data["point_noise_used"] is False
+        record = build_record(_result()[0], prior_best=0.0)
+        assert record["frozen_config"]["point_noise_scale"] is None
+
+
+class TestTheRecordNamesItsBuild:
+    def test_the_version_is_recorded(self):
+        res, _, _ = _result()
+        assert build_record(res, prior_best=res.best_y)["latos_version"] == __version__
+
+    def test_the_note_shows_the_digest_and_the_version(self, tmp_path: Path):
+        res, _, _ = _result()
+        out = freeze(res, tmp_path / "prereg.json", prior_best=res.best_y)
+        note = out.with_suffix(".md").read_text(encoding="utf-8")
+        record = json.loads(out.read_text(encoding="utf-8"))
+        assert record["training_data"]["sha256"] in note
+        assert __version__ in note
+
+    def test_a_record_written_before_this_still_renders(self, tmp_path: Path):
+        """Frozen records are immutable, so the renderer must read older ones."""
+        from latos.optimization.prereg import _to_markdown
+
+        res, _, _ = _result()
+        record = build_record(res, prior_best=res.best_y)
+        del record["training_data"]
+        del record["latos_version"]
+        note = _to_markdown(record)
+        assert "unknown" in note
