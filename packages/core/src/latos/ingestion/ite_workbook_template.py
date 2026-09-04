@@ -89,10 +89,33 @@ SAMPLE_COLUMNS: tuple[Column, ...] = (
     Column("IL_B_name", 18, 1, "", "Full name including the anion."),
     Column("mass_IL_A_mg", 13, 1, "mg", "Actual weighed mass, not the target."),
     Column("mass_IL_B_mg", 13, 1, "mg", "Actual weighed mass, not the target."),
-    Column("mass_fraction_x", 14, 0, "-", "DERIVED: mass_A / (mass_A + mass_B)."),
-    Column("molar_mass_A", 13, 2, "g/mol", "Record once; needed for the mixing law."),
-    Column("molar_mass_B", 13, 2, "g/mol", "Record once; needed for the mixing law."),
-    Column("mole_fraction_x", 14, 0, "-", "DERIVED. The physically meaningful axis."),
+    # Composition. `mass_fraction_x` is the campaign axis: it is what the parser
+    # derives and what `campaign_cycle` optimises over. Mole fraction is the
+    # physically better axis — the mixing law weights by ion fractions, not by
+    # mass — but nothing computes it, so it is not marked derived and must not
+    # claim to be. Saying otherwise leaves an operator waiting for a number that
+    # never arrives.
+    Column(
+        "mass_fraction_x",
+        14,
+        0,
+        "-",
+        "DERIVED: mass_A / (mass_A + mass_B). Latos optimises on THIS.",
+    ),
+    Column(
+        "molar_mass_A", 13, 2, "g/mol", "Record once; converts a mass fraction to a mole fraction."
+    ),
+    Column(
+        "molar_mass_B", 13, 2, "g/mol", "Record once; converts a mass fraction to a mole fraction."
+    ),
+    Column(
+        "mole_fraction_x",
+        14,
+        2,
+        "-",
+        "By hand if you want it; Latos does NOT compute this. Physically the better "
+        "axis, but close to mass_fraction_x when the two molar masses are similar.",
+    ),
     Column("fabric_type", 15, 2, "", "Cotton grade / supplier."),
     Column("fabric_lot", 12, 2, "", "Changing lot mid-campaign is a confounder."),
     Column("fabric_areal_density", 15, 2, "g/m2", ""),
@@ -101,7 +124,15 @@ SAMPLE_COLUMNS: tuple[Column, ...] = (
     Column("fabric_width_mm", 14, 2, "mm", ""),
     Column("mass_fabric_dry_mg", 15, 2, "mg", "Weigh before soaking."),
     Column("mass_fabric_soaked_mg", 17, 2, "mg", "Weigh after soaking and blotting."),
-    Column("IL_loading_mg_cm2", 15, 0, "mg/cm2", "DERIVED. A hidden second variable if it drifts."),
+    # Same story as `mole_fraction_x`: worth having, nothing computes it.
+    Column(
+        "IL_loading_mg_cm2",
+        15,
+        2,
+        "mg/cm2",
+        "By hand: (soaked - dry) / area. Latos does NOT compute this. Worth the "
+        "arithmetic — it is a hidden second variable if it drifts across the campaign.",
+    ),
     Column("soak_time_min", 12, 2, "min", ""),
     Column("blotting_method", 16, 2, "", "Be consistent. Free text, but use the same words."),
     Column("glass_slide_size_mm", 16, 2, "mm", ""),
