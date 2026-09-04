@@ -47,6 +47,24 @@ _GAUSS_AREA_PER_HEIGHT_SIGMA = float(np.sqrt(2.0 * np.pi))
 # a few percent of the window is a neutral guess lmfit refines quickly.
 _DEFAULT_SIGMA_RANGE_FRAC = 0.02
 
+# Evaluation ceiling, so a badly-posed fit reports failure in seconds rather
+# than spinning for a quarter of an hour. Measured on a 30-peak XRD pattern:
+# 120 free parameters ran past 40,000 evaluations without converging, and the
+# screen sat on "Fitting..." for fifteen minutes before saying so.
+#
+# lmfit's own default is 2000*(p+1); this is a tenth of that, generous for a
+# well-conditioned fit and merciful for one that will never converge. Small fits
+# keep lmfit's default: they are cheap, and they occasionally need the room.
+_MAX_NFEV_PER_PARAM = 200
+_UNCAPPED_BELOW_PARAMS = 20
+
+
+def _eval_budget(n_varied: int) -> int | None:
+    """Evaluation cap for a fit with `n_varied` free parameters, or None."""
+    if n_varied < _UNCAPPED_BELOW_PARAMS:
+        return None
+    return _MAX_NFEV_PER_PARAM * (n_varied + 1)
+
 
 class FitError(ValueError):
     """Raised when a fit cannot be set up (no peaks, degenerate data)."""
@@ -202,7 +220,8 @@ def fit_spectrum(x: NDArray[np.float64], y: NDArray[np.float64], spec: FitSpec) 
 
     params = _seed_params(model, x, y_corr, spec)
     apply_constraints(params, spec.constraints)
-    result = model.fit(y_corr, params, x=x)
+    budget = _eval_budget(sum(1 for par in params.values() if par.vary))
+    result = model.fit(y_corr, params, x=x, **({} if budget is None else {"max_nfev": budget}))
 
     components: list[FittedComponent] = []
     for i in range(len(spec.peaks)):
