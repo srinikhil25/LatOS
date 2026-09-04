@@ -97,3 +97,85 @@ class TestRanking:
         assert scores == sorted(scores, reverse=True)
         # The exact-substring pair outranks the typo pair.
         assert out[0].score >= out[-1].score
+
+
+class TestWordGuard:
+    """The alphabetic counterpart of the digit guard.
+
+    `normalize` strips separators, so "MX_Ti3C2Tx_Air_50" and
+    "MX_Ti3C2Tx_Ar_50" reach the scorer as a one-character difference in a
+    twenty-character string and score 99%. Merging them would silently collapse
+    two different etching atmospheres into one sample.
+    """
+
+    def test_air_and_argon_are_never_merged(self):
+        out = suggest_merges(
+            _samples(
+                "MX_Ti3C2Tx_Air_50_CAF_ESCA",
+                "MX_Ti3C2Tx_Ar_50_CAF_ESCA",
+                "MX_Ti3C2Tx_N2_50_CAF_ESCA",
+                "MX_Ti3C2Tx_Air_40_CAF_ESCA",
+                "MX_Ti3C2Tx_Ar_40_CAF_ESCA",
+            )
+        )
+        assert out == []
+
+    def test_same_sample_different_technique_still_suggested(self):
+        # ESCA and RS describe how the specimen was measured, not which
+        # specimen it is, so this pair must survive the guard.
+        out = suggest_merges(_samples("MX_Ti3C2Tx_Air_50_CAF_ESCA", "MX_Ti3C2Tx_Air_50_CAF_RS"))
+        assert _pairs(out) == {
+            frozenset({"MX_Ti3C2Tx_Air_50_CAF_ESCA", "MX_Ti3C2Tx_Air_50_CAF_RS"})
+        }
+
+    def test_condition_and_technique_both_differ_is_vetoed(self):
+        out = suggest_merges(
+            _samples(
+                "MX_Ti3C2Tx_Air_50_CAF_ESCA",
+                "MX_Ti3C2Tx_Ar_50_CAF_RS",
+                "MX_Ti3C2Tx_Air_50_CAF_RS",
+                "MX_Ti3C2Tx_Ar_50_CAF_ESCA",
+            )
+        )
+        for pair in _pairs(out):
+            names = " ".join(pair).lower().replace("_", " ").split()
+            assert not ("air" in names and "ar" in names)
+
+    def test_a_typo_is_still_caught(self):
+        # "cskbi" appears once, so it is a misspelling rather than vocabulary
+        # and the pair must still be offered — that is the feature's whole job.
+        out = suggest_merges(_samples("Dr.MN-dhivya-cskbi3", "CSCBI-3"))
+        assert _pairs(out) == {frozenset({"Dr.MN-dhivya-cskbi3", "CSCBI-3"})}
+
+    def test_a_researcher_prefix_is_still_caught(self):
+        # Words added on one side only are not a substitution, so the guard
+        # must not fire however common those words are.
+        out = suggest_merges(
+            _samples("Dr.MN-dhivya-cscbi1", "CSCBI-1", "Dr.MN-dhivya-cscbi2", "CSCBI-2")
+        )
+        assert frozenset({"Dr.MN-dhivya-cscbi1", "CSCBI-1"}) in _pairs(out)
+
+    def test_a_word_seen_once_does_not_veto(self):
+        # Vocabulary needs two sightings. "argonn" is written once, so it reads
+        # as a misspelling of "argon" rather than a second atmosphere, and the
+        # pair is still surfaced for a human to judge.
+        out = suggest_merges(
+            _samples("MX_Ti3C2Tx_Argon_50_CAF_ESCA", "MX_Ti3C2Tx_Argonn_50_CAF_ESCA")
+        )
+        assert _pairs(out) == {
+            frozenset({"MX_Ti3C2Tx_Argon_50_CAF_ESCA", "MX_Ti3C2Tx_Argonn_50_CAF_ESCA"})
+        }
+
+    def test_the_same_typo_repeated_becomes_vocabulary(self):
+        # Deliberate and conservative: once a spelling is used consistently it
+        # is indistinguishable from a real factor level, so the pair stops being
+        # suggested. Failing to merge is undone by hand; a wrong merge is not.
+        out = suggest_merges(
+            _samples(
+                "MX_Ti3C2Tx_Argon_50_CAF_ESCA",
+                "MX_Ti3C2Tx_Argonn_50_CAF_ESCA",
+                "MX_Ti3C2Tx_Argon_40_CAF_ESCA",
+                "MX_Ti3C2Tx_Argonn_40_CAF_ESCA",
+            )
+        )
+        assert out == []

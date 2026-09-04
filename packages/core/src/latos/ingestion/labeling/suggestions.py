@@ -52,6 +52,49 @@ _MIN_ANCHOR_LEN = 2
 
 _DIGIT_RUN_RE = re.compile(r"\d+")
 
+# Word guard (below). `normalize` strips every separator, so
+# "MX_Ti3C2Tx_Air_50" and "MX_Ti3C2Tx_Ar_50" arrive as
+# "mxti3c2txair50" / "mxti3c2txar50" — a one-character difference in a
+# twenty-character string, which scores 99%. The words have to be read off the
+# ORIGINAL name, before normalization destroys them.
+_WORD_RE = re.compile(r"[A-Za-z]+")
+
+# A word that names a measurement TECHNIQUE describes how a specimen was looked
+# at, not which specimen it is, so a pair differing only in these is still the
+# same sample and stays mergeable. Includes the lab's own abbreviations, which
+# the `Technique` enum does not carry: ESCA for XPS, RS for Raman, EDX for EDS.
+_TECHNIQUE_WORDS = frozenset(
+    {
+        "xrd",
+        "xps",
+        "esca",
+        "raman",
+        "rs",
+        "eds",
+        "edx",
+        "tem",
+        "sem",
+        "stem",
+        "hall",
+        "ppms",
+        "uv",
+        "drs",
+        "image",
+        "images",
+        "map",
+        "mapping",
+        "deg",
+        "spectrum",
+        "spectra",
+        "scan",
+    }
+)
+
+# How many distinct samples a word must appear in before it counts as this
+# project's controlled vocabulary rather than a one-off typo. Two is enough:
+# a misspelling is written once, a factor level is written every time it is used.
+_VOCAB_MIN_SAMPLES = 2
+
 
 class SampleLike(Protocol):
     """The shape `suggest_merges` needs from a sample (id + display name).
@@ -91,6 +134,45 @@ def _digit_runs(s: str) -> tuple[str, ...]:
     return tuple(_DIGIT_RUN_RE.findall(s))
 
 
+def _words(name: str) -> frozenset[str]:
+    """Lower-cased alphabetic words of an ORIGINAL (un-normalized) name.
+
+    ``"MX_Ti3C2Tx_Air_50_CAF_ESCA"`` → ``{mx, ti, c, tx, air, caf, esca}``.
+    """
+    return frozenset(w.lower() for w in _WORD_RE.findall(name))
+
+
+def _substituted_words(
+    a: str, b: str, vocabulary: dict[str, int]
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Non-technique words each name has that the other lacks.
+
+    Both sides non-empty means a word was SUBSTITUTED rather than merely added,
+    which is the difference between "Air 50" vs "Ar 50" (two conditions) and
+    "Dr.MN-dhivya-cscbi1" vs "CSCBI-1" (a prefix on one side only).
+    """
+    wa, wb = _words(a), _words(b)
+    return (
+        frozenset(w for w in wa - wb if w not in _TECHNIQUE_WORDS),
+        frozenset(w for w in wb - wa if w not in _TECHNIQUE_WORDS),
+    )
+
+
+def _word_veto(a: str, b: str, vocabulary: dict[str, int]) -> bool:
+    """True when the pair differs by an established word on BOTH sides.
+
+    The alphabetic counterpart of the digit guard. A word appearing across
+    several samples is this project's vocabulary — a gas, a substrate, a
+    condition — and swapping one for another names a different specimen. A word
+    appearing once is a typo, which is exactly what a suggestion should catch,
+    so those pairs are still offered.
+    """
+    only_a, only_b = _substituted_words(a, b, vocabulary)
+    if not (only_a and only_b):
+        return False  # pure addition (a prefix or a label), not a substitution
+    return all(vocabulary.get(w, 0) >= _VOCAB_MIN_SAMPLES for w in only_a | only_b)
+
+
 def _pair_score(na: str, nb: str) -> float:
     """Combined similarity in 0–100 for two already-normalized names."""
     return max(
@@ -117,6 +199,14 @@ def suggest_merges(samples: Iterable[SampleLike]) -> list[MergeSuggestion]:
     items = [(s.id, s.canonical_name, normalize(s.canonical_name)) for s in samples]
     out: list[MergeSuggestion] = []
 
+    # How many samples each word appears in, which is what separates this
+    # project's vocabulary from a one-off misspelling. Built once over the
+    # original names, since `normalize` removes the separators words need.
+    vocabulary: dict[str, int] = {}
+    for _, name, _ in items:
+        for word in _words(name):
+            vocabulary[word] = vocabulary.get(word, 0) + 1
+
     for i in range(len(items)):
         ai, aname, na = items[i]
         for j in range(i + 1, len(items)):
@@ -125,6 +215,8 @@ def suggest_merges(samples: Iterable[SampleLike]) -> list[MergeSuggestion]:
                 continue  # identical-after-cleaning is already merged at ingestion
             if _digit_runs(na) != _digit_runs(nb):
                 continue  # digit mismatch vetoes — doping/series discriminator
+            if _word_veto(aname, bname, vocabulary):
+                continue  # a condition word was substituted — a different sample
 
             # Length guard: short names match too much to anchor a suggestion
             # — UNLESS one fully contains the other (e.g. "CS" ⊂ "CS Pure"),
