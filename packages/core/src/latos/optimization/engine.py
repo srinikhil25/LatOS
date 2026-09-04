@@ -132,6 +132,23 @@ _N_RESTARTS = 8  # marginal-likelihood restarts when the length-scale is fitted
 # behaviour has to stay reproducible while it is being tested.
 _KERNELS = ("rbf", "matern52")
 _MATERN_NU = 2.5
+# The shipped default. Every entry point and helper reads this one name, so the
+# 1-D and N-D paths cannot drift apart.
+#
+# Kept at RBF on 2026-09-02, against the field's near-universal preference for
+# Matern 5/2, because the in-house harness measured the opposite (8 seeds per
+# arm, simple regret, median / worst):
+#
+#     branin      rbf 0.0708 / 0.3509    matern52 0.1665 / 1.1385
+#     hartmann3   rbf 0.0079 / 0.7836    matern52 0.0028 / 0.7739
+#
+# Matern wins 7/8 seeds on Hartmann-3 but only 2/8 on Branin, where it triples
+# the worst case. Rohr's warning applies directly - the floor for deleterious
+# effects is deeper than the ceiling for gain - so a 3x worse tail is not paid
+# for by a median gain on one benchmark of two. The theory argument for Matern
+# (Wang/Tuo/Wu robustness under misspecification, Srinivas' nu > 2) is noted and
+# not acted on; AX4 settles it across process-window shapes.
+_DEFAULT_KERNEL = "rbf"
 
 # What to recommend when the improvement signal is exhausted but the data is
 # still exploratory (the branch near the end of `optimize`):
@@ -142,6 +159,25 @@ _MATERN_NU = 2.5
 # convergence stays gated on the reliability tier either way, which is the part
 # three independent stopping papers support.
 _EXPLORE_POLICIES = ("max_std", "ei", "ucb")
+# Kept at "max_std" on 2026-09-02, after a measurement that REFUTED the case for
+# changing it. Four reviewed papers (Borg, Rohr, Srinivas, Shields) measure pure
+# uncertainty sampling as the weakest available policy, and that was read here as
+# an argument to switch the fallback to "ei". Measured on Forrester 1-D from
+# n_initial = 4 - the tier this branch actually fires in, and it fired on 96/96
+# rounds - with 12 seeds, simple regret, median / worst:
+#
+#     max_std  0.0220 / 0.1735
+#     ei       0.0559 / 6.0212
+#     ucb      0.0938 / 6.0212
+#
+# A worst case of 6.02 on a function whose range is ~6.02 means those campaigns
+# never left the flat region. The papers measure pure exploration as a WHOLE
+# STRATEGY over long campaigns; here it is a tie-break that fires only when EI is
+# already flat and the data is still exploratory, and at n = 4-12 in one
+# dimension "go to the biggest unmeasured gap" is simply the right move. The
+# literature result does not transfer to this branch, and the switch would have
+# been a regression with a 35x worse tail.
+_DEFAULT_EXPLORE_POLICY = "max_std"
 _UCB_LAMBDA = 2.0
 
 # X is normalized internally so the search span maps to this many units.
@@ -800,11 +836,22 @@ def _noise_std(
     return rel_noise * float(np.mean(np.abs(y_work)))
 
 
+def _kernel_label(kernel: str, *, ard: bool = False) -> str:
+    """How a fitted kernel is named in a result.
+
+    One helper for both entry points: `optimize_nd` used to hardcode "RBF" here,
+    so flipping the default would have made the result describe a model it was
+    not using.
+    """
+    family = "Matern(nu=5/2)" if kernel == "matern52" else "RBF"
+    return f"ConstantKernel * {family}{'(ARD)' if ard else ''}"
+
+
 def _stationary(
     kernel: str,
     length_scale: float | list[float],
     bounds: tuple[float, float] | str,
-):
+) -> Any:
     """The stationary factor of the kernel — RBF, or Matern 5/2.
 
     Both take the same `length_scale` / `length_scale_bounds` contract, so
@@ -825,7 +872,7 @@ def _build_gp(
     noise_scale: np.ndarray | None = None,
     n_dims: int = 1,
     ls_bounds: tuple[float, float] = _LS_BOUNDS,
-    kernel: str = "rbf",
+    kernel: str = _DEFAULT_KERNEL,
 ) -> GaussianProcessRegressor:
     """A GP with a smooth stationary trend and a realistic measurement-noise floor.
 
@@ -1062,7 +1109,7 @@ def _fit_surrogate(
     noise_scale: np.ndarray | None,
     n_dims: int = 1,
     ls_bounds: tuple[float, float] = _LS_BOUNDS,
-    kernel: str = "rbf",
+    kernel: str = _DEFAULT_KERNEL,
 ) -> tuple[_Surrogate, np.ndarray]:
     """Fit the GP — on residuals when a physical prior is supplied.
 
@@ -1253,7 +1300,7 @@ def _assess_reliability(
     noise_std: float,
     seed: int,
     ls_bounds: tuple[float, float] = _LS_BOUNDS,
-    kernel: str = "rbf",
+    kernel: str = _DEFAULT_KERNEL,
 ) -> ReliabilityReport:
     """Count-tier + leave-one-out reliability of the model's intervals.
 
@@ -1420,8 +1467,8 @@ def optimize(
     unreliable: np.ndarray | None = None,
     epsilon: float | None = None,
     delta: float = _DEFAULT_DELTA,
-    kernel: str = "rbf",
-    explore_policy: str = "max_std",
+    kernel: str = _DEFAULT_KERNEL,
+    explore_policy: str = _DEFAULT_EXPLORE_POLICY,
 ) -> OptimizationResult:
     """Run one round of Bayesian optimization over a 1-D parameter.
 
@@ -1634,7 +1681,7 @@ def optimize(
         objective_aggregation=objective_aggregation,
         input_name=input_name,
         bounds=(float(lo), float(hi)),
-        kernel=f"ConstantKernel * {'Matern(nu=5/2)' if kernel == 'matern52' else 'RBF'}",
+        kernel=_kernel_label(kernel),
         x_scale=float(x_scale),
         length_scale=(
             float(length_scale) if length_scale is not None else _fitted_length_scale(gp)
@@ -1767,6 +1814,94 @@ _N_MATRIX_DIMS = 2  # observations arrive as a 2-D (n, d) matrix
 _SURFACE_SIZE = 48
 
 
+# ---------------------------------------------------------------------------
+# Categorical axes
+# ---------------------------------------------------------------------------
+# A synthesis parameter reaches this engine as a float and nothing else:
+# `SynthesisParams` is `dict[str, dict[str, float]]` all the way down. So a knob
+# with no natural ordering — etching atmosphere Air / Ar / N2 — can only be
+# entered by encoding it, and 0/1/2 is what people write. The GP then treats it
+# as any other number, interpolates, and recommends "gas 0.55": a recipe nobody
+# can make, reported with the same confidence as a real one.
+#
+# Floats carry no intent, so the guard has two halves that do different jobs.
+# `axis_kinds` lets a caller SAY an axis is categorical, and that is refused
+# outright. `_encoded_axis_warning` catches the undeclared case — the one that
+# actually happened — and says so on the result. Detection is only ever a
+# suspicion, because "anneal 1, 2, 3 h" has exactly the shape of "gas 0, 1, 2",
+# so it warns and never blocks. Declaring blocks; guessing does not.
+AXIS_CONTINUOUS = "continuous"
+AXIS_CATEGORICAL = "categorical"
+_AXIS_KINDS = (AXIS_CONTINUOUS, AXIS_CATEGORICAL)
+
+# Levels few enough, whole, and one apart: the shape of an encoded category.
+# One level is a constant, not an axis; the cap keeps a swept integer variable
+# (0..9 percent, say) from being mistaken for a handful of names.
+_ENCODED_MIN_LEVELS = 2
+_ENCODED_MAX_LEVELS = 6
+_ENCODED_LEVEL_STEP = 1.0
+# How far off a level the recommendation must land before the suspicion is
+# worth raising, as a fraction of the level spacing (which the test above pins
+# at one). On a genuinely continuous axis a value between two measured ones is
+# the ordinary answer and there is nothing to say; the warning fires only when
+# acting on it would mean synthesising something between two categories.
+_LEVEL_TOL_FRAC = 0.05
+
+
+def _validate_axis_kinds(axis_kinds: Sequence[str] | None, names: tuple[str, ...]) -> None:
+    """Reject any axis the caller has declared categorical, and unknown kinds.
+
+    Raises rather than warns: the caller has stated the axis has no ordering, so
+    every value this engine could return between two levels is meaningless, and
+    returning one anyway is how a nonsense recipe acquires a confidence interval.
+    """
+    if axis_kinds is None:
+        return
+    kinds = tuple(str(k) for k in axis_kinds)
+    if len(kinds) != len(names):
+        raise OptimizationError(f"axis_kinds has {len(kinds)} entries for {len(names)} axes")
+    unknown = sorted({k for k in kinds if k not in _AXIS_KINDS})
+    if unknown:
+        raise OptimizationError(f"axis_kinds must each be one of {_AXIS_KINDS}; got {unknown}")
+    categorical = [n for n, k in zip(names, kinds, strict=True) if k == AXIS_CATEGORICAL]
+    if categorical:
+        listed = ", ".join(repr(n) for n in categorical)
+        raise OptimizationError(
+            f"Cannot optimize over categorical axes ({listed}): a Gaussian process "
+            f"interpolates between numbers, so it would recommend a value between "
+            f"two levels, which is not a recipe. Run one campaign per level and "
+            f"compare them, or hold the axis fixed and optimize the continuous "
+            f"knobs within it."
+        )
+
+
+def _encoded_axis_warning(col: np.ndarray, rec: float, name: str) -> str | None:
+    """Warn when `col` looks like an encoded category and `rec` falls off-level.
+
+    Both halves are needed. A column of a few unit-spaced whole numbers is
+    *suspicious*, not wrong. What makes it actionable is the recommendation
+    landing between those values, because that is the number the user would
+    otherwise go to the bench and try to make.
+    """
+    levels = np.unique(col)
+    if not _ENCODED_MIN_LEVELS <= levels.size <= _ENCODED_MAX_LEVELS:
+        return None
+    if not np.all(levels == np.round(levels)):
+        return None
+    if not np.allclose(np.diff(levels), _ENCODED_LEVEL_STEP):
+        return None
+    if float(np.min(np.abs(levels - rec))) <= _LEVEL_TOL_FRAC * _ENCODED_LEVEL_STEP:
+        return None  # landed on a level; acting on it changes nothing
+    shown = ", ".join(f"{v:g}" for v in levels)
+    return (
+        f"Axis {name!r} takes only the whole values {shown}, which is what an "
+        f"encoded category (a gas, a substrate, a precursor) looks like — and its "
+        f"recommended value, {rec:g}, falls between two of them. If those numbers "
+        f"stand for names, this axis cannot be optimized: run one campaign per "
+        f"level instead. If they are real quantities, nothing is wrong here."
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RecommendationND:
     """The next experiment to run, in d dimensions.
@@ -1883,6 +2018,12 @@ class OptimizationResultND:
     n_unreliable: int = 0
     noise_measured: bool = False
     surface: SurfaceND | None = None
+    # Axes whose observed values look like an encoded category, when the
+    # recommendation for them landed between two levels. Advisory: the engine
+    # cannot tell 'gas 0, 1, 2' from 'anneal 1, 2, 3 h' — see
+    # `_encoded_axis_warning`. An axis the caller DECLARES categorical via
+    # `axis_kinds` never gets here; it raises instead.
+    axis_warnings: tuple[str, ...] = ()
 
 
 def _posterior_surface(
@@ -2113,6 +2254,7 @@ def optimize_nd(
     *,
     bounds: Sequence[tuple[float, float]],
     input_names: Sequence[str],
+    axis_kinds: Sequence[str] | None = None,
     target_name: str,
     direction: str = "maximize",
     y_transform: str = _IDENTITY,
@@ -2136,6 +2278,7 @@ def optimize_nd(
     unreliable: np.ndarray | None = None,
     epsilon: float | None = None,
     delta: float = _DEFAULT_DELTA,
+    kernel: str = _DEFAULT_KERNEL,
 ) -> OptimizationResultND:
     """Run one round of Bayesian optimization over d parameters.
 
@@ -2152,7 +2295,11 @@ def optimize_nd(
         y: Observed property values, shape (n,).
         bounds: One (low, high) pair per input axis.
         input_names: One label per axis; length fixes d.
-        input_names: One label per axis; length fixes d.
+        axis_kinds: Optional "continuous" / "categorical" per axis. Declaring
+            an axis categorical raises: a GP interpolates, so it would answer
+            between two levels. Left None (the default) the engine assumes
+            every axis is continuous and reports a suspicion on
+            `axis_warnings` instead — it cannot read intent out of floats.
         target_name: Label of the property being optimized.
         direction: "maximize" (default) or "minimize".
         y_transform: "identity" (default) or "log", as in `optimize()`.
@@ -2223,15 +2370,19 @@ def optimize_nd(
             points are down-weighted rather than dropped.
         epsilon: Tolerance for the probabilistic regret bound.
         delta: Risk level for that bound.
+        kernel: Stationary kernel family, "rbf" or "matern52". Defaults to
+            `_DEFAULT_KERNEL`; see the measurement recorded beside it.
 
     Returns:
         An `OptimizationResultND`.
 
     Raises:
         OptimizationError: on shape mismatches, too few points for the
-            dimension, or a degenerate bound range.
+            dimension, a degenerate bound range, or an axis declared
+            categorical in `axis_kinds`.
     """
     x_obs, y, box, names = _prepare_nd_inputs(x, y, bounds, input_names, direction)
+    _validate_axis_kinds(axis_kinds, names)
     n, d = x_obs.shape
 
     # Per-axis normalization: each search span maps to _SPAN_UNITS, so one set
@@ -2274,6 +2425,7 @@ def optimize_nd(
         noise_scale=noise_scale,
         n_dims=1 if isotropic else d,
         ls_bounds=length_scale_bounds,
+        kernel=kernel,
     )
 
     cand = _sobol_candidates(box, n_candidates, seed)
@@ -2313,6 +2465,7 @@ def optimize_nd(
             noise_std=noise_std,
             seed=seed,
             ls_bounds=length_scale_bounds,
+            kernel=kernel,
         )
 
     # Same reliability-aware rule as the 1-D path: a flat acquisition over
@@ -2367,6 +2520,12 @@ def optimize_nd(
         y_max=y_max,
     )
 
+    axis_warnings = tuple(
+        warning
+        for i, axis_name in enumerate(names)
+        if (warning := _encoded_axis_warning(x_obs[:, i], recommendation.x[i], axis_name))
+    )
+
     config = BoConfigND(
         objective=target_name,
         direction=direction,
@@ -2374,7 +2533,7 @@ def optimize_nd(
         objective_aggregation=objective_aggregation,
         input_names=names,
         bounds=tuple((float(a), float(b)) for a, b in box),
-        kernel=("ConstantKernel * RBF(ARD)" if d > 1 and not isotropic else "ConstantKernel * RBF"),
+        kernel=_kernel_label(kernel, ard=d > 1 and not isotropic),
         acquisition=acquisition,
         n_dims=d,
         x_scales=tuple(float(v) for v in x_scales),
@@ -2424,6 +2583,7 @@ def optimize_nd(
         n_unreliable=noise.n_unreliable,
         noise_measured=noise.measured,
         surface=surface,
+        axis_warnings=axis_warnings,
     )
 
 

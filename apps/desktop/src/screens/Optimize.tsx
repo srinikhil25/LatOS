@@ -629,6 +629,19 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                     have {humanize(inputVar)} and the property, but no {humanize(secondVar)} value.
                   </p>
                 )}
+                {/* An axis whose values look like names rather than quantities.
+                    Shown rather than blocked: the engine cannot tell a gas
+                    written 0/1/2 from an anneal at 1, 2 and 3 hours, and only
+                    the person who entered the number knows which it is. */}
+                {(ndResult.axis_warnings ?? []).map((warning) => (
+                  <p
+                    key={warning}
+                    className="mt-1.5 text-xs text-severity-warning"
+                    data-selectable
+                  >
+                    {warning}
+                  </p>
+                ))}
               </div>
 
               <div className="rounded-lg border border-edge bg-surface p-3">
