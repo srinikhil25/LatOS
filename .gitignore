@@ -163,3 +163,9 @@ vision.md
 # Downloaded papers for the methodology review. Copyrighted third-party
 # PDFs; the notes derived from them live in docs/, which is also local.
 literature/
+
+# ─── Origin ──────────────────────────────────────────────────────────
+# Origin projects and their exports, one project per figure. Regenerated
+# by the build script against a licensed Origin install; the underlying
+# measurements live in data/MXene-data/.
+origin/
