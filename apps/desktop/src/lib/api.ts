@@ -637,6 +637,10 @@ export interface OptimizeNdResult {
   n_unreliable: number;
   n_distrusted: number;
   noise_measured: boolean;
+  // Axes whose values look like an encoded category (a gas written 0/1/2) where
+  // the recommendation landed between two levels. Advisory: the engine sees only
+  // floats, so it cannot tell those from a quantity measured at 0, 1 and 2.
+  axis_warnings: string[];
 }
 
 export interface OptimizeNdOptions extends OptimizeOptions {

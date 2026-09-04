@@ -1041,6 +1041,7 @@ def _register_optimization_data_routes(app: FastAPI, state: ServerState) -> None
             n_unreliable=res.n_unreliable,
             n_distrusted=asm.n_distrusted,
             noise_measured=res.noise_measured,
+            axis_warnings=list(res.axis_warnings),
         )
 
 

@@ -414,6 +414,10 @@ class OptimizeNdResult(BaseModel):
     n_unreliable: int = 0
     n_distrusted: int = 0
     noise_measured: bool = False
+    # Axes whose values look like an encoded category (a gas written as 0/1/2)
+    # where the recommendation landed between two levels. Advisory, not fatal:
+    # the engine cannot tell those from a real quantity measured at 0, 1 and 2.
+    axis_warnings: list[str] = []
 
 
 class FreezeResult(BaseModel):

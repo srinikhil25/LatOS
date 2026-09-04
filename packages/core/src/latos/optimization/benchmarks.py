@@ -134,6 +134,7 @@ def run_campaign(
     n_candidates: int = 1024,
     length_scale_bounds: tuple[float, float] | None = None,
     polish: bool = True,
+    kernel: str | None = None,
 ) -> CampaignResult:
     """Simulate a closed loop and report how close it got.
 
@@ -158,6 +159,9 @@ def run_campaign(
             function — see the table beside `_LS_BOUNDS` in `engine.py`.
         polish: refine each proposal continuously off the Sobol grid. Set
             False to measure what the refinement is actually worth.
+        kernel: force a kernel family ("rbf" or "matern52") instead of the
+            engine default. Passed only when given, so a silent caller
+            exercises whatever the engine actually ships.
 
     Returns:
         A `CampaignResult`.
@@ -181,6 +185,10 @@ def run_campaign(
     ls_kwargs: dict[str, Any] = (
         {} if length_scale_bounds is None else {"length_scale_bounds": length_scale_bounds}
     )
+    # Same reasoning for the kernel: pass it only when asked, so the engine's
+    # own default is what gets exercised when the caller stays silent.
+    if kernel is not None:
+        ls_kwargs["kernel"] = kernel
 
     for _ in range(n_rounds):
         if strategy == "random":
