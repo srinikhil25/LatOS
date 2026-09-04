@@ -787,3 +787,377 @@ objectives. They prove the code does what was intended. They prove nothing about
 ionic liquids. Stage 0 of the experiment plan (two samples certifying the
 protocol) is what turns them into measurements, and Phase 2 of the development
 plan is deliberately deferred until then.
+
+---
+
+## 2026-09-02 — Two default flips proposed, both refuted by measurement
+
+The August literature review recommended two one-line changes: RBF → Matérn 5/2,
+and the exploration fallback `max_std` → `ei`. Both options had shipped in
+`eab3d92` with **no tests**, which is why their defaults had never been examined.
+Both were measured before flipping. **Both lost, and neither default moved.**
+
+### Kernel — RBF stays
+
+Branin and Hartmann-3, 8 seeds per arm, simple regret (median / worst):
+
+| benchmark | rbf | matern52 | seeds won by matern52 |
+|---|---|---|---|
+| branin | 0.0708 / **0.3509** | 0.1665 / **1.1385** | 2 / 8 |
+| hartmann3 | 0.0079 / 0.7836 | **0.0028** / 0.7739 | 7 / 8 |
+
+Matérn wins clearly on Hartmann-3 and loses badly on Branin, where it **triples
+the worst case**. Rohr's warning is the deciding argument: the floor for
+deleterious effects is deeper than the ceiling for gain, so a 3× worse tail is
+not bought by a median gain on one benchmark of two. AX4 settles this properly
+across process-window shapes.
+
+### Exploration fallback — `max_std` stays
+
+The literature case looked stronger here: four papers (Borg, Rohr, Srinivas,
+Shields) measure pure uncertainty sampling as the weakest available policy. It
+does not transfer. Measured on Forrester 1-D from `n_initial = 4` — the tier the
+branch actually fires in, and it fired on **96/96** rounds — 12 seeds:
+
+| policy | median | worst | seeds beating max_std |
+|---|---|---|---|
+| max_std | **0.0220** | **0.1735** | — |
+| ei | 0.0559 | 6.0212 | 5 / 12 |
+| ucb | 0.0938 | 6.0212 | 3 / 12 |
+
+A worst case of 6.02 on a function whose range is ~6.02 means those campaigns
+never left the flat region. **The papers measure pure exploration as a whole
+strategy over long campaigns; here it is a tie-break that fires only when EI is
+already flat and the data is still exploratory.** At n = 4–12 in one dimension,
+"go to the biggest unmeasured gap" is simply correct, and the switch would have
+been a regression with a 35× worse tail.
+
+### A real bug found on the way
+
+`optimize_nd` accepted no `kernel` argument and **hardcoded `"RBF"` into the
+reported config** while its surrogate used whatever `_fit_surrogate` defaulted
+to. Flipping the helper default would therefore have changed N-D behaviour
+silently while every result still claimed RBF. Fixed: `kernel` is threaded
+through `optimize_nd`, both entry points name their kernel through one
+`_kernel_label` helper, and both defaults now come from single named constants
+(`_DEFAULT_KERNEL`, `_DEFAULT_EXPLORE_POLICY`) so the 1-D and N-D paths cannot
+drift apart.
+
+### Numbers
+
+- 18 new tests in `test_engine_kernel_policy.py` — the first coverage either
+  option has had
+- Two defaults pinned to their measurements, so a future change has to argue
+  with the evidence rather than with a comment
+- `run_campaign(kernel=...)` added, so the kernel arm is reproducible from the
+  harness
+
+### Retry: `detect_peaks` now returns widths; clustering still not shipped
+
+`detect_peaks_detailed` and `measure_widths` were added, and they fix the
+prerequisite properly. The trick was a **bounded prominence window**: scipy's
+default looks outward until the signal rises again, so on this pattern a 0.2°
+reflection standing on the fabric's amorphous hump took its prominence from the
+far side of the hump. Confining it with `wlen` gives real widths —
+**median FWHM 0.203°, range 0.060–0.880°** across the 29 peaks.
+
+With those widths, clustering finally groups correctly: **25 clusters (linear
+background) / 27 (ALS)**, fitting in 7.8 s and 1.2 s. Two rounds of fixing
+followed, both worth recording:
+
+- unbounded σ let every peak grow to fill its window — fitted widths came back
+  4.6× the measured value, and the model's variance exceeded the data's
+- bounding σ to the measured width ±4× fixed that (ALS R² 0.29 → 0.73)
+
+**It is still not shipped, and the reason is the finding.** On the linear
+background the clustered fit reaches R² 0.11 where the single joint fit reports
+0.9895 — because *the joint fit was using its peaks as a background*. A third of
+those 30 peaks sit on a hump spanning 3–25° that a straight line cannot model,
+and freeing 120 coupled parameters let them absorb it. Clustering forbids that,
+so it exposes the misfit instead of hiding it.
+
+That makes the correct order plain: **fix the background first, then cluster.**
+Clustering on an ALS background already converges in 1.2 s. Shipping it while a
+linear background is still selectable would turn a flattering number into an
+honest bad one with no warning, which is the wrong trade to make silently.
+
+Shipped from this round: `PeakCandidate`, `detect_peaks_detailed`,
+`measure_widths`, 6 new tests (44 passing in the fitting suite), and the
+evaluation cap. `detect_peaks` keeps its old signature as a thin wrapper.
+
+---
+
+## 2026-09-04 — Categorical-axis guard on `optimize_nd`
+
+First step of the "borrow" plan from the product definition. Not a borrow
+itself: a correctness fix that stands whether or not Ax ever lands behind the
+optimizer, and one that has to exist before a categorical-capable backend can
+be wired in honestly.
+
+### The defect
+
+`SynthesisParams` is `dict[str, dict[str, float]]`, so a knob with no ordering
+— etching atmosphere Air / Ar / N₂ — can only enter Latos encoded as 0/1/2. The
+GP treats it as any other number. In the MXene TEM replay this produced a
+recommendation of **gas index 0.55**: a recipe nobody can make, returned with a
+predictive interval like a real one. Nothing anywhere in the stack objected.
+
+`grep -n categorical packages/core/src/latos/optimization/engine.py` returned
+nothing before this change — 111 KB of engine with no notion that an axis might
+not be interpolable.
+
+### The guard is two-sided, because floats carry no intent
+
+The engine cannot recover the caller's meaning from a column of numbers. So:
+
+- **`axis_kinds=[..., "categorical"]` raises `OptimizationError`.** Intent is
+  known, so refusing is right, and the message says what to do instead (one
+  campaign per level, or hold it fixed and optimize within it).
+- **An undeclared axis that *looks* encoded warns** on a new
+  `OptimizationResultND.axis_warnings`, and the run proceeds.
+
+The warning fires on two conditions together, not one: the column is 2–6 whole
+values spaced exactly one apart, **and** the recommendation for that axis landed
+off-level. The second condition is what makes it actionable — it names the exact
+number the user would otherwise have taken to the bench.
+
+### Measured behaviour of the detector
+
+| column | recommendation | verdict |
+|---|---|---|
+| gas 0/1/2 | 1.499 | **warn** |
+| gas 0/1/2 | 1.02 | quiet (on a level) |
+| temp 40/50/60 | 52.4 | quiet (spacing ≠ 1) |
+| continuous, 7 distinct values | 3.9 | quiet |
+| 0…6 | 3.5 | quiet (above level cap) |
+| binary 0/1 | 0.5 | **warn** |
+| anneal 1/2/3 h | 2.4 | **warn — known false positive** |
+
+The last row is the reason the undeclared path warns instead of raising. An
+anneal at 1, 2 and 3 hours is indistinguishable from three named gases, and a
+wrongly-blocked campaign costs more than a notice a researcher can read past.
+The warning text says so in its last sentence, and a test pins that sentence.
+
+### Shipped
+
+- `AXIS_CONTINUOUS` / `AXIS_CATEGORICAL`, `_validate_axis_kinds`,
+  `_encoded_axis_warning` in `optimization/engine.py`
+- `optimize_nd(axis_kinds=...)`; `OptimizationResultND.axis_warnings`
+- `OptimizeNdResult.axis_warnings` through `/optimize/run-nd`, rendered on the
+  Optimize screen next to the dropped-sample notice
+- `tests/unit/optimization/test_engine_categorical.py` — 18 tests
+- Incidental: removed a duplicated `input_names:` line in the `optimize_nd`
+  docstring
+
+### Not done here
+
+The 1-D `optimize()` has the identical hole — a one-variable run on "gas index"
+is just as broken — and is untouched. It is the route `/optimize/freeze`
+records, so widening it touches pre-registration serialisation and deserves its
+own change.
+
+---
+
+## 2026-09-04 — Latos run against the raw MXene folders; JPEG parser shipped
+
+### The benchmark
+
+`data/MXene-data/DATA_NOTES.md` was written by working through
+`0.Final Paper data/` by hand: the exclusions, the naming decisions, the
+coverage table, four open questions. That document is the shape of output Latos
+claims to produce, so the test is how much of it the tool derives unaided.
+
+### First run — 11% of the data was read
+
+| | |
+|---|---|
+| files crawled | 860 |
+| parsed | **94 (11%)** |
+| unclassified | 766 |
+
+Every one of the 609 TEM `.jpg` frames was claimed by **zero** parsers:
+`microscopy_tif.py` handles `.tif`/`.tiff` only. Also unread: 34 `.raw`, 19
+`.bmp`, 14 `.wdf` (Renishaw native), 12 `.map`, 3 `.brml` (Bruker native).
+
+Latos owns a working info-bar decoder in `analysis/microscopy/calibration.py`
+— `decode_field_of_view` already refuses the impossible "2 m" field of view
+these exports write. It had nothing to decode, because ingestion dropped the
+files first. The gap was never in the analysis; it was one layer earlier.
+
+### Shipped: `MicroscopyJpegParser`
+
+Metadata-only, same contract as the TIFF parser — 609 frames is 1.3 GB and the
+question worth answering at ingest is answerable from the image header.
+
+That question is whether the frame carries an **info bar**. These exports write
+a square image area with the bar in extra rows beneath it, so `height > width`
+means a bar — exactly what `split_info_bar` tests, and it needs the dimensions,
+not the pixels. A square frame has no recoverable scale and is flagged WARNING
+at ingest. Field-of-view decoding stays in the analysis layer where the glyph
+templates live.
+
+### Also fixed: technique suffixes in folder names
+
+The first run with the parser returned **609 frames across 13 samples labelled
+SEM**. `_refine_technique_from_folders` matched only a folder named exactly
+`TEM`; this tree files the modality as a suffix — `1.TEM/.../MX_Ti3C2Tx_Air_40_TEM/`.
+
+A wrong modality is worse than a missing one: nothing downstream has a reason
+to doubt it. `_folder_technique` now tries the whole name first, then splits on
+separators and matches tokens **whole** — so `system` does not become SEM and
+`item` does not become TEM.
+
+### Second run — 82%
+
+| | before | after |
+|---|---|---|
+| parsed | 94 | **703** |
+| unclassified | 766 | 157 |
+| TEM samples | 0 (13 mislabelled SEM) | **13** |
+
+All nine MXene conditions now appear as TEM — Air/Ar/N₂ × 30/40/50 °C —
+matching the DATA_NOTES coverage line "TEM covers all 9 conditions".
+
+### Correction to the first assessment
+
+I reported the first run as flagging **zero** anomalies. That was wrong: the
+harness printed `flag_anomalies()` (sample-*name* anomalies) and never printed
+measurement validation issues. Latos was already raising, unprompted:
+
+- `4x` **"Sample geometry was left at the 1/1/1 default, so resistivity and
+  power factor are wrong"** — the central PPMS finding in DATA_NOTES
+- `2x` **"Lorenz ratio L/L0 has median magnitude 8.86e-04 / 1.80e-03, far from
+  the expected ~1"** — the κ channel failure, found independently
+- `2x` Raman cosmic-ray spikes at 2394 and 802 cm⁻¹
+- `8x` XPS regions acquired with differing sweep counts
+
+So the tool reconstructs more of DATA_NOTES than the first report said. The
+PPMS half of that document is largely derivable today.
+
+### Still not reconstructed
+
+- **31 of 609 frames flagged as having no info bar**; DATA_NOTES says 33, all
+  Ti3AlC2 MAX. Latos attributes 30 to Ti3AlC2 and 1 to Mo2Ti2AlC3. The counts do
+  not reconcile, and 19 unparsed `.bmp` files sit in those same MAX folders — a
+  plausible but **unverified** explanation. Do not claim a match until a BMP
+  parser exists and the numbers are compared again.
+- **`old/` is still ingested** — 41 files, now as their own TEM sample named
+  `old`. Nothing in Latos can express a quarantined folder.
+- **The `(3-15)Deg` / `(3-90)Deg` pairs are still two samples each.** The digit
+  guard vetoes the merge (15 vs 90), so XRD reports 17 samples for 6 conditions.
+- **PPMS sample ambiguity is hidden, not surfaced**: all three gases collapse
+  into one sample `MX_Ti3C2Tx_Air_N2_Ar_50_PPMS`, taken from the folder name.
+  DATA_NOTES' open question #1 is answered "all of them", confidently.
+- Naming decision (`nogas` = `Air`), MAX phase identity from diffraction, and
+  the scan-range choice: all still absent.
+
+### Also learned
+
+The parse cache is keyed on sha256 + parser_version, so a technique decided at
+first ingest **survives a code change that should have altered it**. The second
+run returned SEM until it was pointed at a fresh project. Re-ingesting an
+existing project does not re-derive folder-based refinement.
+
+### Shipped
+
+- `ingestion/parsers/microscopy_jpeg.py`, registered in `default_registry()`
+- `_folder_technique()` in `ingestion/orchestrator.py`
+- `tests/unit/ingestion/parsers/test_microscopy_jpeg.py` — 17 tests
+- `TestTechniqueSuffixInFolderName` in `test_orchestrator.py` — 10 cases
+- `microscopy-jpeg` added to the registry inventory test
+
+---
+
+## 2026-09-04 — BMP parser, and the info-bar gap it actually exposed
+
+### The BMP parser
+
+19 `.bmp` files sat unread in the two MAX-phase EDX folders. They are **not**
+micrographs: they are JEOL Analysis Station EDS output, one image per element
+per view plus a bright-field reference, beside the `.emsa` spectra of the same
+acquisition. The filename is the only record of which element each shows —
+BMP has no tag structure at all.
+
+`MicroscopyBmpParser` decodes that convention (`View000 Ti K.bmp` → view 000,
+Ti, K line) and returns `Technique.EDS`. All 19 now parse:
+
+| | |
+|---|---|
+| element maps decoded | 14 |
+| bright-field references | 4 |
+| unnamed, fallback to SEM | 1 (`000.bmp`) |
+
+Elements recovered — **Ti3AlC2**: Al K, C K, Ti K across three views.
+**Mo2Ti2AlC3**: Al K, C K, Mo L, O K, Ti K.
+
+The decode is strict: the element is checked against the real symbols and the
+line against the shells that exist, so an arbitrary two-word filename cannot be
+read as chemistry. Confidence is 1.0 for a decoded name and 0.6 for a bare BMP,
+so the registry still claims it while recording which answer rests on evidence.
+
+Each map carries an INFO issue saying a map shows **where** a line's counts fall,
+not **how much** of the element is present — quantification comes from the
+spectra sitting next to it.
+
+### The JPEG parser's info-bar test is deliberately NOT reused here
+
+Copying it would have manufactured a calibration that does not exist. Measured:
+the 267x275 maps carry an **8-row** caption strip and one 512x568 frame a
+**56-row** dark strip — neither proportioned like `JEOL_2100F`, whose cells are
+measured against a 2048-px reference. The trailing strip is recorded and nothing
+is claimed about pixel size.
+
+### The 31-vs-33 hypothesis was wrong
+
+The previous entry guessed that the 19 unparsed BMPs might explain why Latos
+found 31 no-info-bar frames where DATA_NOTES says 33. **They do not.** Not one
+of the 19 is square, and they are EDS maps in EDX folders rather than TEM image
+frames.
+
+A format-agnostic sweep over every image in the tree found the real cause:
+
+| format | folder | square frames |
+|---|---|---|
+| `.jpg` | `MAX_Ti3AlC2_TEM_IMAGE` | 30 of 70 |
+| `.tif` | `MAX_Mo2Ti2AlC3_TEM_IMAGE` | **5 of 47** |
+| `.jpg` | `MAX_Mo2Ti2AlC3_TEM_EDX` | 1 of 1 |
+
+**The TIFF parser had no info-bar check.** Five square `.tif` frames were passing
+through silently while the identical defect in a `.jpg` was flagged. The test was
+written for the JPEG parser and never applied to the container that had existed
+all along.
+
+Fixed by extracting `parsers/_frames.py` — `info_bar_geometry` and
+`no_info_bar_issue` — now used by both. The count went **31 → 36**, matching the
+independent sweep exactly. The golden TIFF snapshot was regenerated; the fixture
+is 1024x1024x3, genuinely square, so the new warning is correct for it, and the
+diff is only the issue plus the three geometry keys.
+
+### Latos now disagrees with DATA_NOTES, checkably
+
+DATA_NOTES: *"33 TEM frames saved with no info bar (all Ti3AlC2 MAX)."*
+Latos: **36** — 30 Ti3AlC2 and **6 Mo2Ti2AlC3**.
+
+The count differs and the attribution is contradicted: there are Mo2Ti2AlC3
+frames with no bar. Which is right needs a human look. The point is that the
+disagreement is now visible and reproducible, where before it was a hand count
+nothing could check.
+
+### Ledger
+
+| | first run | now |
+|---|---|---|
+| parsed | 94 (11%) | **722 (84%)** |
+| unclassified | 766 | 138 |
+
+Still unread: 63 `.txt`, 34 `.raw`, 14 `.wdf`, 12 `.map`, 3 each `.img` / `.pts`
+/ `.sid` / `.brml`, 1 each `.pdf` / `.asw` / `.ico`.
+
+### Shipped
+
+- `ingestion/parsers/microscopy_bmp.py`, registered in `default_registry()`
+- `ingestion/parsers/_frames.py`; JPEG and TIFF parsers both use it
+- `tests/unit/ingestion/parsers/test_microscopy_bmp.py` — 20 tests
+- `TestInfoBar` in `test_microscopy_tif.py` — 3 tests, including a multichannel
+  page so the channel axis is never read as width
+- `microscopy-bmp` added to the registry inventory test; TIFF snapshot updated
