@@ -230,11 +230,14 @@ export function Review({ onBack }: { onBack: () => void }) {
 
       {/* Suggested merges (suggest-only — Latos never merges these on its own) */}
       {status === "needs_review" && visibleSuggestions.length > 0 && (
-        <div className="border-b border-edge bg-[color-mix(in_srgb,var(--latos-accent)_6%,transparent)] px-6 py-3">
+        <div className="shrink-0 border-b border-edge bg-[color-mix(in_srgb,var(--latos-accent)_6%,transparent)] px-6 py-3">
           <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-secondary">
             Possible duplicate samples — {visibleSuggestions.length} to review
           </h2>
-          <ul className="space-y-1.5">
+          {/* Capped, and scrolls inside itself. This panel shares a flex column
+              with the sample tree, so an uncapped list pushes the tree — the
+              thing actually being confirmed — down to a single row. */}
+          <ul className="max-h-[30vh] space-y-1.5 overflow-y-auto pr-1">
             {visibleSuggestions.map((s) => (
               <li
                 key={suggestionKey(s)}
@@ -282,12 +285,14 @@ export function Review({ onBack }: { onBack: () => void }) {
 
       {/* Flagged samples (date/generic names, session buckets) */}
       {status === "needs_review" && visibleAnomalies.length > 0 && (
-        <div className="border-b border-edge bg-[color-mix(in_srgb,var(--latos-severity-warning)_8%,transparent)] px-6 py-3">
+        <div className="shrink-0 border-b border-edge bg-[color-mix(in_srgb,var(--latos-severity-warning)_8%,transparent)] px-6 py-3">
           <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-secondary">
             Needs attention — {visibleAnomalies.length} sample
             {visibleAnomalies.length === 1 ? "" : "s"} may be mislabeled
           </h2>
-          <ul className="space-y-1.5">
+          {/* Capped for the same reason, and lower: when both panels are full
+              they must still leave the tree a usable share of the column. */}
+          <ul className="max-h-[20vh] space-y-1.5 overflow-y-auto pr-1">
             {visibleAnomalies.map((a) => (
               <li
                 key={a.sample_id}
