@@ -1285,3 +1285,60 @@ after a 1e-12 edit to one measurement: False
 
 Pre-existing and untouched: two mypy `type-arg` errors in
 `analysis/microscopy/calibration.py`.
+
+## 2026-09-05 — The sign of S was never actually specified
+
+Asked what was left to do before the ionic-liquid samples exist, and found the
+one thing that would have been expensive to discover afterwards.
+
+`fit_seebeck_slope` returns the plain least-squares slope of the supplied dV
+against dT. No minus sign is applied anywhere. The physical definition is
+S = -dV/dT with dV = V_hot - V_cold, so the tool is correct only if the
+recorded `delta_V_mV` is **V_cold - V_hot** — V+ lead on the cold electrode.
+Confirmed end to end: a rehearsal generating dV from S = -0.78 reads back
+`S = -0.781`, so the reported coefficient is the recorded dV over dT exactly.
+
+Nothing said which convention was required. `polarity_convention` appeared
+three times in the whole codebase, all three inside its own column definition,
+phrased as *"e.g. 'V+ lead on cold electrode'. Same every run."* — the right
+answer, offered as an example of a choice to be consistent about. It was not in
+`REQUIRED_MEASUREMENT_FIELDS`, so a blank one was not even reported.
+
+**Nothing downstream would have caught an inversion.** The objective is |S| and
+the sign-disagreement check is symmetric, so a consistently backwards rig
+produces a perfectly self-consistent campaign with every p-type mixture written
+down as n-type. For a campaign whose central question is where the sign flips,
+that is the worst available failure.
+
+### Shipped
+
+- The convention is stated where the assumption lives (`analysis/thermovoltage/
+  slope.py`), in both column hints, and as **rule 2** of the workbook guide —
+  which is now THE FOUR RULES.
+- `polarity_convention` joins `REQUIRED_MEASUREMENT_FIELDS`, so a blank one is a
+  reported fault, and the parser now carries it into metadata.
+- `campaign_cycle._sign_convention_drift` warns when `polarity_convention` or
+  `electrode_material` was not held constant, and says a sign disagreement may
+  then be an artefact rather than a property of the mixtures.
+- The bench sheet names **IL-001 as the sign standard**: pure [HMIM][TFSI] is
+  n-type at S ~ -0.78 mV/K in the literature, so a positive first reading means
+  suspect the wiring before the chemistry.
+
+### Four delta-T points, not three
+
+`slope.py` already argued this in its own docstring — at three points the
+residual variance has one degree of freedom and the reported standard error
+lands below the truth about half the time, by roughly a factor of two at the
+median — and that error becomes the point's weight in the surrogate. The
+campaign had been seeded with three, the guide's minimum rather than the
+analysis's recommendation. Now four: the workbook seeds 12 measurement rows
+across 3 samples, and the guide's rule 1 says four with the reason.
+
+### A layout lesson worth recording
+
+Two rounds of trimming the bench sheet failed because I was guessing at the
+overflow instead of measuring it. Shrinking the plot did nothing at all: the
+bottom row is a two-column grid whose height is set by the *other* column.
+Measuring gave the answer in one pass — 285.3 mm against 279 mm of printable
+A4, and the tick boxes were the thing to shrink. Now 275.1 mm with 3.9 mm
+headroom, verified as a one-page render rather than assumed.

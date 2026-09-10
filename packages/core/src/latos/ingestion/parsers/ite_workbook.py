@@ -102,6 +102,10 @@ _MEASUREMENT_METADATA = (
     "wait_time_s",
     "steady_state_reached",
     "electrode_material",
+    # Carried so `campaign_cycle` can check it was held constant. Changing
+    # either of these mid-campaign flips the sign of S for a reason that has
+    # nothing to do with the material.
+    "polarity_convention",
     "electrode_spacing_mm",
     "input_impedance_ohm",
     "raw_trace_file",

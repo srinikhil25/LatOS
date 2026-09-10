@@ -12,6 +12,16 @@ usual response — divide the voltage by the temperature difference and call it 
 — silently folds the electrode offset into the reported coefficient, and its
 size is invisible.
 
+**The sign convention this assumes, stated because nothing else states it.**
+`seebeck_mv_k` is the plain least-squares slope of the supplied ΔV against ΔT;
+no minus sign is applied anywhere. The physical definition is S = −ΔV/ΔT with
+ΔV = V_hot − V_cold, so the ΔV handed to this analyzer must be **V_cold −
+V_hot** — the voltmeter's V+ lead on the cold electrode. Wired the other way
+the reported coefficient is −S, and nothing downstream will catch it: the
+optimizer works on |S|, and the sign-disagreement check is symmetric. A whole
+campaign can invert consistently and look perfectly self-consistent, with every
+p-type mixture recorded as n-type.
+
 Measuring at three or more ΔT values fixes this. `S` is the slope, the offset is
 the intercept, and the residuals say whether the relationship was linear at all.
 That turns an unverifiable reading into a fitted quantity with an uncertainty

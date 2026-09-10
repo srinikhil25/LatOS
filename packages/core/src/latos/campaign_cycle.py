@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -102,6 +103,39 @@ _MIN_POOLED_DF = 3
 # A condition attempted once has nothing to compare itself with, so it
 # contributes no degrees of freedom to the pooled estimate.
 _MIN_REPLICATES_FOR_SPREAD = 2
+
+
+# Fields that fix the sign of every coefficient in the campaign. Latos reports
+# S as the plain slope of the recorded ΔV against ΔT, so the sign is set by how
+# the cell was wired rather than by anything in the file. Change either of these
+# halfway through and the coefficients before and after are measured on opposite
+# conventions — which nothing else would catch, because the objective is a
+# magnitude and the sign-disagreement check below is symmetric.
+_SIGN_FIXING_FIELDS: tuple[tuple[str, str], ...] = (
+    ("polarity_convention", "which voltmeter lead sat on the cold electrode"),
+    ("electrode_material", "the electrode chemistry"),
+)
+
+
+def _sign_convention_drift(parsed: Sequence[ParsedData]) -> list[str]:
+    """Report any sign-fixing field that was not held constant across the campaign."""
+    messages: list[str] = []
+    for field, what in _SIGN_FIXING_FIELDS:
+        seen: set[str] = set()
+        for entry in parsed:
+            raw = entry.metadata.get(field)
+            values = raw if isinstance(raw, list) else [raw]
+            seen.update(str(v).strip() for v in values if v is not None and str(v).strip())
+        if len(seen) > 1:
+            listed = ", ".join(repr(v) for v in sorted(seen))
+            messages.append(
+                f"{field} was NOT constant across this campaign ({listed}). That is "
+                f"{what}, and it sets the sign of S. Samples recorded under different "
+                f"settings are on different conventions and cannot be compared until you "
+                f"decide which one is right; any sign disagreement below may be an "
+                f"artefact of this rather than a property of the mixtures."
+            )
+    return messages
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +283,10 @@ def run_cycle(
             f"{skipped} sample(s) contributed no value: fewer than "
             f"{_MIN_POINTS_PER_SAMPLE} usable (delta-T, delta-V) points, or no composition."
         )
+
+    # Before reading anything into the signs, check they were all measured the
+    # same way round.
+    messages.extend(_sign_convention_drift(parsed))
 
     signs = {math.copysign(1.0, fit.seebeck_mv_k) for fit in fits if fit.seebeck_mv_k != 0.0}
     if len(signs) > 1:

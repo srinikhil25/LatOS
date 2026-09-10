@@ -168,8 +168,15 @@ MEASUREMENT_COLUMNS: tuple[Column, ...] = (
         "yes / no / unsure",
         "Judge from the V(t) trace, not from impatience.",
     ),
-    Column("delta_V_mV", 12, 1, "mV", "Fix the polarity convention and never change it."),
-    Column("polarity_convention", 18, 1, "", "e.g. 'V+ lead on cold electrode'. Same every run."),
+    Column("delta_V_mV", 12, 1, "mV", "SIGNED, as V_cold - V_hot. Rule 2. The sign of S is this."),
+    Column(
+        "polarity_convention",
+        18,
+        1,
+        "",
+        "Must be 'V+ on the COLD electrode' — see rule 2, this is not a free choice. "
+        "Record it every run so a change becomes visible.",
+    ),
     Column("electrode_material", 17, 1, "", "Sets the sign. Never change mid-campaign."),
     Column("electrode_spacing_mm", 18, 1, "mm", "Equilibration time scales as the square of this."),
     Column("voltmeter_model", 16, 1, "", ""),
@@ -203,6 +210,10 @@ REQUIRED_MEASUREMENT_FIELDS: tuple[str, ...] = (
     "wait_time_s",
     "delta_V_mV",
     "electrode_material",
+    # The sign of every reported coefficient depends on this, and an inverted
+    # rig is silent: the objective is a magnitude. A blank one cannot be
+    # reconstructed afterwards, so it is a reported fault like any other.
+    "polarity_convention",
 )
 
 # Free-text columns whose values must stay consistent across a campaign, so the
@@ -237,21 +248,37 @@ _GUIDE = (
     ),
     ("Blue columns are derived. Leave them; Latos computes them from what you typed.", False),
     ("", False),
-    ("THE THREE RULES", True),
+    ("THE FOUR RULES", True),
     (
-        "1. Measure every composition at three or more delta-T values. The Seebeck "
+        "1. Measure every composition at FOUR or more delta-T values. The Seebeck "
         "coefficient is the SLOPE of delta-V against delta-T, and the intercept tells you "
         "how much of the signal was electrode polarisation rather than thermoelectric. A "
-        "single delta-T point cannot separate them.",
+        "single delta-T point cannot separate them. Three can, but only just: the residual "
+        "variance then has one degree of freedom, and the standard error it reports lands "
+        "below the truth about half the time, by roughly a factor of two at the median. "
+        "That error is what the optimizer uses as this point's weight, so three points hand "
+        "it an over-confident number on exactly the sparse data where over-confidence costs "
+        "most. The fourth reading is the cheapest fix in the whole protocol.",
         False,
     ),
     (
-        "2. Save the full V(t) trace every time. It is the only evidence that steady state "
+        "2. Connect the voltmeter's V+ lead to the COLD electrode, and never change it. "
+        "Latos reports the coefficient as the slope of delta-V against delta-T, so the "
+        "recorded delta-V has to be V_cold - V_hot for S = -dV/dT to come out with the "
+        "right sign. Wired the other way, every sign in the campaign inverts consistently "
+        "and silently: the optimizer works on the magnitude, so nothing downstream will "
+        "notice, and a p-type mixture will be written down as n-type. If a liquid whose "
+        "sign is known from the literature reads the other way, suspect the wiring before "
+        "the chemistry.",
+        False,
+    ),
+    (
+        "3. Save the full V(t) trace every time. It is the only evidence that steady state "
         "was reached. Reported build-up times are 500 to 5000 seconds.",
         False,
     ),
     (
-        "3. Write the predicted value and its uncertainty into the samples sheet BEFORE "
+        "4. Write the predicted value and its uncertainty into the samples sheet BEFORE "
         "mixing. That is the pre-registration, and it cannot be added later.",
         False,
     ),

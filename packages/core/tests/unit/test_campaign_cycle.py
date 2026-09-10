@@ -14,6 +14,7 @@ prediction" as the thing that must not break.
 from __future__ import annotations
 
 import json
+from typing import ClassVar
 
 import numpy as np
 import openpyxl
@@ -38,7 +39,9 @@ from latos.optimization import list_preregistrations, prereg_dir
 DELTAS = (2.0, 5.0, 10.0)
 
 
-def _campaign(tmp_path, samples, *, offset=0.35, noise=0.0, deltas=DELTAS):
+def _campaign(
+    tmp_path, samples, *, offset=0.35, noise=0.0, deltas=DELTAS, polarity="V+ on cold electrode"
+):
     """Write a filled workbook. `samples` maps id -> (composition, true slope)."""
     path = write_template(tmp_path / "campaign.xlsx")
     wb = openpyxl.load_workbook(path)
@@ -62,6 +65,11 @@ def _campaign(tmp_path, samples, *, offset=0.35, noise=0.0, deltas=DELTAS):
             m.cell(row, mh["wait_time_s"], 1800)
             m.cell(row, mh["delta_V_mV"], slope * dt + offset + rng.normal(0.0, noise))
             m.cell(row, mh["electrode_material"], "gold")
+            # Required: it fixes the sign of every coefficient in the campaign.
+            # `polarity` may be a per-sample dict, to exercise the drift check.
+            wiring = polarity[sid] if isinstance(polarity, dict) else polarity
+            if wiring:
+                m.cell(row, mh["polarity_convention"], wiring)
             row += 1
     wb.save(path)
     return path
@@ -461,3 +469,58 @@ class TestReplicateAggregation:
         assert any(p.sigma_source == "replicates" for p in outcome.points)
         assert any("pooled standard deviation" in m for m in outcome.messages)
         assert "Design points given to the surrogate" in outcome.report()
+
+
+class TestTheSignConventionIsHeldConstant:
+    """Latos reports S as the plain slope of the recorded dV, so the wiring sets
+    the sign. Nothing else would catch a change: the objective is a magnitude
+    and the sign-disagreement check is symmetric."""
+
+    SAMPLES: ClassVar[dict[str, tuple[float, float]]] = {
+        "IL-001": (0.0, 1.1),
+        "IL-002": (1.0, 1.6),
+        "IL-003": (0.5, 2.35),
+    }
+
+    def test_a_blank_polarity_is_reported(self, tmp_path):
+        path = _campaign(tmp_path, self.SAMPLES, polarity="")
+        outcome = run_cycle(path, freeze_prereg=False)
+        assert any(
+            "polarity_convention is empty" in note for fit in outcome.fits for note in fit.notes
+        )
+
+    def test_a_recorded_polarity_raises_nothing(self, tmp_path):
+        outcome = run_cycle(_campaign(tmp_path, self.SAMPLES), freeze_prereg=False)
+        assert not [
+            note for fit in outcome.fits for note in fit.notes if "polarity_convention" in note
+        ]
+        assert not [m for m in outcome.messages if "NOT constant" in m]
+
+    def test_changing_the_wiring_midway_is_called_out(self, tmp_path):
+        """The failure that would otherwise look like a real sign flip."""
+        path = _campaign(
+            tmp_path,
+            self.SAMPLES,
+            polarity={
+                "IL-001": "V+ on cold electrode",
+                "IL-002": "V+ on cold electrode",
+                "IL-003": "V+ on HOT electrode",
+            },
+        )
+        outcome = run_cycle(path, freeze_prereg=False)
+        drift = [
+            m for m in outcome.messages if m.startswith("polarity_convention was NOT constant")
+        ]
+        assert len(drift) == 1
+        assert "sets the sign of S" in drift[0]
+        assert "artefact" in drift[0]
+
+    def test_the_electrode_is_watched_the_same_way(self, tmp_path):
+        path = _campaign(tmp_path, self.SAMPLES)
+        wb = openpyxl.load_workbook(path)
+        m = wb[MEASUREMENTS_SHEET]
+        mh = {c.value: c.column for c in m[HEADER_ROW] if c.value}
+        m.cell(FIRST_DATA_ROW, mh["electrode_material"], "platinum")  # one row, one metal
+        wb.save(path)
+        outcome = run_cycle(path, freeze_prereg=False)
+        assert any(m.startswith("electrode_material was NOT constant") for m in outcome.messages)
