@@ -159,7 +159,7 @@ class TestArrays:
     def test_reads_angles_and_intensities(self, tmp_path):
         parsed = BrukerRaw4TxtParser().parse(write(tmp_path, n=200))
         assert parsed.technique is Technique.XRD
-        assert parsed.arrays["two_theta_deg"].shape == (200,)
+        assert parsed.arrays["two_theta"].shape == (200,)
         assert parsed.arrays["intensity"].shape == (200,)
         assert parsed.metadata["n_points"] == 200
 
@@ -167,7 +167,7 @@ class TestArrays:
         """`     Angle,       PSD,` sits inside [Data] and must be skipped."""
         parsed = BrukerRaw4TxtParser().parse(write(tmp_path, n=50))
         assert parsed.metadata["n_points"] == 50
-        assert np.all(np.isfinite(parsed.arrays["two_theta_deg"]))
+        assert np.all(np.isfinite(parsed.arrays["two_theta"]))
 
     def test_the_trailing_comma_does_not_break_a_row(self, tmp_path):
         parsed = BrukerRaw4TxtParser().parse(write(tmp_path, n=30))

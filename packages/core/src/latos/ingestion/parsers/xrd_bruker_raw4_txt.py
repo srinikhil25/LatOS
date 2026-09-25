@@ -130,7 +130,11 @@ class BrukerRaw4TxtParser(BaseParser):
     """Bruker DIFFRAC RAW4 text export."""
 
     name: ClassVar[str] = "bruker-raw4-txt"
-    version: ClassVar[str] = "1.0.0"
+    # 1.1.0: the angle array is `two_theta`, not `two_theta_deg`. The other three
+    # XRD parsers always emitted `two_theta`, which is the name
+    # `analysis/xrd/peak_fit.py` reads, so every scan in this format silently
+    # failed peak fitting with "Missing two_theta/intensity arrays".
+    version: ClassVar[str] = "1.1.0"
     technique: ClassVar[Technique] = Technique.XRD
     supported_extensions: ClassVar[tuple[str, ...]] = (".txt",)
 
@@ -259,7 +263,7 @@ class BrukerRaw4TxtParser(BaseParser):
 
         return ParsedData(
             technique=Technique.XRD,
-            arrays={"two_theta_deg": angles, "intensity": intensities},
+            arrays={"two_theta": angles, "intensity": intensities},
             metadata=metadata,
             instrument=f"Bruker ({metadata.get('anode') or 'unknown'} anode)",
             measured_at=measured_at,
