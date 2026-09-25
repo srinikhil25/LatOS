@@ -1342,3 +1342,410 @@ bottom row is a two-column grid whose height is set by the *other* column.
 Measuring gave the answer in one pass — 285.3 mm against 279 mm of printable
 A4, and the tick boxes were the thing to shrink. Now 275.1 mm with 3.9 mm
 headroom, verified as a one-page render rather than assumed.
+
+---
+
+## 2026-09-10 — Open problem 8 answered: EI wins, and mostly never gets asked
+
+Item 8 of `docs/open_statistical_problems.md` said expected improvement is known
+to degrade under noise, that noisy EI, knowledge gradient and entropy search
+exist as alternatives, and that none had been tested here. Seven arms were
+implemented and measured. **The premise is true. The implication is false.**
+Full tables in `studies/acquisition/RESULTS.md`.
+
+### Shipped: `latos/optimization/acquisitions.py`
+
+`ei` (baseline), `ei_plugin`, `aei` (Huang et al. 2006), `kg` (Frazier, Powell &
+Dayanik 2009, exact on the grid via an upper convex hull over the rank-one update
+lines), `mes` (Wang & Jegelka 2017, Gumbel), `ucb`, `pi`. Threaded into
+`optimize` as `acquisition=`, recorded in `BoConfig.acquisition_function`.
+
+`acquisition` changes **where the next point goes and nothing else**. EI is
+computed on every path regardless, because the convergence test is
+`max(ei) < noise_std` — a threshold in EI's own units. `kg` is in units of
+improvement in the reported optimum and `mes` is in nats, so a shared threshold
+would mean something different in every arm and no comparison would be possible.
+Pinned by `test_max_ei_is_identical_across_arms`.
+
+### 1. EI does not shrink under noise. It becomes a different rule.
+
+`f_best = max(y)` over the **noisy** readings, and the max of n noisy draws is
+biased upward. The GP then correctly shrinks that lucky reading toward its
+neighbours, so the whole posterior mean can sit below the incumbent. Measured on
+a four-point campaign at 6 % noise:
+
+| quantity | value |
+|---|---|
+| incumbent, max of noisy readings | 0.37841 |
+| incumbent, max of posterior mean | 0.30475 (19.5 % lower) |
+| highest posterior mean anywhere | 0.30479 |
+| max EI against the noisy incumbent | **1.65e-59** |
+| max EI against the plug-in incumbent | 1.62e-03 |
+| noise floor it is tested against | 6.0e-02 |
+
+With improvement negative everywhere, EI tends to `sigma * pdf(improvement /
+sigma)`, whose argmax is driven by **sigma**. On a posterior whose mean peaks at
+index 70 and whose sd peaks at index 30, EI picks 70 with an honest incumbent and
+**30** with an inflated one. It silently stops being an exploitation rule and
+becomes a variance seeker, and the switch is invisible because its magnitude is
+1e-60 by then. Pinned by
+`test_an_inflated_incumbent_turns_ei_into_a_variance_seeker`.
+
+### 2. In the shipped configuration the acquisition decides almost nothing
+
+Share of optimizer calls where the reliability-gated fallback overrode the
+acquisition's pick (5 shapes, 40 seeds, budget 12, `census.py`):
+
+| noise | calls | EI < 1e-12 | exhausted | exploratory | **overridden** |
+|---|---|---|---|---|---|
+| 5 % | 330 | 19.4 % | 85.8 % | 100 % | **85.8 %** |
+| 10 % | 395 | 16.5 % | 97.7 % | 100 % | **97.7 %** |
+| 15 % | 406 | 21.2 % | 100 % | 100 % | **100 %** |
+
+From n = 5 onward at 10 % and 15 % it overrides on *every round*. The data is
+graded exploratory on 100 % of calls at every noise level, because a 12-sample
+budget never reaches n = 25. `shipped.py` confirms the consequence: all seven
+arms give median 5, solved 59 %, and synthesise the same points in 96-98 % of
+campaigns. **At this sample size the acquisition function is not what decides
+where the next sample goes.**
+
+### 3. When it does decide, plain EI wins — every correction loses
+
+`explore_policy=ei` removes the fallback. Solved-fraction, interior-optimum
+shapes:
+
+| arm | 5 % | 10 % | 15 % | sharp peak @ 10 % |
+|---|---|---|---|---|
+| **ei** | **96 %** | **92 %** | **94 %** | **90 %** |
+| pi | 96 % | 94 % | 92 % | 92 % |
+| aei | 79 % | 71 % | 71 % | 50 % |
+| mes | 75 % | 70 % | 72 % | 48 % |
+| ei_plugin | 71 % | 68 % | 64 % | 42 % |
+| ucb | 70 % | 71 % | 69 % | 50 % |
+| kg | 62 % | 59 % | 59 % | 18 % |
+
+`pi` shares EI's biased incumbent, which is consistent: what those two share is
+the defect. The most principled arm — KG, exact, no sampling approximation —
+loses hardest. **EI's bug is load-bearing:** the inflated incumbent buys
+aggressive exploration, and a narrow peak inside a 12-sample budget is exactly
+the case that needs it.
+
+Third time a theoretically-correct change has lost to the shipped simple thing
+here, after Matern 5/2 and the `max_std` fallback.
+
+### A hypothesis of mine, refuted
+
+"Broken EI is secretly the max-sd rule" would have unified sections 2 and 3. It
+is wrong: when the signal is exhausted, EI's argmax coincides with `argmax(sd)`
+on **1 %** of calls, median separation 0.64 to 0.73 across a unit range (1707,
+1766, 1799 calls at 5/10/15 %). They are two different rules that happen to be
+the two that work.
+
+### 4. `rehearse()` has been measuring a configuration the bench never runs
+
+`rehearsal._one_run` passes `with_reliability=False` for speed. `reliability` is
+then None, `is_exploratory` is False, and the exploration fallback **cannot
+fire**. One arm (`ei`), noise 10 %, interior shapes:
+
+| configuration | median | solved |
+|---|---|---|
+| shipped (`max_std` fallback) | 5 | **59 %** |
+| fallback off, reliability on | 4 | **92 %** |
+| fallback off, reliability off — what `rehearse()` runs | 4 | 92 % |
+
+The fallback alone accounts for the gap. **Every budget figure the tool has
+reported is the fallback-off number**, including the "median 5, solved 90-96 %"
+quoted for the ionic-liquid campaign. Simple regret within budget 12, as a
+fraction of the optimum missed:
+
+| policy | median | mean | p90 | worst |
+|---|---|---|---|---|
+| `max_std` (shipped) | 0.0221 | 0.0370 | 0.0710 | 0.1923 |
+| fallback off | 0.0018 | 0.0109 | 0.0340 | **0.1312** |
+
+Removing the fallback is better on median, mean, p90 **and** the worst case.
+
+This disagrees with the 2026-09-02 decision, which kept `max_std` on a worst-case
+argument (Forrester 1-D from `n_initial = 4`: `max_std` 0.0220 / 0.1735 against
+`ei` 0.0559 / 6.0212). **My explanation for the disagreement was that the
+(0, 0.5, 1.0) design anchors both endpoints so EI cannot stall in a flat region.
+That is refuted:** with an interior-only design (0.1, 0.35, 0.65, 0.9) removing
+the fallback is better still — worst case 0.0544 against `max_std`'s 0.2088. The
+seed design is not the cause. The remaining candidate is the objective family:
+Forrester has a wide flat region and none of these five shapes does. **Untested,
+and the next thing to test.** The default is unchanged until it is.
+
+### Two bugs found on the way
+
+- **`_PriorMeanGP.predict` silently ignored `return_cov`**, returning the shifted
+  mean instead. `kg` would have indexed element 1 of a mean vector and called it
+  a covariance. A deterministic prior shifts the mean and leaves second moments
+  alone, so the fix is a passthrough. `_Surrogate` now declares `return_cov`.
+- **`argmax` on a flat acquisition surface returns index 0** — the low end of the
+  search range, presented as a decision. `kg` under a `prior_mean` is identically
+  zero at every candidate: the prior pins the length-scale at its ceiling, so the
+  rank-one update direction is constant across the grid and every candidate's
+  expected gain is `max(mu)`. `_kg` now reports an all-tie as no preference, and
+  `optimize` defers to EI's pick when the surface is flat.
+
+### Verification
+
+- 26 tests in `test_acquisitions.py`, 14 in `test_engine_acquisition.py`
+- `_expected_max_affine` checked against a 4e6-draw Monte Carlo (agreement 5e-4)
+  and four closed forms
+- KG's published numbers re-measured after the flat-surface guard: unchanged
+- ruff + format clean on 265 files; mypy `src/` back to its 2 pre-existing
+  `calibration.py` errors
+
+---
+
+## 2026-09-10 — Item 8a resolved: the fallback stays, and my case against it was wrong
+
+Same day as the entry above, and it corrects it. Item 8a asked why two
+measurements of the exploration fallback pointed in opposite directions, and put
+the odds on the objective family. Answered in `studies/acquisition/RESULTS.md`
+section 5, via a rebuilt Forrester benchmark (`forrester.py`).
+
+### The 2026-09-02 Forrester result reproduces
+
+The original script was not kept, so the benchmark was rebuilt from the log's
+description. Absolute regret, `n_initial = 4`, budget 12, 12 seeds, noise swept
+because it was never recorded:
+
+| noise | `max_std` worst | `ei` worst | `ucb` worst |
+|---|---|---|---|
+| 0.03 | **0.1070** | 5.0441 | 5.0591 |
+| 0.3 | **0.8740** | 5.1732 | 5.2121 |
+| 1.0 | **0.8740** | 5.9271 | 5.2028 |
+| 2.0 | **1.9277** | 5.7845 | 5.2028 |
+
+Published: `max_std` 0.1735 worst, `ei` and `ucb` 6.0212. The medians differ —
+the reconstruction cannot recover the original's noise level or design draws —
+but the tail was the deciding argument and the tail reproduces across a 66-fold
+noise range.
+
+The mechanism is now exact rather than inferred. Forrester's global minimum is
+-6.021 at x = 0.757; it also has a local minimum of -0.986 at x = 0.143 that
+**52.4 % of the domain hill-climbs to**, and a flat inflection at f = 0, x = 1/3
+(the double root of `(6x-2)^2`, where f and f' both vanish but which attracts
+nothing). Trapped at the local minimum, regret is 5.035 — measured 5.0441.
+Held at the inflection, 6.021 — the original's 6.0212.
+
+### Per objective the fallback ties or wins five of six
+
+Fractional regret at 10 % of each objective's own range, 40 seeds, budget 12,
+reliability held ON for every arm, worst case:
+
+| objective | trap share | `max_std` | `ei` | verdict |
+|---|---|---|---|---|
+| forrester | 52.4 % | **0.1192** | 0.2647 | fallback wins 2.2x |
+| interior maximum | 0.0 % | **0.0084** | 0.0744 | fallback wins 8.9x |
+| sharp peak | 0.0 % | 0.2543 | **0.0793** | fallback loses 3.2x |
+| ideal / linear | 0.0 % | 0.0000 | 0.0000 | tie |
+| sign flip | 33.3 % | 0.0000 | 0.0000 | tie |
+| saturating | 0.0 % | 0.0000 | 0.0000 | tie |
+
+**The "33 points of success rate" figure in the entry above does not survive
+this.** It came from pooling an easy shape with a hard one and reading the
+median, which let the easy shape set it. Scored per objective on the worst case,
+the fallback ties or wins on five of six. The default stays.
+
+### Three of my own hypotheses died getting here
+
+1. *"Broken EI is secretly the max-sd rule"* — refuted: they pick the same point
+   on 1 % of calls, median separation 0.71 across a unit range.
+2. *"The seed design explains the disagreement"* — refuted: with an
+   interior-only design the fallback loses by more, not less.
+3. *"Flatness explains it — `max_std` is trap insurance"* — refuted by the trap
+   share column above. `interior maximum` has **zero** trap share and the
+   insurance still pays 8.9x. `sign flip` has **33 %** and the policies tie
+   exactly, because its trap sits at x = 0 and the seed design measures x = 0
+   directly — the design bypasses it, not the optimizer. `sharp peak` has zero
+   trap share and the fallback loses.
+
+### What does explain it: design resolution
+
+`max_std` is a space-filling rule, so what it can reach is capped by the
+resolution of the design it lays down, and it loses on the one shape whose
+feature is narrower than that. The sharp peak is a Gaussian of width 0.09 at
+x = 0.72; the design `max_std` actually produced was
+
+    0.000  0.000  0.141  0.251  0.387  0.500  0.603  0.643  0.784  0.844  1.000  1.000
+
+— ten distinct points from twelve samples, **two of nine picks spent
+re-measuring endpoints the seed design already held.** The nearest sample lands
+0.064 from the peak, worth `(1.5 - 1.232)/1.5 = 0.179`; measured worst 0.2543.
+
+### And the fallback does not do what its comment says
+
+`engine.py` describes the branch as "the point of greatest posterior uncertainty
+(the largest unmeasured gap)". On an over-smoothed posterior those are different
+things. Measured on the sharp peak, the posterior sd is flat to seven
+significant figures and the winner is decided by where a tie falls:
+
+| n | sd range | spread | grid points tied at max |
+|---|---|---|---|
+| 3 | [0.00368, 0.00368] | 3.3e-07 | 8 |
+| 4 | [0.00361, 0.00361] | 1.0e-06 | 4 |
+
+Same defect class as the flat-acquisition-surface bug fixed earlier today, on
+the branch that was not fixed.
+
+Implementing the documented intent literally — the midpoint of the largest
+unmeasured gap, which can never be a duplicate — is deterministic, so its one
+value is its median, p90 and worst together:
+
+| objective | widest-gap | `max_std` median / worst | `ei` median / worst |
+|---|---|---|---|
+| forrester | 0.0337 | 0.0265 / 0.1192 | 0.0214 / 0.2647 |
+| interior maximum | 0.0021 | 0.0014 / 0.0084 | 0.0002 / 0.0744 |
+| sharp peak | 0.0540 | 0.0887 / 0.2543 | 0.0046 / 0.0793 |
+
+**Better than both on the tail on every objective, worse than both on the
+median.** A variance trade, not a free win: it ignores the observations, so it
+cannot be misled and cannot be guided either.
+
+### Decision
+
+- **Default unchanged.** `_DEFAULT_EXPLORE_POLICY = "max_std"` stays.
+- **The change worth testing is narrow:** replace `argmax(std)` with the
+  widest-gap midpoint *inside the fallback branch only*, so EI still drives
+  every round it has signal and the fallback stops spending picks on
+  compositions already held. One line in `engine.py`, then rerun `shipped.py`.
+- **`rehearse()` still reports the wrong configuration.** `_one_run` passes
+  `with_reliability=False`, which disables the fallback as a side effect, so
+  every budget figure it publishes describes a configuration the bench does not
+  run. Unfixed; it is the next thing to fix in this area.
+- **Recorded, not fixed:** with `measured_noise` at zero, `alpha` is what keeps
+  the kernel matrix invertible, so a repeated recommendation makes the GP fit
+  raise `LinAlgError` rather than an `OptimizationError`. Not a bench condition.
+
+### Method notes worth keeping
+
+- **`on_repeat` decides the answer and is a modelling choice, not a
+  measurement.** Running to a full budget, `ei` recommends a composition it
+  already holds at experiment 4 in 33 of 40 runs, `max_std` at experiment 9 in
+  40 of 40. Terminate on that and `max_std` wins the sharp peak (worst 0.2543
+  against 0.9496); treat it as a replicate — which a lab can do, and the second
+  reading really does move the next pick — and `max_std` loses. Every figure
+  here uses the replicate model. Any future measurement must say which it used.
+- **Score per objective, not pooled.** A median over an easy and a hard shape is
+  a statement about the easy one.
+- The verdict column in `results_2026-09-10.txt` mislabels exact ties as losses
+  (a strict `<`, fixed after the run). The three 0.0000/0.0000 rows are ties.
+
+## 2026-09-10 — Items 8b and 8c: a pre-registered prediction that held, and a number withdrawn
+
+Third entry today, and the first one where a prediction of mine survived contact
+with the measurement.
+
+### 8c first, because it invalidates a published number
+
+`rehearsal.py` passed `with_reliability=False` for speed. `reliability` was then
+None, so `is_exploratory` was False, so the exploration fallback **could not
+fire**. Every budget figure `rehearse()` has ever published described a
+configuration nobody runs.
+
+Fixed: `shipped_configuration=True` is the default on `rehearse`, threaded to
+`_rehearse_shape` and `_one_run`; the fast path survives as
+`shipped_configuration=False` and `latos rehearse --fast`, because a leave-one-out
+refit per observation per round is roughly seven times the runtime and the test
+suite cannot afford it. A report from the fast path now prepends a FAST PATH
+warning to its own `summary()`, so the warning lives where the number is read
+rather than in a keyword argument three call frames up.
+
+The CLI, noise 10 %, budget 12, 12 seeds, sharp peak:
+
+| configuration | median experiments | solved |
+|---|---|---|
+| shipped | never | 8 % |
+| `--fast` | 7 | 92 % |
+
+**84 points of success rate**, and the headline flips with it — from "reached
+within budget in 92 % of runs" to "plan for more experiments than this budget".
+
+This is the same quantity as the "33 points of success rate" figure from the
+first entry today — reliability off means the fallback cannot fire, which is the
+fallback-off arm under another name — already withdrawn one entry above for
+pooling an easy shape with a hard one. Measured per shape it is **84 points, two
+and a half times the withdrawn figure**, so the correction is larger than the
+retraction admitted. The figures previously quoted for the ionic-liquid campaign
+— "median 5 experiments, solved 90-96 %" — came from the fallback-off side of
+this and are withdrawn with it. The replacements are worse,
+which is the point: a budget estimate that flatters the tool is not a budget
+estimate.
+
+### 8b: pre-registered, then measured
+
+`engine.py` described the fallback as recommending "the point of greatest
+posterior uncertainty (the largest unmeasured gap)". Two different things, and on
+an over-smoothed posterior they come apart: on the sharp peak the posterior sd is
+flat to seven significant figures, eight grid points tied, so a tie-break decides
+— and the design it produced spent 2 of 9 picks re-measuring endpoints the seed
+design already held.
+
+`PREREGISTRATION-8b.md` was written before any of it existed: four numbered
+predictions with thresholds fixed in advance, and prediction 4 named as the one
+whose failure would mean the mechanism I had described was wrong. Then
+`widest_gap` was added as a fourth `explore_policy` — the gap reading implemented
+literally, geometry only, no posterior — and measured. Worst-case fractional
+regret, 40 seeds, budget 12, noise 10 %, reliability ON:
+
+| objective | `widest_gap` | `max_std` | `ei` | predicted | outcome |
+|---|---|---|---|---|---|
+| forrester | **0.0487** | 0.1192 | 0.2647 | below 0.15 | HELD |
+| interior maximum | **0.0022** | 0.0084 | 0.0744 | below 0.03 | HELD |
+| sharp peak | **0.0497** | 0.2543 | 0.0793 | below 0.15 | HELD |
+
+Prediction 4: **12.0 distinct compositions of 12** on the sharp peak against
+`max_std`'s 10.0 — and 12.0 on every objective. It holds by construction, not by
+luck. That mechanism is the whole result: `max_std` was not losing because
+uncertainty sampling is a bad idea, but because on a flat sd surface it re-picked
+points already held, and a duplicate is a wasted sample out of twelve.
+
+Medians, measured afterwards and **not** pre-registered, because the last time a
+policy was called a win on the tail alone the claim was wrong:
+
+| objective | `widest_gap` | `max_std` | `ei` |
+|---|---|---|---|
+| forrester | **0.0070** | 0.0265 | 0.0214 |
+| interior maximum | 0.0019 | 0.0014 | **0.0002** |
+| sharp peak | 0.0497 | 0.0887 | **0.0046** |
+
+Against `max_std` this is not a variance trade — it wins the median too on two of
+three, and loses the third by 0.0005 at the grid's resolution limit. That is what
+separates it from the whole-strategy widest-gap rule measured on 2026-09-02,
+which bought a bounded tail by giving up the median: here the rule fires only in
+the fallback, so EI still drives every round that has signal. Against `ei` the
+trade survives — `ei` keeps a 10.8x better median on the sharp peak — but the
+price of the insurance dropped: scored on the worst case per objective the
+fallback now ties or wins **six of six**, where `max_std` managed five of six.
+
+### The default did not change, and that was decided in advance
+
+Four for four, and `max_std` stays the default. The pre-registration committed to
+this before the numbers existed, on the grounds that one shape family at one
+noise level, one budget and one dimension is exactly the evidentiary position
+that produced the 33-point claim withdrawn in the section above. A default change
+needs the 3-200 % noise sweep, the n-dimensional path (`_widest_gap_index` is 1-D
+interval geometry; in nD "largest gap" is a fill-distance maximization, a
+different and costlier computation), and a stated choice of which statistic the
+default optimizes — `ei` wins the median, the fallback bounds the tail, and
+nothing measured settles which a ten-sample wet-lab campaign should prefer.
+
+The documentation defect *is* fixed, because it was a defect either way:
+`engine.py` no longer claims `max_std` recommends the largest unmeasured gap. It
+now says it is not that, and why.
+
+### Files
+
+`optimization/engine.py` (`_widest_gap_index`, `_explore_index`, two corrected
+docstrings), `optimization/rehearsal.py` (`shipped_configuration`), `__main__.py`
+(`--fast`). Tests: 6 in `test_engine_kernel_policy.py`, 6 in `test_rehearsal.py`;
+385 optimization tests pass in 13m23s. `studies/acquisition/RESULTS.md` section
+6, `PREREGISTRATION-8b.md`, `widest_gap.py`.
+
+### Standing caveat
+
+Every number here is a synthetic response shape with a known optimum, not
+evidence about the real system. `rehearsal.CAVEAT` applies.

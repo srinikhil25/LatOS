@@ -25,6 +25,7 @@ from latos.optimization.engine import (
     _EXPLORE_POLICIES,
     _KERNELS,
     _kernel_label,
+    _widest_gap_index,
 )
 
 X_1D = np.array([1.0, 2.0, 3.0, 4.0])
@@ -135,3 +136,110 @@ class TestExplorePolicyChangesTheFallback:
             X_1D, Y_1D, bounds=(1.0, 4.0), input_name="a", target_name="t", explore_policy=policy
         )
         assert 1.0 <= float(result.recommendation.x) <= 4.0
+
+
+class TestTheWidestGapFallback:
+    """Item 8b, added 2026-09-10. NOT the default.
+
+    `max_std` was described in `engine.py` as "the largest unmeasured gap" for
+    months, and on an over-smoothed posterior it is not that: the sd surface
+    goes flat to seven significant figures — measured range
+    [0.00368, 0.00368] with eight grid points tied — so which point wins is
+    decided by where a tie falls, and the design it produced spent 2 of 9 picks
+    re-measuring endpoints already held. `widest_gap` is that description
+    implemented literally.
+
+    Added as a fourth policy rather than as an edit to `max_std`, because three
+    defaults have been challenged in this project and three have been kept on
+    evidence. A one-noise-level, one-shape-family measurement is not enough to
+    move one.
+    """
+
+    def test_it_is_selectable_and_is_not_the_default(self):
+        assert "widest_gap" in _EXPLORE_POLICIES
+        assert _DEFAULT_EXPLORE_POLICY != "widest_gap"
+
+    def test_it_bisects_the_only_gap(self):
+        grid = np.linspace(0.0, 1.0, 1001)
+        assert grid[_widest_gap_index(grid, np.array([0.5]))] == pytest.approx(0.25, abs=1e-3)
+
+    def test_it_finds_an_interior_gap(self):
+        grid = np.linspace(0.0, 1.0, 1001)
+        got = grid[_widest_gap_index(grid, np.array([0.0, 0.1, 0.2]))]
+        assert got == pytest.approx(0.6, abs=1e-3)
+
+    def test_the_search_box_bounds_the_intervals(self):
+        """An unsampled end of the range must compete with an interior gap.
+
+        With every observation crowded at the top, the answer is the middle of
+        the empty stretch below them — which is only reachable if the box edge
+        is treated as an interval boundary.
+        """
+        grid = np.linspace(0.0, 1.0, 1001)
+        got = grid[_widest_gap_index(grid, np.array([0.9, 0.95, 1.0]))]
+        assert got == pytest.approx(0.45, abs=1e-3)
+
+    def test_it_can_never_return_a_point_already_measured(self):
+        """The property that distinguishes it from `argmax(std)`, and the one
+        the measured duplicate-picking cost."""
+        grid = np.linspace(0.0, 1.0, 1001)
+        rng = np.random.default_rng(0)
+        for _ in range(40):
+            obs = np.sort(rng.uniform(0.0, 1.0, size=rng.integers(1, 9)))
+            got = grid[_widest_gap_index(grid, obs)]
+            assert np.min(np.abs(obs - got)) > 1e-3
+
+    def test_it_spends_every_sample_on_a_new_composition(self):
+        """End to end, on the shape where `max_std` wasted two of nine picks."""
+
+        def peak(t):
+            return 0.3 + 1.2 * np.exp(-((np.asarray(t, dtype=float) - 0.72) ** 2) / (2 * 0.09**2))
+
+        rng = np.random.default_rng(0)
+        xs = [0.0, 0.5, 1.0]
+        ys = [float(peak(p)) + rng.normal(0, 0.15) for p in xs]
+        while len(xs) < 12:
+            result = optimize(
+                np.array(xs),
+                np.array(ys),
+                bounds=(0.0, 1.0),
+                input_name="x",
+                target_name="S",
+                measured_noise=0.15,
+                seed=0,
+                explore_policy="widest_gap",
+                with_reliability=True,
+            )
+            xs.append(float(result.recommendation.x))
+            ys.append(float(peak(xs[-1])) + rng.normal(0, 0.15))
+
+        assert len(set(np.round(xs, 6))) == 12  # max_std averaged 10.0 of 12
+
+
+class TestNonFiniteInputIsRejectedByName:
+    """Re-found 2026-09-17; the July fix for this was never merged.
+
+    `pytest.raises(ValueError)` would not have caught the regression:
+    scikit-learn's own error is also a ValueError. The type that matters is
+    `OptimizationError`, because that is the one the server turns into a 400.
+    """
+
+    @pytest.mark.parametrize(
+        ("x", "y"),
+        [
+            ([0.0, 0.5, 1.0], [1.0, np.nan, 2.0]),
+            ([0.0, 0.5, 1.0], [1.0, np.inf, 2.0]),
+            ([0.0, np.nan, 1.0], [1.0, 1.5, 2.0]),
+            ([0.0, 0.5, -np.inf], [1.0, 1.5, 2.0]),
+        ],
+    )
+    def test_optimize(self, x, y):
+        with pytest.raises(OptimizationError, match="finite"):
+            optimize(
+                np.array(x),
+                np.array(y),
+                bounds=(0.0, 1.0),
+                input_name="x",
+                target_name="y",
+                seed=0,
+            )

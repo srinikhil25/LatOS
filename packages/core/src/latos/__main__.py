@@ -63,6 +63,16 @@ def _rehearse(argv: list[str]) -> int:
     )
     parser.add_argument("--budget", type=int, required=True, help="total experiments available")
     parser.add_argument("--seeds", type=int, default=40, help="random repetitions per shape")
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help=(
+            "skip the reliability assessment. Roughly seven times quicker, and "
+            "NOT what the tool does at the bench: without it the exploration "
+            "fallback cannot fire, which measured 92%% solved against the "
+            "shipped 59%%. The report says so in its own output."
+        ),
+    )
     args = parser.parse_args(argv)
 
     report = rehearse(
@@ -70,6 +80,7 @@ def _rehearse(argv: list[str]) -> int:
         noise=args.noise,
         budget=args.budget,
         n_seeds=args.seeds,
+        shipped_configuration=not args.fast,
     )
     print(report.summary())
     return 0

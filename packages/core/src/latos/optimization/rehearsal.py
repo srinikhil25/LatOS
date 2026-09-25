@@ -18,6 +18,16 @@ nothing about whether nature follows any of them. Every report carries that
 sentence in `RehearsalReport.caveat`, because a number reported without it would
 manufacture exactly the false confidence this project exists to remove.
 
+It also has to rehearse the tool that will actually run. Until 2026-09-10 this
+module passed `with_reliability=False` for speed, and the side effect was that
+`reliability` came back None, `is_exploratory` was always False, and the
+reliability-gated exploration fallback could never fire. Every budget it had ever
+reported therefore described a configuration nobody runs — 92 % solved against
+the shipped tool's 59 % on interior-optimum shapes at 10 % noise. That is the
+same class of error as a report that omits its caveat, and it is worse, because
+a wrong number reads as a measurement. `shipped_configuration` now controls it
+and defaults to the truth; the fast path announces itself in `summary()`.
+
 Auditioning a prior
 -------------------
 The most valuable use is settling an argument that would otherwise be settled by
@@ -51,7 +61,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from latos.optimization.engine import optimize
+from latos.optimization.acquisitions import DEFAULT_ACQUISITION
+from latos.optimization.engine import _DEFAULT_EXPLORE_POLICY, optimize
 
 __all__ = [
     "HARMS",
@@ -123,6 +134,10 @@ class RehearsalReport:
     tolerance: float
     noise: float
     n_seeds: int
+    # Which configuration produced the numbers above. Recorded rather than
+    # assumed, for the same reason `BoConfig.acquisition_function` is: a report
+    # that does not say what it measured cannot be checked against the tool.
+    shipped_configuration: bool = True
     caveat: str = CAVEAT
     prior_verdict: str | None = None  # HELPS, NEUTRAL, HARMS, or None if not auditioned
     prior_detail: str = ""
@@ -134,6 +149,13 @@ class RehearsalReport:
             f"Rehearsal over {len(self.outcomes)} shapes, {self.n_seeds} seeds, "
             f"budget {self.budget}, noise {self.noise:.0%}, tolerance {self.tolerance:.0%}.",
         ]
+        if not self.shipped_configuration:
+            lines.append(
+                "FAST PATH: reliability was not assessed, so the exploration "
+                "fallback never fired. These numbers are NOT what the tool does "
+                "at the bench: it solved 92 % against the shipped 59 % on one "
+                "measured comparison. Do not quote them as a budget."
+            )
         if self.median_experiments is None:
             lines.append(
                 "On the shapes that discriminate, over half the runs did not reach the "
@@ -207,6 +229,9 @@ def rehearse(
     shapes: Sequence[Shape] | None = None,
     n_seeds: int = _DEFAULT_SEEDS,
     tolerance: float = _DEFAULT_TOLERANCE,
+    acquisition: str = DEFAULT_ACQUISITION,
+    explore_policy: str = _DEFAULT_EXPLORE_POLICY,
+    shipped_configuration: bool = True,
 ) -> RehearsalReport:
     """Replay the planned campaign against known objectives, before running it.
 
@@ -224,6 +249,24 @@ def rehearse(
         n_seeds: Random repetitions per shape. The medians are only as stable as
             this number.
         tolerance: How close to the true optimum counts as solved, as a fraction.
+        acquisition: Which acquisition function picks the exploit point. Held
+            here rather than left to the engine's default so that an arm can be
+            compared against the shipped one on identical shapes and seeds.
+        explore_policy: What to recommend when the improvement signal is
+            exhausted on exploratory data. This interacts with `acquisition`
+            more than it looks: at these sample sizes a noisy incumbent can
+            drive EI to zero everywhere, the exhaustion test then fires on the
+            first round, and the fallback picks the point instead — so under the
+            shipped "max_std" the acquisition may never decide anything. Pass
+            "ei" to remove the fallback and measure the acquisitions alone.
+        shipped_configuration: Assess reliability on every round, as the tool
+            does at the bench, so the exploration fallback can fire. True by
+            default because a rehearsal that reports a different configuration
+            from the product is worse than no rehearsal — it is a confident
+            number for a tool nobody is running. Costs roughly seven times the
+            runtime per round, because reliability means n leave-one-out
+            refits. Pass False for the fast path, and do not quote the budget
+            it returns as the tool's.
 
     Returns:
         A `RehearsalReport`. Read `caveat` before quoting anything from it.
@@ -254,6 +297,9 @@ def rehearse(
             prior_mean=None,
             n_seeds=n_seeds,
             tolerance=tolerance,
+            acquisition=acquisition,
+            explore_policy=explore_policy,
+            shipped_configuration=shipped_configuration,
         )
         for shape in family
     )
@@ -268,6 +314,7 @@ def rehearse(
             tolerance=tolerance,
             noise=noise,
             n_seeds=n_seeds,
+            shipped_configuration=shipped_configuration,
         )
 
     primed = tuple(
@@ -280,6 +327,9 @@ def rehearse(
             prior_mean=prior_mean,
             n_seeds=n_seeds,
             tolerance=tolerance,
+            acquisition=acquisition,
+            explore_policy=explore_policy,
+            shipped_configuration=shipped_configuration,
         )
         for shape in family
     )
@@ -293,6 +343,7 @@ def rehearse(
         tolerance=tolerance,
         noise=noise,
         n_seeds=n_seeds,
+        shipped_configuration=shipped_configuration,
         prior_verdict=verdict,
         prior_detail=detail,
         prior_outcomes=primed,
@@ -309,6 +360,9 @@ def _rehearse_shape(
     prior_mean: Callable[[np.ndarray], np.ndarray] | None,
     n_seeds: int,
     tolerance: float,
+    acquisition: str = DEFAULT_ACQUISITION,
+    explore_policy: str = _DEFAULT_EXPLORE_POLICY,
+    shipped_configuration: bool = True,
 ) -> ShapeOutcome:
     grid = np.linspace(bounds[0], bounds[1], 1001)
     truth = np.abs(shape.fn(grid))
@@ -325,6 +379,9 @@ def _rehearse_shape(
             prior_mean=prior_mean,
             seed=seed,
             target=(1.0 - tolerance) * best_true,
+            acquisition=acquisition,
+            explore_policy=explore_policy,
+            shipped_configuration=shipped_configuration,
         )
         for seed in range(n_seeds)
     ]
@@ -350,6 +407,9 @@ def _one_run(
     prior_mean: Callable[[np.ndarray], np.ndarray] | None,
     seed: int,
     target: float,
+    acquisition: str = DEFAULT_ACQUISITION,
+    explore_policy: str = _DEFAULT_EXPLORE_POLICY,
+    shipped_configuration: bool = True,
 ) -> int | None:
     """Experiments until the best sample *made* is good enough, or None.
 
@@ -386,8 +446,18 @@ def _one_run(
                 direction="maximize",
                 measured_noise=max(sigma, 1e-12),
                 prior_mean=prior_mean,
-                with_reliability=False,
+                # THE point of `shipped_configuration`. This was hardcoded
+                # False for speed, and the side effect was that `reliability`
+                # came back None, `is_exploratory` was therefore False, and the
+                # reliability-gated exploration fallback could never fire. So
+                # every budget this harness has ever reported described a
+                # configuration the bench does not run: measured 2026-09-10 at
+                # 92 % solved against the shipped tool's 59 % on
+                # interior-optimum shapes at 10 % noise.
+                with_reliability=shipped_configuration,
                 seed=int(rng.integers(0, 10_000)),
+                acquisition=acquisition,
+                explore_policy=explore_policy,
             )
             measure(float(result.recommendation.x))
             if running >= target:

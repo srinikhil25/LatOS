@@ -62,10 +62,18 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 import numpy as np
 from scipy.optimize import minimize
 from scipy.spatial import cKDTree
-from scipy.stats import norm, qmc
+from scipy.stats import qmc
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel, Matern
+
+from latos.optimization.acquisitions import (
+    ACQUISITIONS,
+    DEFAULT_ACQUISITION,
+    AcquisitionInputs,
+    acquire,
+    expected_improvement,
+)
 
 __all__ = [
     "BoConfig",
@@ -152,13 +160,24 @@ _DEFAULT_KERNEL = "rbf"
 
 # What to recommend when the improvement signal is exhausted but the data is
 # still exploratory (the branch near the end of `optimize`):
-#   "max_std"  argmax posterior sd — the largest unmeasured gap. Shipped.
-#   "ei"       no fallback: keep the max-EI pick and let EI decide alone.
-#   "ucb"      argmax(mean + _UCB_LAMBDA * sd) — optimism, between the two.
+#   "max_std"     argmax posterior sd. Shipped.
+#   "ei"          no fallback: keep the max-EI pick and let EI decide alone.
+#   "ucb"         argmax(mean + _UCB_LAMBDA * sd) — optimism, between the two.
+#   "widest_gap"  the midpoint of the largest unmeasured interval — geometry
+#                 only, no posterior. Added 2026-09-10, NOT the default.
 # Note this governs only *where to point*. Whether the engine declares
 # convergence stays gated on the reliability tier either way, which is the part
 # three independent stopping papers support.
-_EXPLORE_POLICIES = ("max_std", "ei", "ucb")
+#
+# `max_std` was described in this file as "the largest unmeasured gap" for
+# months, and on an over-smoothed posterior it is not that. Measured on the
+# sharp peak, the posterior sd goes flat to seven significant figures — range
+# [0.00368, 0.00368], eight grid points tied at the maximum — so which point
+# wins is settled by where a tie falls. The design it produced spent 2 of 9
+# picks re-measuring endpoints the seed design already held. `widest_gap` is
+# that description implemented literally: it cannot return a duplicate, because
+# the midpoint of an interval between two observations is neither of them.
+_EXPLORE_POLICIES = ("max_std", "ei", "ucb", "widest_gap")
 # Kept at "max_std" on 2026-09-02, after a measurement that REFUTED the case for
 # changing it. Four reviewed papers (Borg, Rohr, Srinivas, Shields) measure pure
 # uncertainty sampling as the weakest available policy, and that was read here as
@@ -368,6 +387,20 @@ class BoConfig:
     # the pre-registration's training-data digest covers the weighting too.
     # Effective per-point sd is `noise_std * point_noise_scale[i]`.
     point_noise_scale: tuple[float, ...] | None = None
+    # Which acquisition function chose the point — one of
+    # `acquisitions.ACQUISITIONS`. Absent means a record written before the
+    # alternatives existed, when it could only have been "ei". Recorded because
+    # `optimize_nd` once hardcoded "RBF" into its config while the surrogate
+    # used whatever the helper defaulted to, and every result still claimed
+    # RBF: a config that says what was *asked for* rather than what ran is
+    # worse than no config, because it looks auditable.
+    #
+    # Spelled out in full to keep it distinct from `BoConfigND.acquisition`,
+    # which is a different quantity under a similar name — how the acquisition
+    # surface was maximised ("sobol" or "sobol+lbfgsb"), not which function was
+    # maximised. That field is persisted in existing records and cannot be
+    # renamed, so this one carries the longer name.
+    acquisition_function: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1019,14 +1052,24 @@ class _Surrogate(Protocol):
     keeps the return honest and documents, in one place, exactly how narrow the
     surface is that the prior wrapper has to reproduce.
 
-    `predict` is annotated loosely on purpose. It returns an array normally and
-    a `(mean, std)` pair when `return_std=True`, which is scikit-learn's own
-    convention; spelling that as a union would break every call site that
-    unpacks two values.
+    `predict` is annotated loosely on purpose. It returns an array normally, a
+    `(mean, std)` pair when `return_std=True` and a `(mean, cov)` pair when
+    `return_cov=True`, which is scikit-learn's own convention; spelling that as
+    a union would break every call site that unpacks two values.
+
+    `return_cov` is here because the knowledge-gradient acquisition needs the
+    full posterior covariance over the grid, not just its diagonal — the
+    post-observation update is rank one, and its direction is a column of that
+    matrix. It is the only consumer, and the covariance is the one O(grid^2)
+    object in this module, so nothing else asks for it.
     """
 
-    def predict(self, X: np.ndarray, return_std: bool = False) -> Any:  # noqa: N803
-        ...
+    def predict(
+        self,
+        X: np.ndarray,  # noqa: N803
+        return_std: bool = False,
+        return_cov: bool = False,
+    ) -> Any: ...
 
     def sample_y(
         self,
@@ -1070,11 +1113,24 @@ class _PriorMeanGP:
         self._gp = gp
         self._offsets = offsets
 
-    def predict(self, X: np.ndarray, return_std: bool = False) -> Any:  # noqa: N803
+    def predict(
+        self,
+        X: np.ndarray,  # noqa: N803
+        return_std: bool = False,
+        return_cov: bool = False,
+    ) -> Any:
         shift = self._offsets(X)
         if return_std:
             mean, std = self._gp.predict(X, return_std=True)
             return mean + shift, std
+        if return_cov:
+            # The prior is a deterministic curve, so it shifts the mean and
+            # leaves every second moment alone. Passing this through matters:
+            # without it `return_cov` was silently ignored, and the
+            # knowledge-gradient arm would have indexed element 1 of a mean
+            # vector and called it a covariance.
+            mean, cov = self._gp.predict(X, return_cov=True)
+            return mean + shift, cov
         return self._gp.predict(X) + shift
 
     def sample_y(
@@ -1207,19 +1263,105 @@ def _xi_absolute(xi: float, y_int: np.ndarray, noise_std: float) -> float:
     return float(xi) * scale
 
 
-def _expected_improvement(
-    mu: np.ndarray, sigma: np.ndarray, f_best: float, xi: float
-) -> np.ndarray:
-    """Expected improvement over `f_best` (maximization).
+# Expected improvement now lives in `acquisitions`, beside the alternatives it
+# is being compared against, so the baseline and the challengers cannot drift
+# apart. The private name stays because every call site in this module uses it.
+# `xi` is absolute, in the fit space's units — call `_xi_absolute` on the
+# caller's relative value first.
+_expected_improvement = expected_improvement
 
-    `xi` here is absolute, in the fit space's units — call `_xi_absolute` on
-    the caller's relative value first.
+
+def _score_acquisition(
+    name: str,
+    gp: _Surrogate,
+    *,
+    ei: np.ndarray,
+    x_col: np.ndarray,
+    grid_norm: np.ndarray,
+    mean_int: np.ndarray,
+    std: np.ndarray,
+    f_best_int: float,
+    noise_std: float,
+    xi_abs: float,
+) -> np.ndarray:
+    """Score the grid under `name`, gathering whatever that arm needs.
+
+    EI is computed by the caller unconditionally, whatever `name` says, because
+    the convergence test is `max(ei) < noise_std` — a threshold in EI's own
+    units against the measurement noise. `kg` is in units of improvement in the
+    reported optimum and `mes` is in nats, so sharing that threshold would mean
+    something different in every arm. The acquisition decides *where the next
+    point goes* and nothing else, which is what makes a comparison between arms
+    a comparison of one thing.
+
+    `f_best_plugin` is the posterior mean at the measured points, not the best
+    reading. The maximum of n noisy readings is biased upward, so `f_best_int`
+    asks every candidate to beat a target nothing can reach; the plug-in
+    incumbent is what the model believes was actually achieved. See
+    `acquisitions` for why each arm exists and what it does about that.
     """
-    sigma = np.maximum(sigma, 1e-9)
-    improvement = mu - f_best - xi
-    z = improvement / sigma
-    ei = improvement * norm.cdf(z) + sigma * norm.pdf(z)
-    return np.asarray(ei, dtype=float)
+    if name == "ei":
+        return ei
+    return acquire(
+        name,
+        AcquisitionInputs(
+            mu=mean_int,
+            sigma=std,
+            f_best_observed=f_best_int,
+            f_best_plugin=float(np.max(np.asarray(gp.predict(x_col), dtype=float))),
+            noise_std=noise_std,
+            xi=xi_abs,
+            # The posterior covariance is the one O(grid^2) object in this
+            # module, so only the arm that needs it pays for it.
+            cov=(
+                np.asarray(gp.predict(grid_norm.reshape(-1, 1), return_cov=True)[1])
+                if name == "kg"
+                else None
+            ),
+        ),
+    )
+
+
+def _widest_gap_index(grid: np.ndarray, observed: np.ndarray) -> int:
+    """Grid index nearest the midpoint of the largest unmeasured interval.
+
+    Geometry only: the posterior is not consulted, so this cannot be misled by
+    an over-smoothed fit — and cannot be guided by a good one either. The
+    intervals are bounded by the search box as well as by the observations, so
+    an unsampled end of the range competes with an interior gap on equal terms.
+
+    Unlike `argmax(std)` it can never return a point already measured: the
+    midpoint of an interval between two distinct observations is neither of
+    them, and a zero-width interval is never the widest unless every interval
+    is, which needs the box itself to be degenerate.
+    """
+    edges = np.concatenate(
+        ([float(grid[0])], np.sort(np.asarray(observed, dtype=float)), [float(grid[-1])])
+    )
+    widest = int(np.argmax(np.diff(edges)))
+    midpoint = 0.5 * (edges[widest] + edges[widest + 1])
+    return int(np.argmin(np.abs(np.asarray(grid, dtype=float) - midpoint)))
+
+
+def _explore_index(
+    policy: str,
+    *,
+    grid: np.ndarray,
+    observed: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> int:
+    """Where the exploration fallback points, once it has decided to fire.
+
+    Separate from the decision to fire, which is a reliability question and
+    stays with the caller. "max_std" is the shipped behaviour; the other two
+    are here to be measured against it, not because either is believed better.
+    """
+    if policy == "ucb":
+        return int(np.argmax(mean + _UCB_LAMBDA * std))
+    if policy == "widest_gap":
+        return _widest_gap_index(grid, observed)
+    return int(np.argmax(std))
 
 
 def _recommend(
@@ -1418,6 +1560,7 @@ def _validate_inputs(
     direction: str,
     kernel: str,
     explore_policy: str,
+    acquisition: str,
 ) -> None:
     """Reject argument combinations the optimizer cannot act on.
 
@@ -1425,11 +1568,18 @@ def _validate_inputs(
     argument, rather than opening with a page of guards.
 
     Raises:
-        OptimizationError: On mismatched shapes, too few points, or an
-            unrecognised direction, kernel or exploration policy.
+        OptimizationError: On mismatched shapes, non-finite values, too few
+            points, or an unrecognised direction, kernel, exploration policy or
+            acquisition.
     """
     if x.shape != y.shape:
         raise OptimizationError(f"x and y length mismatch: {x.shape} vs {y.shape}")
+    # Without this, a NaN fails deep inside scikit-learn as a plain ValueError,
+    # which the server's `except OptimizationError` does not catch, so a single
+    # unreadable value turned the Optimize screen into a 500. `optimize_nd` has
+    # always checked; this path lost its check when a July fix went unmerged.
+    if not (np.all(np.isfinite(x)) and np.all(np.isfinite(y))):
+        raise OptimizationError("x and y must be finite; got NaN or Inf in the input data")
     if x.size < _MIN_POINTS:
         raise OptimizationError(
             f"Need at least {_MIN_POINTS} measured points to optimize; got {x.size}"
@@ -1442,6 +1592,8 @@ def _validate_inputs(
         raise OptimizationError(
             f"explore_policy must be one of {_EXPLORE_POLICIES}; got {explore_policy!r}"
         )
+    if acquisition not in ACQUISITIONS:
+        raise OptimizationError(f"acquisition must be one of {ACQUISITIONS}; got {acquisition!r}")
     lo, hi = bounds
     if not hi > lo:
         raise OptimizationError(f"bounds must have high > low; got {bounds}")
@@ -1474,6 +1626,7 @@ def optimize(
     delta: float = _DEFAULT_DELTA,
     kernel: str = _DEFAULT_KERNEL,
     explore_policy: str = _DEFAULT_EXPLORE_POLICY,
+    acquisition: str = DEFAULT_ACQUISITION,
 ) -> OptimizationResult:
     """Run one round of Bayesian optimization over a 1-D parameter.
 
@@ -1576,12 +1729,28 @@ def optimize(
         explore_policy: What to recommend when the improvement signal is
             exhausted but the data is still exploratory, one of
             `_EXPLORE_POLICIES`. "max_std" (default) is the shipped
-            behaviour: recommend the point of greatest posterior sd, i.e. the
-            largest unmeasured gap. "ei" removes the fallback and keeps the
-            max-EI pick. "ucb" replaces it with `argmax(mean + 2 sd)`, which
-            explores only where the model also thinks the value could be high.
+            behaviour: recommend the point of greatest posterior sd. That is
+            NOT the same as the largest unmeasured gap, though this docstring
+            claimed it was until 2026-09-10 — on an over-smoothed posterior the
+            sd surface goes flat and a tie-break decides. "ei" removes the
+            fallback and keeps the max-EI pick. "ucb" replaces it with
+            `argmax(mean + 2 sd)`, which explores only where the model also
+            thinks the value could be high. "widest_gap" is the gap reading
+            implemented literally, from geometry alone; measured better than
+            "max_std" on both median and worst case in 1-D at 10 % noise, and
+            still not the default, because that is one noise level and one
+            dimension.
             This governs the recommendation only — whether convergence is
             declared stays gated on the reliability tier regardless.
+        acquisition: Which acquisition function picks the exploit point, one of
+            `acquisitions.ACQUISITIONS`. "ei" (default) is the shipped
+            behaviour. The alternatives exist because EI measures improvement
+            over `max(y)`, and the maximum of n noisy readings is biased
+            upward, so EI is computed against a target nothing can reach —
+            see `acquisitions` for what each arm does about that. This changes
+            *where* the next point goes and nothing else: EI is computed
+            regardless, because the convergence test is calibrated in EI's
+            units against the measurement noise.
 
     Returns:
         An `OptimizationResult` with the posterior, the recommendation,
@@ -1594,7 +1763,13 @@ def optimize(
     x = np.asarray(x, dtype=float).ravel()
     y = np.asarray(y, dtype=float).ravel()
     _validate_inputs(
-        x, y, bounds, direction=direction, kernel=kernel, explore_policy=explore_policy
+        x,
+        y,
+        bounds,
+        direction=direction,
+        kernel=kernel,
+        explore_policy=explore_policy,
+        acquisition=acquisition,
     )
     lo, hi = bounds
 
@@ -1656,6 +1831,19 @@ def optimize(
     xi_abs = _xi_absolute(xi, y_int, noise_std)
     ei = _expected_improvement(mean_int, std, f_best_int, xi_abs)
 
+    acq = _score_acquisition(
+        acquisition,
+        gp,
+        ei=ei,
+        x_col=x_col,
+        grid_norm=grid_norm,
+        mean_int=mean_int,
+        std=std,
+        f_best_int=f_best_int,
+        noise_std=noise_std,
+        xi_abs=xi_abs,
+    )
+
     # Undo the direction flip, then map the posterior back to physical units,
     # clamped to the property's domain. The band [lower, upper] is exact even
     # when the log inverse makes it asymmetric.
@@ -1666,6 +1854,17 @@ def optimize(
 
     ei_i = int(np.argmax(ei))
     max_ei = float(ei[ei_i])
+    # Where the exploit pick lands. Identical to `ei_i` in the default arm.
+    #
+    # A perfectly flat acquisition surface expresses no preference, and
+    # `argmax` on one silently returns index 0 — the low end of the search
+    # range, which is a specific and usually poor choice wearing the clothes of
+    # a decision. Measured on 2026-09-10: `kg` under a `prior_mean` is
+    # identically zero at every candidate, because a length-scale pinned at its
+    # ceiling makes the rank-one update direction constant across the grid. EI
+    # is computed on every path anyway, so deferring to it is the one tie-break
+    # available that is not an arbitrary corner of the box.
+    acq_i = ei_i if float(np.ptp(acq)) == 0.0 else int(np.argmax(acq))
     # Stopping rule (in fit space): the improvement signal is *exhausted* when
     # the best expected improvement is smaller than the measurement-noise floor
     # — no experiment can then reliably do better. This is necessary for
@@ -1706,6 +1905,7 @@ def optimize(
         n_observations=int(x.size),
         grid_size=grid_size,
         seed=seed,
+        acquisition_function=acquisition,
         created_at=created_at if created_at is not None else datetime.now(UTC),
     )
 
@@ -1724,10 +1924,9 @@ def optimize(
     # signal is exhausted but the data is still exploratory, a flat EI does not
     # mean "optimum found" — the surrogate is simply uninformative in the gaps
     # it never sampled. Two consequences: (1) do not report convergence (a
-    # false stop), and (2) recommend the point of greatest posterior
-    # uncertainty (the largest unmeasured gap), which is the most informative
-    # next experiment, rather than the max-EI point sitting beside the current
-    # best. Otherwise recommend the max-EI (exploit) point. When reliability
+    # false stop), and (2) recommend an uninformed-but-informative point
+    # instead of the max-EI point sitting beside the current best. Which point
+    # is `explore_policy`'s job. Otherwise recommend the max-EI (exploit) point. When reliability
     # was not assessed (the robustness sweep, which reads neither field), fall
     # back to the plain max-EI pick.
     #
@@ -1742,12 +1941,11 @@ def optimize(
     is_exploratory = reliability is not None and reliability.level == "exploratory"
     converged = signal_exhausted and not is_exploratory
     explore = signal_exhausted and is_exploratory and explore_policy != "ei"
-    if not explore:
-        rec_i = ei_i
-    elif explore_policy == "ucb":
-        rec_i = int(np.argmax(mean_int + _UCB_LAMBDA * std))
-    else:
-        rec_i = int(np.argmax(std))
+    rec_i = (
+        _explore_index(explore_policy, grid=grid, observed=x, mean=mean_int, std=std)
+        if explore
+        else acq_i
+    )
     recommendation = _recommend(
         grid,
         rec_i,
@@ -1949,6 +2147,9 @@ class BoConfigND:
     input_names: tuple[str, ...]
     bounds: tuple[tuple[float, float], ...]
     kernel: str
+    # How the acquisition surface was MAXIMISED, not which function was
+    # maximised. Compare `BoConfig.acquisition_function`, which is the other
+    # thing. Kept under this name because it is persisted in existing records.
     acquisition: str  # "sobol" or "sobol+lbfgsb"
     n_dims: int
     x_scales: tuple[float, ...]  # raw units per normalized unit, per axis

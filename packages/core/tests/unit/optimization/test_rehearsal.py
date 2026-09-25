@@ -25,7 +25,18 @@ from latos.optimization.rehearsal import (
 )
 
 BOUNDS = (0.0, 1.0)
-FAST = {"n_seeds": 8, "budget": 9, "noise": 0.06}
+# The mechanics tests opt OUT of the shipped configuration on purpose. They are
+# about the harness — verdicts, guards, report shape — not about what the bench
+# achieves, and reliability assessment means n leave-one-out refits per round:
+# this file makes roughly 4800 optimizer calls, which is three minutes on the
+# fast path and over half an hour on the real one. The shipped default is
+# covered by `TestItRehearsesTheToolThatWillActuallyRun` below.
+FAST = {"n_seeds": 8, "budget": 9, "noise": 0.06, "shipped_configuration": False}
+
+# The shipped path refits leave-one-out per round, so a run costs roughly seven
+# times a FAST one. Item 8c's tests use the smallest campaign that still
+# exercises the fallback.
+SHIPPED = {"n_seeds": 3, "budget": 6, "noise": 0.06}
 
 
 def _sharp_peak() -> Shape:
@@ -126,7 +137,13 @@ class TestAuditioningAPrior:
         """
         peak = _sharp_peak()
         report = rehearse(
-            bounds=BOUNDS, shapes=(peak,), prior_mean=peak.fn, n_seeds=8, budget=9, noise=0.06
+            bounds=BOUNDS,
+            shapes=(peak,),
+            prior_mean=peak.fn,
+            n_seeds=8,
+            budget=9,
+            noise=0.06,
+            shipped_configuration=False,
         )
         assert report.prior_verdict == HELPS
 
@@ -143,6 +160,7 @@ class TestAuditioningAPrior:
             n_seeds=10,
             budget=9,
             noise=0.06,
+            shipped_configuration=False,
         )
         assert report.prior_verdict == HARMS
         assert "suppresses the search" in report.prior_detail
@@ -150,7 +168,13 @@ class TestAuditioningAPrior:
     def test_a_verdict_always_carries_its_numbers(self):
         peak = _sharp_peak()
         report = rehearse(
-            bounds=BOUNDS, shapes=(peak,), prior_mean=peak.fn, n_seeds=8, budget=9, noise=0.06
+            bounds=BOUNDS,
+            shapes=(peak,),
+            prior_mean=peak.fn,
+            n_seeds=8,
+            budget=9,
+            noise=0.06,
+            shipped_configuration=False,
         )
         assert "%" in report.prior_detail
         assert report.prior_verdict in {HELPS, NEUTRAL, HARMS}
@@ -159,7 +183,13 @@ class TestAuditioningAPrior:
         """Both halves of the comparison stay on the report, not just the verdict."""
         peak = _sharp_peak()
         report = rehearse(
-            bounds=BOUNDS, shapes=(peak,), prior_mean=peak.fn, n_seeds=8, budget=9, noise=0.06
+            bounds=BOUNDS,
+            shapes=(peak,),
+            prior_mean=peak.fn,
+            n_seeds=8,
+            budget=9,
+            noise=0.06,
+            shipped_configuration=False,
         )
         assert len(report.outcomes) == 1
         assert len(report.prior_outcomes) == 1
@@ -214,3 +244,78 @@ class TestScoring:
         tight = rehearse(bounds=BOUNDS, shapes=(peak,), n_seeds=8, budget=4, noise=0.06)
         roomy = rehearse(bounds=BOUNDS, shapes=(peak,), n_seeds=8, budget=12, noise=0.06)
         assert roomy.solved_fraction >= tight.solved_fraction
+
+
+class TestItRehearsesTheToolThatWillActuallyRun:
+    """Item 8c, fixed 2026-09-10.
+
+    This module passed `with_reliability=False` for speed. The side effect was
+    that `reliability` came back None, so `is_exploratory` was always False, so
+    the reliability-gated exploration fallback could never fire — and every
+    budget the harness reported described a configuration nobody runs. Measured
+    at 92 % solved against the shipped tool's 59 % on interior-optimum shapes
+    at 10 % noise, which is a big enough gap to have misinformed a real
+    campaign plan, and it did.
+
+    These tests are deliberately small — the default path is slow, because
+    reliability means n leave-one-out refits per round.
+    """
+
+    def test_the_default_assesses_reliability(self):
+        # The whole fix: absent an explicit choice, rehearse the real tool.
+        report = rehearse(bounds=BOUNDS, shapes=(_sharp_peak(),), **SHIPPED)
+        assert report.shipped_configuration is True
+
+    def test_the_fast_path_is_recorded_on_the_report(self):
+        report = rehearse(
+            bounds=BOUNDS,
+            shapes=(_sharp_peak(),),
+            shipped_configuration=False,
+            **SHIPPED,
+        )
+        assert report.shipped_configuration is False
+
+    def test_the_fast_path_says_so_in_its_own_summary(self):
+        """A number that describes the wrong configuration has to announce it.
+
+        Someone reads `summary()` and quotes the budget; if the only record of
+        which configuration produced it is a keyword argument three call frames
+        up, the warning does not exist where it is needed.
+        """
+        fast = rehearse(
+            bounds=BOUNDS,
+            shapes=(_sharp_peak(),),
+            shipped_configuration=False,
+            **SHIPPED,
+        ).summary()
+        assert "FAST PATH" in fast
+        assert "NOT what the tool does" in fast
+
+    def test_the_shipped_summary_carries_no_such_warning(self):
+        shipped = rehearse(bounds=BOUNDS, shapes=(_sharp_peak(),), **SHIPPED).summary()
+        assert "FAST PATH" not in shipped
+
+    def test_both_paths_still_carry_the_standing_caveat(self):
+        # The configuration warning is additional to the caveat, not instead of
+        # it: neither path is evidence about what nature does.
+        for shipped in (True, False):
+            report = rehearse(
+                bounds=BOUNDS,
+                shapes=(_sharp_peak(),),
+                shipped_configuration=shipped,
+                **SHIPPED,
+            )
+            assert CAVEAT in report.summary()
+
+    def test_the_two_paths_can_disagree_about_the_budget(self):
+        """Not an assertion about which is better — only that the flag reaches
+        the engine and changes what is measured. If these were identical the
+        parameter would be decorative and the bug unfixed."""
+        peak = _sharp_peak()
+        kw = {"bounds": BOUNDS, "shapes": (peak,), "n_seeds": 8, "budget": 12, "noise": 0.10}
+        shipped = rehearse(shipped_configuration=True, **kw)
+        fast = rehearse(shipped_configuration=False, **kw)
+        assert (shipped.solved_fraction, shipped.median_experiments) != (
+            fast.solved_fraction,
+            fast.median_experiments,
+        )
