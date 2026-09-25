@@ -38,8 +38,10 @@ from latos.optimization.engine import (
 from latos.optimization.prereg import (
     build_record,
     freeze,
+    freeze_new,
     observations_digest,
     prereg_dir,
+    unused_record_path,
     write_record,
 )
 from latos.optimization.rehearsal import (
@@ -82,6 +84,7 @@ __all__ = [
     "build_record",
     "default_shapes",
     "freeze",
+    "freeze_new",
     "prereg_dir",
     "length_scale_robustness",
     "list_preregistrations",
@@ -93,6 +96,7 @@ __all__ = [
     "spb",
     "sweep",
     "synthesis_sim",
+    "unused_record_path",
     "validate_outcome",
     "write_outcome",
     "write_record",

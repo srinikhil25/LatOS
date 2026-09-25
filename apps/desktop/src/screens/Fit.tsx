@@ -377,7 +377,7 @@ export function Fit({ onBack }: { onBack: () => void }) {
                   </thead>
                   <tbody>
                     {result.components.map((c, i) => (
-                      <tr key={c.center} className="border-b border-edge last:border-0">
+                      <tr key={`${c.center}-${i}`} className="border-b border-edge last:border-0">
                         <td className="px-4 py-2">{i + 1}</td>
                         <td className="px-4 py-2 text-right">{fmt(c.center)}</td>
                         <td className="px-4 py-2 text-right">{fmt(c.amplitude)}</td>
@@ -458,9 +458,9 @@ function SpectrumPlot({
         {/* fit */}
         <path d={path(fit, syTop)} fill="none" stroke="var(--latos-accent)" strokeWidth={1.6} />
         {/* peak markers */}
-        {peaks.map((p) => (
+        {peaks.map((p, i) => (
           <line
-            key={p}
+            key={`${p}-${i}`}
             x1={sx(p)}
             x2={sx(p)}
             y1={pad}

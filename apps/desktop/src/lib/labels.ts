@@ -35,6 +35,10 @@ const AXIS_LABELS: Record<string, string> = {
   resistivity_ohm_cm: "Resistivity (Ω·cm)",
   seebeck_uv_k: "Seebeck coefficient (µV/K)",
   seebeck_uvk: "Seebeck coefficient (µV/K)",
+  // Sign-bearing targets are optimized by magnitude; the server names them so.
+  "|seebeck_uv_k|": "|S|, Seebeck magnitude (µV/K)",
+  "|seebeck_uvk|": "|S|, Seebeck magnitude (µV/K)",
+  "|carrier_concentration_cm3|": "|n|, carrier concentration (cm⁻³)",
   thermal_conductivity: "Thermal conductivity (W/m·K)",
   diffusivity_mm2_s: "Thermal diffusivity (mm²/s)",
   cp_j_gk: "Specific heat, cₚ (J/g·K)",

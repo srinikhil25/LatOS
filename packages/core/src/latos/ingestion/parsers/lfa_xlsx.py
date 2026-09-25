@@ -66,7 +66,9 @@ class LfaXlsxParser(BaseParser):
     """Parser for LFA thermal-conductivity `.xlsx` exports."""
 
     name: ClassVar[str] = "lfa-xlsx"
-    version: ClassVar[str] = "1.0.0"
+    # 1.0.1 (2026-09-17): incomplete rows are reported, and a sheet that
+    # fails to read is an issue rather than an exception.
+    version: ClassVar[str] = "1.0.1"
     technique: ClassVar[Technique] = Technique.THERMOELECTRIC
     supported_extensions: ClassVar[tuple[str, ...]] = (".xlsx",)
 
@@ -105,12 +107,26 @@ class LfaXlsxParser(BaseParser):
                 ]
             )
         try:
-            return self._parse_sheet(wb[wb.sheetnames[0]], path)
+            rows = list(wb[wb.sheetnames[0]].iter_rows(values_only=True))
+        except Exception as exc:
+            # A read-only sheet is parsed lazily, so a damaged file can open
+            # cleanly and fail only here; `parse` must not raise.
+            return self._empty(
+                [
+                    ValidationIssue(
+                        field="file",
+                        severity=Severity.ERROR,
+                        message=f"Could not read the sheet: {exc}",
+                        detected_at=utc_now(),
+                    ),
+                ]
+            )
         finally:
             wb.close()
+        return self._parse_rows(rows, path)
 
     # ─── Internals ───────────────────────────────────────────────────
-    def _parse_sheet(self, sheet: Any, path: Path) -> ParsedData:
+    def _parse_rows(self, rows: list[tuple[Any, ...]], path: Path) -> ParsedData:
         col: dict[str, list[float]] = {
             "temperature_k": [],
             "diffusivity_mm2_s": [],
@@ -118,7 +134,9 @@ class LfaXlsxParser(BaseParser):
             "cp_j_gk": [],
         }
         seen_header = False
-        for row in sheet.iter_rows(values_only=True):
+        no_conductivity = 0
+        no_diffusivity = 0
+        for row in rows:
             if not seen_header:
                 if _is_header_row(row):
                     seen_header = True
@@ -127,14 +145,45 @@ class LfaXlsxParser(BaseParser):
             # 3 = conductivity, 4 = Cp.
             if len(row) < _MIN_DATA_COLS or not isinstance(row[0], int | float):
                 continue
+            # Conductivity is the value the transport analysis uses, so a row
+            # without one is left out. Diffusivity is kept as NaN where it is
+            # missing rather than costing the row its conductivity. Both used to
+            # happen without a word (July #5).
             if not isinstance(row[3], int | float):
+                no_conductivity += 1
                 continue
+            if not isinstance(row[2], int | float):
+                no_diffusivity += 1
             col["temperature_k"].append(float(row[0]))
             col["diffusivity_mm2_s"].append(_num(row[2]))
             col["thermal_conductivity"].append(float(row[3]))
             col["cp_j_gk"].append(_num(row[4] if len(row) > _MIN_DATA_COLS else None))
 
         issues: list[ValidationIssue] = []
+        if no_conductivity:
+            issues.append(
+                ValidationIssue(
+                    field="thermal_conductivity",
+                    severity=Severity.WARNING,
+                    message=(
+                        f"{no_conductivity} row(s) with a temperature but no numeric "
+                        "conductivity were left out."
+                    ),
+                    detected_at=utc_now(),
+                ),
+            )
+        if no_diffusivity:
+            issues.append(
+                ValidationIssue(
+                    field="diffusivity_mm2_s",
+                    severity=Severity.WARNING,
+                    message=(
+                        f"{no_diffusivity} row(s) have a conductivity but no numeric "
+                        "diffusivity; the diffusivity is recorded as missing there."
+                    ),
+                    detected_at=utc_now(),
+                ),
+            )
         if not col["temperature_k"]:
             issues.append(
                 ValidationIssue(

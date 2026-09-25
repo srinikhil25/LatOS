@@ -38,6 +38,7 @@ import {
   type SpbCheckResult,
 } from "../lib/api";
 import { OptimizeChart } from "../components/OptimizeChart";
+import { axisLabel } from "../lib/labels";
 import { OptimizeSurfaceChart, type SurfaceMode } from "../components/OptimizeSurfaceChart";
 import { ChartFrame } from "../components/ChartFrame";
 import { AnalysisLoader } from "../components/AnalysisLoader";
@@ -540,7 +541,7 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                       </span>
                     </li>
                     <li>
-                      Predicted {target}:{" "}
+                      Predicted {axisLabel(frozen.target_name || target)}:{" "}
                       <span className="font-medium text-primary">
                         {frozen.recommendation.predicted_mean.toFixed(3)}
                       </span>{" "}
@@ -699,7 +700,7 @@ export function Optimize({ onBack }: { onBack: () => void }) {
                   ))}
                 </ul>
                 <p className="mt-2 text-xs text-secondary">
-                  Predicted {ndResult.target_property}:{" "}
+                  Predicted {axisLabel(ndResult.target_property)}:{" "}
                   <span className="font-medium text-primary">
                     {fmtVal(ndResult.recommendation.predicted_mean)}
                   </span>{" "}

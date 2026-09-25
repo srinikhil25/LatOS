@@ -603,3 +603,76 @@ class TestMeasurementAnalysis:
         response = client.get(f"/measurements/{mid}/analysis")
         assert response.status_code == 200
         assert isinstance(response.json(), list)
+
+
+class TestAResetKeepsThePreRegistrations:
+    """Found 2026-09-17: "Delete project" recycled `.latos/prereg/` with the cache.
+
+    `trash_path` is replaced so these run the same on every CI host and never
+    touch a real Recycle Bin; what is under test is what the reset hands it.
+    """
+
+    def _store(self, root, *, records: int):
+        latos = root / ".latos"
+        (latos / "arrays").mkdir(parents=True)
+        (latos / "arrays" / "m1.parquet").write_bytes(b"x")
+        (latos / "data.db").write_bytes(b"x")
+        (latos / "cluster_decisions.json").write_text("{}", encoding="utf-8")
+        prereg = latos / "prereg"
+        prereg.mkdir()
+        for i in range(records):
+            (prereg / f"prereg_2026091{i}T120000Z.json").write_text("{}", encoding="utf-8")
+            (prereg / f"prereg_2026091{i}T120000Z.md").write_text("", encoding="utf-8")
+        if records:
+            (prereg / "prereg_20260910T120000Z.outcome.json").write_text("{}", encoding="utf-8")
+        return latos
+
+    def _client(self, monkeypatch):
+        import shutil
+
+        import latos.server.app as app_module
+
+        handed: list = []
+
+        def fake_trash(path):
+            handed.append(path)
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            return True
+
+        monkeypatch.setattr(app_module, "trash_path", fake_trash)
+        return TestClient(create_app()), handed
+
+    def test_everything_but_the_records_is_cleared(self, tmp_path, monkeypatch):
+        latos = self._store(tmp_path, records=2)
+        client, handed = self._client(monkeypatch)
+
+        body = client.post("/project/delete", json={"root": str(tmp_path)}).json()
+
+        assert body["removed"] is True
+        assert body["kept_preregistrations"] == 2  # the outcome file is not a record
+        assert sorted(p.name for p in latos.iterdir()) == ["prereg"]
+        assert len(list((latos / "prereg").iterdir())) == 5
+        assert all("prereg" not in p.parts for p in handed)
+
+    def test_an_empty_store_disappears_entirely(self, tmp_path, monkeypatch):
+        latos = self._store(tmp_path, records=0)
+        client, _ = self._client(monkeypatch)
+
+        body = client.post("/project/delete", json={"root": str(tmp_path)}).json()
+
+        assert body["kept_preregistrations"] == 0
+        assert not latos.exists()
+
+    def test_a_missing_store_is_still_a_success(self, tmp_path, monkeypatch):
+        client, handed = self._client(monkeypatch)
+        body = client.post("/project/delete", json={"root": str(tmp_path)}).json()
+        assert body == {
+            "root": str(tmp_path),
+            "removed": False,
+            "recycled": True,
+            "kept_preregistrations": 0,
+        }
+        assert handed == []

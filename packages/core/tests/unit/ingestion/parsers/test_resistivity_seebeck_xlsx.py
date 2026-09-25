@@ -7,7 +7,7 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-from latos.core.enums import Technique
+from latos.core.enums import Severity, Technique
 from latos.ingestion.parsers.resistivity_seebeck_xlsx import ResistivitySeebeckXlsxParser
 
 # A few instrument-header rows, then the data block (blank col A + 3 numbers).
@@ -84,3 +84,22 @@ class TestParse:
     def test_sample_name_keeps_doping(self, tmp_path: Path):
         f = _write_rs(tmp_path / "CS-CBI-3 R and S .xlsx")
         assert ResistivitySeebeckXlsxParser().parse(f).metadata["sample_name"] == "CS-CBI-3"
+
+
+class TestDamagedFiles:
+    def test_a_sheet_that_fails_to_read_is_reported_not_raised(self, rs_file: Path):
+        """openpyxl reads a read-only sheet lazily, so this fails after opening."""
+        import zipfile
+
+        with zipfile.ZipFile(rs_file) as source:
+            parts = {i.filename: source.read(i.filename) for i in source.infolist()}
+        sheet = "xl/worksheets/sheet1.xml"
+        parts[sheet] = parts[sheet][: len(parts[sheet]) // 2]
+        with zipfile.ZipFile(rs_file, "w") as target:
+            for name, data in parts.items():
+                target.writestr(name, data)
+
+        d = ResistivitySeebeckXlsxParser().parse(rs_file)
+        assert d.arrays == {}
+        assert d.issues[0].field == "file"
+        assert d.issues[0].severity is Severity.ERROR

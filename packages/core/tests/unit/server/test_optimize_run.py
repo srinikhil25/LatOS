@@ -375,6 +375,87 @@ class TestLoopCloser:
         assert resp.status_code == 404
 
 
+class TestTheLoopCloserSurvivesBadFiles:
+    """Found 2026-09-17; July fixes #4 and #6 were never merged."""
+
+    def _freeze(self, client: TestClient) -> str:
+        return client.post(
+            "/optimize/freeze",
+            json={"input_variable": "doping_pct", "target_property": "zt"},
+        ).json()["path"]
+
+    def test_a_second_validation_is_refused_and_the_first_kept(self, tmp_path: Path):
+        client = _client(tmp_path)
+        path = self._freeze(client)
+        first = client.post(
+            "/optimize/validate", json={"prereg_path": path, "measured_value": 0.10}
+        )
+        assert first.status_code == 200
+        second = client.post(
+            "/optimize/validate", json={"prereg_path": path, "measured_value": 0.95}
+        )
+        assert second.status_code == 409
+        assert "write-once" in second.json()["detail"]
+        listed = client.get("/optimize/prereg").json()
+        assert listed[0]["outcome"]["measured"] == 0.10
+
+    def test_a_damaged_outcome_file_does_not_break_the_list(self, tmp_path: Path):
+        client = _client(tmp_path)
+        path = self._freeze(client)
+        outcome = Path(path).with_suffix(".outcome.json")
+        outcome.write_text('{"kind": "latos.bo.outcome"}', encoding="utf-8")
+
+        resp = client.get("/optimize/prereg")
+        assert resp.status_code == 200
+        assert resp.json()[0]["outcome"] is None
+        # The file still exists, so the record is still not re-scorable.
+        again = client.post(
+            "/optimize/validate", json={"prereg_path": path, "measured_value": 0.95}
+        )
+        assert again.status_code == 409
+
+    def test_a_hand_edited_record_is_a_400_not_a_500(self, tmp_path: Path):
+        import json as _json
+
+        client = _client(tmp_path)
+        path = Path(self._freeze(client))
+        record = _json.loads(path.read_text(encoding="utf-8"))
+        del record["prediction_at_recommendation"]
+        path.write_text(_json.dumps(record), encoding="utf-8")
+
+        resp = client.post(
+            "/optimize/validate", json={"prereg_path": str(path), "measured_value": 0.95}
+        )
+        assert resp.status_code == 400
+        assert "malformed" in resp.json()["detail"]
+        assert not path.with_suffix(".outcome.json").exists()
+
+    def test_a_non_finite_measurement_is_refused(self, tmp_path: Path):
+        client = _client(tmp_path)
+        path = self._freeze(client)
+        resp = client.post(
+            "/optimize/validate",
+            content=f'{{"prereg_path": {_json_str(path)}, "measured_value": NaN}}',
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code in (400, 422)
+        assert not Path(path).with_suffix(".outcome.json").exists()
+
+
+def _json_str(value: str) -> str:
+    import json as _json
+
+    return _json.dumps(value)
+
+
+class TestJsonSafety:
+    def test_non_finite_values_are_nulled_at_any_depth(self):
+        from latos.server.app import _json_safe
+
+        got = _json_safe({"peak": {"fwhm": float("nan"), "fits": (1.0, float("inf"))}})
+        assert got == {"peak": {"fwhm": None, "fits": [1.0, None]}}
+
+
 class TestQualityFlagsEndpoint:
     def test_zt_run_has_no_flags(self, tmp_path: Path):
         # The TE fixture has no Hall data, so a zt run is never flagged.

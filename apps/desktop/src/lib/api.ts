@@ -79,9 +79,14 @@ export interface DeleteProjectResult {
   root: string;
   removed: boolean;
   recycled: boolean;
+  /** Frozen pre-registrations left in `.latos/prereg/`; a reset never removes them. */
+  kept_preregistrations: number;
 }
 
-/** Recycle a project's derived `.latos/` store. Raw files are never touched. */
+/**
+ * Reset a project: recycle its `.latos/` store except the frozen
+ * pre-registrations. Raw files are never touched.
+ */
 export function deleteProject(root: string): Promise<DeleteProjectResult> {
   return post<DeleteProjectResult>("/project/delete", { root });
 }
@@ -665,6 +670,8 @@ export function runOptimizeNd(
 
 export interface FreezeResult {
   path: string;
+  /** The objective as the engine ran it, e.g. "|seebeck_uv_k|" for a magnitude. */
+  target_name: string;
   recommendation: Recommendation;
   prior_best: number;
   robustness_stable: boolean;

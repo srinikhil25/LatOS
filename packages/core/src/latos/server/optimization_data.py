@@ -18,6 +18,7 @@ the UI can tell the user exactly what to fill in.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -26,6 +27,7 @@ import numpy as np
 
 from latos.analysis.hall import cross_config_reliability
 from latos.analysis.transport import TransportError
+from latos.core import physics
 from latos.core.enums import Technique
 from latos.server.transport_data import sample_zt
 
@@ -41,6 +43,7 @@ __all__ = [
     "QualityFlag",
     "SkippedSample",
     "build_dataset",
+    "is_sign_bearing",
     "list_input_variables",
     "list_target_properties",
     "peak_target",
@@ -291,19 +294,43 @@ def quality_flags(
     return flags
 
 
+def is_sign_bearing(prop: str) -> bool:
+    """Whether the sign of `prop` carries physics, per `latos.core.physics`.
+
+    The Seebeck coefficient is the case that matters: negative for n-type, so
+    its strength is its magnitude and "larger" is not "better".
+    """
+    physical = physics.lookup(prop)
+    return physical is not None and not physical.positive
+
+
 def peak_target(sample: Sample, store: ArrayStore, prop: str) -> float | None:
     """Peak value of property `prop` across a sample's measurements.
 
-    The headline a thermoelectric paper reports is the *peak* of a
-    property over its temperature sweep, so we take the max. Returns
-    None if no measurement of this sample carries the property.
+    The headline a thermoelectric paper reports is the *peak* of a property
+    over its temperature sweep. For a property that cannot be negative that is
+    the maximum. For a sign-bearing one it is the value of largest magnitude,
+    sign kept: the plain maximum of an n-type Seebeck sweep is the reading
+    nearest zero, the weakest, and until 2026-09-17 that is what this returned.
+
+    Non-finite readings are ignored. `max(nan, x)` is NaN while `max(x, nan)`
+    is x, so an all-NaN measurement used to decide the result or not depending
+    on the order the measurements were stored in. Returns None when no
+    measurement carries a finite value of the property.
     """
+    signed = is_sign_bearing(prop)
     best: float | None = None
     for measurement in sample.measurements:
         column = store.load(measurement.id).get(prop)
-        if column is not None and len(column) > 0:
-            value = float(np.nanmax(column))
-            best = value if best is None else max(best, value)
+        if column is None:
+            continue
+        values = np.asarray(column, dtype=float)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            continue
+        value = float(values[np.argmax(np.abs(values))]) if signed else float(values.max())
+        if best is None or (abs(value) > abs(best) if signed else value > best):
+            best = value
     return best
 
 
@@ -375,7 +402,7 @@ def axis_values(project: Project, params: SynthesisParams, input_variable: str) 
     out: dict[str, float] = {}
     for sample in project.samples:
         value = _resolve_x(sample, params, input_variable)
-        if value is not None:
+        if value is not None and math.isfinite(value):
             out[sample.id] = value
     return out
 
@@ -432,10 +459,20 @@ def build_dataset(
     for sample in project.samples:
         x = _resolve_x(sample, params, input_variable)
         y, missing_reason = _resolve_y(sample, store, target_property, at_temperature_k)
+        # A non-finite value is a missing value with a different cause, and is
+        # reported as one: passed through, it reached the optimizer as a NaN.
         if x is None:
             skipped.append(SkippedSample(sample.canonical_name, f"no '{input_variable}' value"))
+        elif not math.isfinite(x):
+            skipped.append(
+                SkippedSample(sample.canonical_name, f"'{input_variable}' is not a finite number")
+            )
         elif y is None:
             skipped.append(SkippedSample(sample.canonical_name, missing_reason))
+        elif not math.isfinite(y):
+            skipped.append(
+                SkippedSample(sample.canonical_name, f"'{target_property}' is not a finite number")
+            )
         else:
             sd_feature = _TARGET_SD_FEATURE.get(target_property)
             rows.append(

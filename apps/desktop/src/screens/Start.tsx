@@ -47,6 +47,7 @@ export function Start({ onProjectReady }: { onProjectReady: () => void }) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState<IngestProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
   const [deletingPath, setDeletingPath] = useState<string | null>(null);
   const disposeRef = useRef<(() => void) | null>(null);
@@ -98,9 +99,17 @@ export function Start({ onProjectReady }: { onProjectReady: () => void }) {
     async (path: string) => {
       setDeletingPath(path);
       setError(null);
+      setNotice(null);
       try {
-        await deleteProject(path);
+        const result = await deleteProject(path);
         removeRecent(path);
+        if (result.kept_preregistrations > 0) {
+          const n = result.kept_preregistrations;
+          setNotice(
+            `Kept ${n} frozen pre-registration${n === 1 ? "" : "s"} in .latos/prereg. ` +
+              "A reset never deletes predictions made before a sample existed.",
+          );
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -155,6 +164,11 @@ export function Start({ onProjectReady }: { onProjectReady: () => void }) {
           {error && (
             <p className="text-sm text-severity-error" data-selectable>
               {error}
+            </p>
+          )}
+          {notice && (
+            <p className="text-sm text-secondary" data-selectable>
+              {notice}
             </p>
           )}
 
@@ -213,7 +227,8 @@ export function Start({ onProjectReady }: { onProjectReady: () => void }) {
                   ))}
                 </ul>
                 <p className="pt-1 text-xs text-secondary">
-                  Delete resets a project — recycles Latos&apos;s data, keeps your raw files.
+                  Delete resets a project — recycles Latos&apos;s data, keeps your raw files
+                  and every frozen pre-registration.
                 </p>
               </>
             )}

@@ -129,14 +129,22 @@ def apply_log(root: Path, project: Project) -> LogReport | None:
     path = find_log(root)
     if path is None:
         return None
-    rows, variables, problems = parse_log(path)
+    rows, variables, parse_problems = parse_log(path)
+    problems = list(parse_problems)
 
-    # Normalized name (canonical + aliases) -> sample id.
+    # Normalized name (canonical + aliases) -> sample id. A name that two
+    # samples normalize to ("S-1" and "S_1") cannot say which one a log row
+    # means, so it maps to neither and the row is reported instead. Until
+    # 2026-09-17 the first sample took the row without a word (July #7).
     name_to_id: dict[str, str] = {}
+    ambiguous: set[str] = set()
     for sample in project.samples:
         for candidate in (sample.canonical_name, *sample.aliases):
             key = normalize(candidate) or candidate.strip().lower()
-            name_to_id.setdefault(key, sample.id)
+            if name_to_id.setdefault(key, sample.id) != sample.id:
+                ambiguous.add(key)
+    for key in ambiguous:
+        del name_to_id[key]
 
     params = synthesis_store.load_params(root)
     applied = 0
@@ -144,6 +152,12 @@ def apply_log(root: Path, project: Project) -> LogReport | None:
     unmatched: list[str] = []
     for row_name, values in rows.items():
         key = normalize(row_name) or row_name.strip().lower()
+        if key in ambiguous:
+            problems.append(
+                f"{path.name}: {row_name!r} matches more than one sample once names are "
+                "normalized, so it was applied to none of them; rename one of the samples"
+            )
+            continue
         sample_id = name_to_id.get(key)
         if sample_id is None:
             unmatched.append(row_name)

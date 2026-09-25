@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import openpyxl
 import pytest
 
-from latos.core.enums import Technique
+from latos.core.enums import Severity, Technique
 from latos.ingestion.parsers.lfa_xlsx import LfaXlsxParser
 
 _HEADER = [
@@ -86,3 +87,64 @@ class TestParse:
         d = LfaXlsxParser().parse(p)
         assert d.arrays == {}
         assert any(i.field == "data" for i in d.issues)
+
+
+def _write_rows(path: Path, rows) -> Path:
+    wb = openpyxl.Workbook()
+    wb.active.append(_HEADER)
+    for r in rows:
+        wb.active.append(list(r))
+    wb.save(path)
+    return path
+
+
+def _break_first_sheet(path: Path) -> Path:
+    """Truncate the sheet XML but leave the workbook openable.
+
+    openpyxl reads a read-only sheet lazily, so this fails during iteration,
+    after `load_workbook` has succeeded.
+    """
+    import zipfile
+
+    with zipfile.ZipFile(path) as source:
+        parts = {info.filename: source.read(info.filename) for info in source.infolist()}
+    sheet = "xl/worksheets/sheet1.xml"
+    parts[sheet] = parts[sheet][: len(parts[sheet]) // 2]
+    with zipfile.ZipFile(path, "w") as target:
+        for name, data in parts.items():
+            target.writestr(name, data)
+    return path
+
+
+class TestIncompleteRows:
+    """July #5, re-examined 2026-09-17: nothing consumes the diffusivity array, so
+    a missing diffusivity no longer costs the row its conductivity; both gaps are
+    now reported."""
+
+    def test_a_complete_file_raises_no_issue(self, lfa_file: Path):
+        assert LfaXlsxParser().parse(lfa_file).issues == ()
+
+    def test_a_missing_diffusivity_is_kept_as_missing_and_reported(self, tmp_path: Path):
+        rows = [_ROWS[0], (325, "Standard + p.c.(l)", None, 5.1206, 0.3648), _ROWS[2]]
+        d = LfaXlsxParser().parse(_write_rows(tmp_path / "CS LFA.xlsx", rows))
+        assert list(d.arrays["temperature_k"]) == [300, 325, 350]
+        assert d.arrays["thermal_conductivity"][1] == pytest.approx(5.1206)
+        assert np.isnan(d.arrays["diffusivity_mm2_s"][1])
+        (issue,) = d.issues
+        assert issue.field == "diffusivity_mm2_s"
+        assert issue.severity is Severity.WARNING
+
+    def test_rows_without_a_conductivity_are_counted(self, tmp_path: Path):
+        rows = [(300, "Standard", 2.574, None, 0.35), (325, "Standard", 2.458, "-", 0.36)]
+        d = LfaXlsxParser().parse(_write_rows(tmp_path / "CS LFA.xlsx", rows))
+        assert d.arrays == {}
+        assert any(
+            i.field == "thermal_conductivity" and i.message.startswith("2 row(s)") for i in d.issues
+        )
+
+
+class TestDamagedFiles:
+    def test_a_sheet_that_fails_to_read_is_reported_not_raised(self, lfa_file: Path):
+        d = LfaXlsxParser().parse(_break_first_sheet(lfa_file))
+        assert d.arrays == {}
+        assert any(i.field == "file" and i.severity is Severity.ERROR for i in d.issues)

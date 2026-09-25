@@ -143,7 +143,9 @@ class RenishawRamanTxtParser(BaseParser):
     """Renishaw WiRE two-column ASCII spectrum export."""
 
     name: ClassVar[str] = "renishaw-raman-txt"
-    version: ClassVar[str] = "1.0.0"
+    # 1.0.1 (2026-09-17): a line with a bad intensity is skipped; it used to
+    # fail the whole file.
+    version: ClassVar[str] = "1.0.1"
     technique: ClassVar[Technique] = Technique.RAMAN
     supported_extensions: ClassVar[tuple[str, ...]] = (".txt",)
 
@@ -180,11 +182,16 @@ class RenishawRamanTxtParser(BaseParser):
             if len(parts) < _MIN_DATA_COLUMNS:
                 skipped += 1
                 continue
+            # Both converted before either is kept. Appending the wavenumber
+            # first left the lists unequal whenever the intensity failed, and
+            # the reordering below then failed the whole spectrum.
             try:
-                wavenumber.append(float(parts[0]))
-                intensity.append(float(parts[1]))
+                shift, count = float(parts[0]), float(parts[1])
             except ValueError:
                 skipped += 1
+                continue
+            wavenumber.append(shift)
+            intensity.append(count)
 
         if skipped:
             issues.append(

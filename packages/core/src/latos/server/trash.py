@@ -1,11 +1,16 @@
 """Move a path to the OS trash (Recycle Bin on Windows).
 
-Used by ``POST /project/delete`` to remove a project's *derived* ``.latos/``
-store while leaving the raw files untouched. Recoverable by design — a
-mis-click on the app's Delete button should be undoable from the Recycle Bin.
-Falls back to a permanent delete only when the shell operation is unavailable
-(non-Windows host, or the API call fails), since ``.latos/`` is always
-regenerable by re-ingesting the folder.
+Used by ``POST /project/delete`` to clear a project's ``.latos/`` store while
+leaving the raw files untouched. Recoverable by design — a mis-click on the
+app's Delete button should be undoable from the Recycle Bin. Falls back to a
+permanent delete when the shell operation is unavailable (non-Windows host, or
+the API call fails).
+
+That fallback is acceptable only because of what callers hand it. The reset
+never passes ``.latos/prereg/``: frozen pre-registrations cannot be regenerated
+by re-ingesting anything, and until 2026-09-17 this docstring claimed the whole
+store could be. What does arrive here is either regenerable (the database, the
+parsed arrays) or a working decision the reset was asked to discard.
 """
 
 from __future__ import annotations

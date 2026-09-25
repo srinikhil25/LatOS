@@ -40,11 +40,22 @@ would produce a dataset that looks complete and is not.
 
 A sample whose rows cannot yield even two usable (ΔT, ΔV) pairs is emitted with
 its issues and no arrays, rather than dropped. A row that vanishes without
-comment is indistinguishable from a row that was never written.
+comment is indistinguishable from a row that was never written — so a cell that
+holds something other than a number ("3.2 mV") is reported by field and row, as
+a blank one is, and a mass that cannot have been weighed (negative, or both
+zero) yields no composition and says why.
+
+A sample id may appear on only one sample row. Measurement rows attach to
+samples by id, so a repeated id — a row copied at the bench and not renamed —
+would hand the same series to both, and the second would enter the campaign as
+a composition that was never measured. Both copies are emitted with an error
+and no arrays instead.
 """
 
 from __future__ import annotations
 
+import math
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
@@ -120,7 +131,11 @@ class IteWorkbookParser(BaseParser):
     """One measurement per sample from the ionic-TE recording workbook."""
 
     name: ClassVar[str] = "ite-workbook"
-    version: ClassVar[str] = "1.0.0"
+    # Bumped whenever the output for an unchanged file changes, because the parse
+    # cache is keyed on (file hash, parser version). 1.1.0 (2026-09-17) covers
+    # the polarity field added on 2026-09-10, which shipped without a bump, and
+    # the duplicate-id, non-numeric-cell, mass and alignment fixes.
+    version: ClassVar[str] = "1.1.0"
     technique: ClassVar[Technique] = Technique.THERMOELECTRIC
     supported_extensions: ClassVar[tuple[str, ...]] = (".xlsx",)
 
@@ -174,6 +189,10 @@ class IteWorkbookParser(BaseParser):
 
             samples = _rows(wb[SAMPLES_SHEET])
             measurements = _rows(wb[MEASUREMENTS_SHEET])
+        except Exception as exc:
+            # Read-only sheets are read lazily, so a damaged file can open
+            # cleanly and fail only here. A parser reports; it does not raise.
+            return (self._empty(_open_failure(f"could not read the workbook's rows: {exc}")),)
         finally:
             wb.close()
 
@@ -182,22 +201,27 @@ class IteWorkbookParser(BaseParser):
 
         by_sample: dict[str, list[dict[str, Any]]] = {}
         orphans: list[dict[str, Any]] = []
-        known = {str(row.get("sample_id")) for row in samples if row.get("sample_id") is not None}
+        # How many sample rows carry each id; more than one is an error below.
+        copies = Counter(
+            str(row["sample_id"]) for row in samples if row.get("sample_id") is not None
+        )
         for row in measurements:
             sample_id = row.get("sample_id")
             if sample_id is None:
                 continue
             key = str(sample_id)
-            if key in known:
+            if key in copies:
                 by_sample.setdefault(key, []).append(row)
             else:
                 orphans.append(row)
 
-        return tuple(
-            self._build(row, by_sample.get(str(row.get("sample_id")), []), orphans)
-            for row in samples
-            if row.get("sample_id") is not None
-        )
+        built: list[ParsedData] = []
+        for row in samples:
+            if row.get("sample_id") is None:
+                continue
+            key = str(row["sample_id"])
+            built.append(self._build(row, by_sample.get(key, []), orphans, copies=copies[key]))
+        return tuple(built)
 
     # ─── Internals ───────────────────────────────────────────────────
     def _build(
@@ -205,9 +229,24 @@ class IteWorkbookParser(BaseParser):
         sample: dict[str, Any],
         rows: list[dict[str, Any]],
         orphans: list[dict[str, Any]],
+        *,
+        copies: int = 1,
     ) -> ParsedData:
         sample_id = str(sample["sample_id"])
         issues: list[ValidationIssue] = []
+
+        duplicated = copies > 1
+        if duplicated:
+            issues.append(
+                _issue(
+                    "sample_id",
+                    f"Sample {sample_id} appears on {copies} rows of the samples sheet. "
+                    "Measurements attach to samples by id, so they cannot be attributed "
+                    "to one of these rows, and none were. Give each prepared sample its "
+                    "own id.",
+                )
+            )
+            rows = []
 
         for field in REQUIRED_SAMPLE_FIELDS:
             if _blank(sample.get(field)):
@@ -218,8 +257,9 @@ class IteWorkbookParser(BaseParser):
                         "from the masses actually weighed, so it cannot be recovered.",
                     )
                 )
+        issues.extend(_mass_issues(sample_id, sample))
 
-        deltas, volts, issues_from_rows = _series(sample_id, rows)
+        deltas, volts, used, issues_from_rows = _series(sample_id, rows)
         issues.extend(issues_from_rows)
 
         if orphans:
@@ -237,7 +277,7 @@ class IteWorkbookParser(BaseParser):
         arrays: dict[str, np.ndarray] = {}
         if deltas.size >= _MIN_POINTS:
             arrays = {"delta_t_k": deltas, "delta_v_mv": volts}
-        else:
+        elif not duplicated:
             issues.append(
                 _issue(
                     "measurements",
@@ -263,7 +303,7 @@ class IteWorkbookParser(BaseParser):
         metadata: dict[str, Any] = {"sample_id": sample_id}
         metadata.update(_scalars(sample, _SAMPLE_METADATA))
         metadata.update(_mass_fraction(sample))
-        metadata.update(_per_point(rows, _MEASUREMENT_METADATA))
+        metadata.update(_per_point(used, _MEASUREMENT_METADATA))
 
         return ParsedData(
             technique=self.technique,
@@ -316,13 +356,21 @@ def _rows(sheet: Any) -> list[dict[str, Any]]:
     return out
 
 
+_POINT_FIELDS = ("T_hot_C", "T_cold_C", "delta_V_mV")
+
+
 def _series(
     sample_id: str, rows: list[dict[str, Any]]
-) -> tuple[np.ndarray, np.ndarray, list[ValidationIssue]]:
-    """Extract (ΔT, ΔV) pairs, reporting every row that could not supply one."""
+) -> tuple[np.ndarray, np.ndarray, list[dict[str, Any]], list[ValidationIssue]]:
+    """Extract (ΔT, ΔV) pairs, reporting every row that could not supply one.
+
+    Returns the two arrays, the rows that produced them (in order, so anything
+    read per point can be aligned with the series), and the issues.
+    """
     issues: list[ValidationIssue] = []
     deltas: list[float] = []
     volts: list[float] = []
+    used: list[dict[str, Any]] = []
 
     for row in rows:
         label = f"Sample {sample_id}, measurement {row.get('meas_id') or '(unlabelled)'}"
@@ -332,18 +380,82 @@ def _series(
                     _issue(field, f"{label}: {field} is empty and cannot be recovered later.")
                 )
 
-        hot, cold, volt = (_number(row.get(k)) for k in ("T_hot_C", "T_cold_C", "delta_V_mV"))
+        numbers: dict[str, float | None] = {}
+        for field in _POINT_FIELDS:
+            raw = row.get(field)
+            numbers[field] = _number(raw)
+            # A blank is reported above. Text in a number column is the other
+            # way a point goes missing, and it used to go missing silently.
+            if numbers[field] is None and not _blank(raw):
+                issues.append(
+                    _issue(
+                        field,
+                        f"{label}: {field} holds {raw!r}, which is not a number, so this "
+                        "point was left out. Enter the number alone, in the column's unit.",
+                    )
+                )
+        hot, cold, volt = (numbers[f] for f in _POINT_FIELDS)
         if hot is None or cold is None or volt is None:
             continue
         # A difference in Celsius is a difference in kelvin; no offset applies.
         deltas.append(hot - cold)
         volts.append(volt)
+        used.append(row)
 
     return (
         np.asarray(deltas, dtype=float),
         np.asarray(volts, dtype=float),
+        used,
         issues,
     )
+
+
+_MASS_FIELDS = ("mass_IL_A_mg", "mass_IL_B_mg")
+
+
+def _mass_issues(sample_id: str, sample: dict[str, Any]) -> list[ValidationIssue]:
+    """Why masses that were entered still cannot yield a composition.
+
+    A blank mass is reported with the other required fields. What remains is a
+    cell that is not a number, a negative mass, or two zeros. Each leaves the
+    sample without a composition, so each is said out loud; until 2026-09-17 the
+    first was silent and a negative mass produced a composition outside [0, 1]
+    that reached the optimizer.
+    """
+    issues: list[ValidationIssue] = []
+    masses: list[float] = []
+    for field in _MASS_FIELDS:
+        raw = sample.get(field)
+        mass = _number(raw)
+        if _blank(raw):
+            continue
+        if mass is None:
+            issues.append(
+                _issue(
+                    field,
+                    f"Sample {sample_id}: {field} holds {raw!r}, which is not a number, "
+                    "so no composition was computed.",
+                )
+            )
+        elif mass < 0:
+            issues.append(
+                _issue(
+                    field,
+                    f"Sample {sample_id}: {field} is negative ({mass:g} mg), which no "
+                    "weighing can give, so no composition was computed.",
+                )
+            )
+        else:
+            masses.append(mass)
+    if len(masses) == len(_MASS_FIELDS) and sum(masses) <= 0:
+        issues.append(
+            _issue(
+                _MASS_FIELDS[0],
+                f"Sample {sample_id}: both masses are zero, so there is no mixture to "
+                "place on the composition axis.",
+            )
+        )
+    return issues
 
 
 def _mass_fraction(sample: dict[str, Any]) -> dict[str, Any]:
@@ -353,7 +465,7 @@ def _mass_fraction(sample: dict[str, Any]) -> dict[str, Any]:
     formula or a hand-typed value cannot disagree with the masses beside it.
     """
     a, b = _number(sample.get("mass_IL_A_mg")), _number(sample.get("mass_IL_B_mg"))
-    if a is None or b is None or (a + b) <= 0:
+    if a is None or b is None or a < 0 or b < 0 or (a + b) <= 0:
         return {}
     return {"mass_fraction_x": round(a / (a + b), 6)}
 
@@ -379,7 +491,9 @@ def _per_point(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> dict[str,
 
     Lists rather than a single representative value: humidity drifting across a
     series is exactly the confounder the campaign-level check looks for, and
-    averaging it here would hide it.
+    averaging it here would hide it. `rows` must be the rows that produced the
+    series; until 2026-09-17 every row was passed, and one skipped row shifted
+    every later entry onto the wrong point.
     """
     out: dict[str, Any] = {}
     for f in fields:
@@ -390,15 +504,21 @@ def _per_point(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> dict[str,
 
 
 def _number(value: Any) -> float | None:
-    """A float, or None when the cell holds anything that is not one."""
+    """A finite float, or None when the cell holds anything that is not one.
+
+    Finite, because `float("nan")` parses: a cell reading "nan" or "inf" is
+    text that happens to spell a float, not a measurement.
+    """
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, int | float):
-        return float(value)
-    try:
-        return float(str(value).strip())
-    except (TypeError, ValueError):
-        return None
+        number = float(value)
+    else:
+        try:
+            number = float(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+    return number if math.isfinite(number) else None
 
 
 def _json_safe(value: Any) -> Any:

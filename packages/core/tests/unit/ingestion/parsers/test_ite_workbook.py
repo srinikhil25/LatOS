@@ -403,3 +403,113 @@ class TestTheGeneratorAndTheParserAgree:
         ):
             tier1 = {c.name for c in columns if c.tier == 1}
             assert set(required) <= tier1
+
+
+class TestARepeatedSampleId:
+    """Found 2026-09-17: a copied sample row received the other row's series and
+    entered the campaign at a composition that was never measured."""
+
+    def test_neither_copy_receives_the_series(self, tmp_path):
+        path = _write(
+            tmp_path,
+            [_sample("S1"), _sample("S1", mass_IL_A_mg=200.0, mass_IL_B_mg=200.0), _sample("S2")],
+            _series("S1") + _series("S2"),
+        )
+        first, second, other = IteWorkbookParser().parse_all(path)
+        for copy in (first, second):
+            assert copy.arrays == {}
+            assert any(
+                i.field == "sample_id" and i.severity is Severity.ERROR and "2 rows" in i.message
+                for i in copy.issues
+            )
+            # The reason given is the repeated id, not a misleading point count.
+            assert not any(i.field == "measurements" for i in copy.issues)
+        assert other.arrays["delta_t_k"].size == 3
+
+    def test_identical_copies_are_not_a_replicate_pair(self, tmp_path):
+        path = _write(tmp_path, [_sample("S1"), _sample("S1")], _series("S1"))
+        assert all(r.arrays == {} for r in IteWorkbookParser().parse_all(path))
+
+
+class TestTextInANumberColumn:
+    """Found 2026-09-17: "3.2 mV" removed the point without a word."""
+
+    @pytest.mark.parametrize("field", ["delta_V_mV", "T_hot_C", "T_cold_C"])
+    @pytest.mark.parametrize("text", ["3.2 mV", "n/a", "nan", "inf", "#DIV/0!"])
+    def test_the_point_is_left_out_and_the_cell_is_named(self, tmp_path, field, text):
+        rows = _series()
+        rows[1][field] = text
+        (result,) = IteWorkbookParser().parse_all(_write(tmp_path, [_sample()], rows))
+        assert result.arrays["delta_t_k"].size == 2
+        (issue,) = [i for i in result.issues if i.field == field]
+        assert repr(text) in issue.message
+        assert "M-2" in issue.message
+
+    def test_a_number_typed_as_text_still_counts(self, tmp_path):
+        rows = _series()
+        rows[1]["delta_V_mV"] = " 12.0 "
+        (result,) = IteWorkbookParser().parse_all(_write(tmp_path, [_sample()], rows))
+        assert result.arrays["delta_t_k"].size == 3
+        assert not any(i.field == "delta_V_mV" for i in result.issues)
+
+
+class TestMassesThatCannotHaveBeenWeighed:
+    """Found 2026-09-17: a negative mass gave a composition of -1.0."""
+
+    @pytest.mark.parametrize(
+        ("a", "b", "says"),
+        [
+            (-5.0, 10.0, "negative"),
+            (10.0, -5.0, "negative"),
+            (0.0, 0.0, "both masses are zero"),
+            ("about 5", 10.0, "not a number"),
+        ],
+    )
+    def test_no_composition_and_a_reason(self, tmp_path, a, b, says):
+        path = _write(tmp_path, [_sample(mass_IL_A_mg=a, mass_IL_B_mg=b)], _series())
+        (result,) = IteWorkbookParser().parse_all(path)
+        assert "mass_fraction_x" not in result.metadata
+        assert "mass_fraction_x" not in result.features
+        assert any(says in i.message and i.severity is Severity.ERROR for i in result.issues)
+
+    def test_one_pure_liquid_is_a_valid_mixture(self, tmp_path):
+        path = _write(tmp_path, [_sample(mass_IL_A_mg=0.0, mass_IL_B_mg=400.0)], _series())
+        (result,) = IteWorkbookParser().parse_all(path)
+        assert result.metadata["mass_fraction_x"] == 0.0
+        assert not any(i.field.startswith("mass_") for i in result.issues)
+
+
+class TestPerPointListsFollowTheSeries:
+    """Found 2026-09-17: a skipped row shifted every later entry onto the wrong point."""
+
+    def test_a_skipped_row_leaves_no_entry(self, tmp_path):
+        rows = _series()
+        for row, rh in zip(rows, (30.0, 45.0, 60.0), strict=True):
+            row["RH_percent"] = rh
+        rows[1]["delta_V_mV"] = None
+        (result,) = IteWorkbookParser().parse_all(_write(tmp_path, [_sample()], rows))
+        assert list(result.arrays["delta_t_k"]) == [2.0, 10.0]
+        assert result.metadata["RH_percent"] == [30.0, 60.0]
+        assert result.metadata["raw_trace_file"] == ["traces/M-1.csv", "traces/M-3.csv"]
+
+
+class TestADamagedFileStillDoesNotRaise:
+    def test_rows_that_fail_to_read_are_reported(self, tmp_path, monkeypatch):
+        """openpyxl reads read-only sheets lazily, so damage can surface after
+        the workbook opened cleanly."""
+        import latos.ingestion.parsers.ite_workbook as module
+
+        def broken(_sheet):
+            raise SyntaxError("not well-formed (invalid token): line 2, column 72612")
+
+        monkeypatch.setattr(module, "_rows", broken)
+        path = _write(tmp_path, [_sample()], _series())
+        (result,) = IteWorkbookParser().parse_all(path)
+        assert result.arrays == {}
+        assert any("could not read" in i.message for i in result.issues)
+
+
+class TestTheVersionMovesWithTheOutput:
+    def test_the_polarity_and_validation_changes_carry_a_new_version(self):
+        """The parse cache is keyed on (file hash, parser version)."""
+        assert IteWorkbookParser.version == "1.1.0"

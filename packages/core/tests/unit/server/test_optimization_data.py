@@ -813,3 +813,182 @@ class TestMeasuredNoise:
 
         assert measured_noise(self._rows([0.0, -1.0])) is None
         assert measured_noise(self._rows([0.0, 3.0, 4.0])) == pytest.approx(3.5355, abs=1e-3)
+
+
+# ─── Sign-bearing targets and non-finite readings (2026-09-17) ──────
+
+_PID = new_id()
+
+
+def _array_measurement(sample_id: str, store: ArrayStore, arrays: dict) -> Measurement:
+    mid = new_id()
+    n = len(next(iter(arrays.values())))
+    store.write(
+        mid,
+        ParsedData(
+            technique=Technique.THERMOELECTRIC,
+            arrays={
+                "temperature_k": np.linspace(300.0, 600.0, n),
+                **{k: np.asarray(v, dtype=float) for k, v in arrays.items()},
+            },
+            metadata={},
+            instrument=None,
+            measured_at=None,
+            issues=(),
+            parser_name="te",
+            parser_version="1.0.0",
+        ),
+    )
+    return Measurement(
+        id=mid,
+        sample_id=sample_id,
+        technique=Technique.THERMOELECTRIC,
+        instrument=None,
+        measured_at=None,
+        parsed_at=utc_now(),
+        parser_version="1.0.0",
+        files=(),
+        issues=(),
+        parsed_data_path=None,
+        analysis_results=(),
+    )
+
+
+def _sample_with(store: ArrayStore, name: str, *series: dict) -> Sample:
+    sid = new_id()
+    return Sample(
+        id=sid,
+        project_id=_PID,
+        canonical_name=name,
+        aliases=(),
+        measurements=tuple(_array_measurement(sid, store, a) for a in series),
+    )
+
+
+class TestSignBearingTargets:
+    """Found 2026-09-17: the signed maximum ranked n-type samples backwards."""
+
+    @pytest.mark.parametrize(
+        ("sweep", "peak"),
+        [
+            ([-150.0, -210.0, -180.0], -210.0),  # n-type: the strongest, not the weakest
+            ([150.0, 210.0, 180.0], 210.0),
+            ([-5.0, 3.0], -5.0),  # a sweep that crosses zero keeps its sign
+        ],
+    )
+    def test_the_peak_is_the_largest_magnitude(self, tmp_path: Path, sweep, peak):
+        store = ArrayStore(tmp_path / "arrays")
+        sample = _sample_with(store, "S", {"seebeck_uv_k": sweep})
+        assert optimization_data.peak_target(sample, store, "seebeck_uv_k") == peak
+
+    def test_the_largest_magnitude_wins_across_measurements(self, tmp_path: Path):
+        store = ArrayStore(tmp_path / "arrays")
+        sample = _sample_with(
+            store, "S", {"seebeck_uv_k": [120.0, 140.0]}, {"seebeck_uv_k": [-150.0, -90.0]}
+        )
+        assert optimization_data.peak_target(sample, store, "seebeck_uv_k") == -150.0
+
+    def test_which_properties_bear_a_sign(self):
+        assert optimization_data.is_sign_bearing("seebeck_uv_k")
+        assert optimization_data.is_sign_bearing("carrier_concentration_cm3")
+        assert not optimization_data.is_sign_bearing("zt")
+        assert not optimization_data.is_sign_bearing("a_researchers_own_variable")
+
+
+class TestNonFiniteReadings:
+    """Found 2026-09-17: an all-NaN column decided the result by storage order."""
+
+    @pytest.mark.parametrize("nan_first", [True, False])
+    def test_an_all_nan_measurement_is_ignored(self, tmp_path: Path, nan_first: bool):
+        store = ArrayStore(tmp_path / "arrays")
+        series = [{"zt": [np.nan, np.nan]}, {"zt": [0.4, 0.9]}]
+        sample = _sample_with(store, "S", *(series if nan_first else series[::-1]))
+        assert optimization_data.peak_target(sample, store, "zt") == 0.9
+
+    def test_a_sample_with_nothing_finite_is_skipped_with_a_reason(self, tmp_path: Path):
+        store = ArrayStore(tmp_path / "arrays")
+        good = _sample_with(store, "good", {"zt": [0.4, 0.9]})
+        bad = _sample_with(store, "bad", {"zt": [np.nan, np.nan]})
+        odd = _sample_with(store, "odd", {"zt": [0.3, 0.5]})
+        project = Project(
+            id=_PID,
+            name="p",
+            root_path=tmp_path,
+            created_at=utc_now(),
+            schema_version=4,
+            samples=(good, bad, odd),
+            unassigned_files=(),
+        )
+        params = {good.id: {"x": 1.0}, bad.id: {"x": 2.0}, odd.id: {"x": float("nan")}}
+        rows, skipped = optimization_data.build_dataset(project, store, params, "x", "zt")
+        assert [r.sample_name for r in rows] == ["good"]
+        reasons = {s.sample_name: s.reason for s in skipped}
+        assert reasons["bad"] == "no 'zt' data"
+        assert "not a finite number" in reasons["odd"]
+
+
+class TestASeebeckRunOptimizesTheMagnitude:
+    def _client(self, root: Path) -> TestClient:
+        from latos.core.enums import ReviewStatus
+
+        store = ArrayStore(root / ".latos" / "arrays")
+        sweeps = {"n1": -210.0, "n2": -120.0, "p1": 90.0, "p2": 60.0}
+        samples = [
+            _sample_with(store, name, {"seebeck_uv_k": [peak * 0.8, peak]})
+            for name, peak in sweeps.items()
+        ]
+        for i, sample in enumerate(samples):
+            synthesis_store.set_sample_params(root, sample.id, {"x": float(i)})
+        project = Project(
+            id=_PID,
+            name="p",
+            root_path=root,
+            created_at=utc_now(),
+            schema_version=4,
+            samples=tuple(samples),
+            unassigned_files=(),
+            review_status=ReviewStatus.CONFIRMED,
+            confirmed_at=utc_now(),
+        )
+        app = create_app()
+        state: ServerState = app.state.latos  # type: ignore[union-attr]
+        state.root = root
+        state.result = IngestionResult(project=project, outcomes=())
+        return TestClient(app)
+
+    def test_the_dataset_keeps_the_sign(self, tmp_path: Path):
+        body = (
+            self._client(tmp_path)
+            .get(
+                "/optimize/dataset",
+                params={"input_variable": "x", "target_property": "seebeck_uv_k"},
+            )
+            .json()
+        )
+        assert sorted(p["y"] for p in body["points"]) == [-210.0, -120.0, 60.0, 90.0]
+
+    def test_the_run_ranks_by_magnitude_and_says_so(self, tmp_path: Path):
+        body = (
+            self._client(tmp_path)
+            .post("/optimize/run", json={"input_variable": "x", "target_property": "seebeck_uv_k"})
+            .json()
+        )
+        assert body["target_property"] == "|seebeck_uv_k|"
+        assert sorted(p["y"] for p in body["points"]) == [60.0, 90.0, 120.0, 210.0]
+
+    def test_reach_a_value_keeps_the_sign(self, tmp_path: Path):
+        body = (
+            self._client(tmp_path)
+            .post(
+                "/optimize/run",
+                json={
+                    "input_variable": "x",
+                    "target_property": "seebeck_uv_k",
+                    "objective": "target",
+                    "target_value": -200.0,
+                },
+            )
+            .json()
+        )
+        # |y - (-200)|: the n-type sample at -210 is the closest, at 10.
+        assert min(p["y"] for p in body["points"]) == pytest.approx(10.0)

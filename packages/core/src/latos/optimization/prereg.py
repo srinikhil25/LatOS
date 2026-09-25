@@ -27,7 +27,15 @@ from latos import __version__
 if TYPE_CHECKING:
     from latos.optimization.engine import OptimizationResult, RobustnessReport
 
-__all__ = ["build_record", "freeze", "observations_digest", "prereg_dir", "write_record"]
+__all__ = [
+    "build_record",
+    "freeze",
+    "freeze_new",
+    "observations_digest",
+    "prereg_dir",
+    "unused_record_path",
+    "write_record",
+]
 
 # Where frozen records live, declared once because it was previously declared
 # four times across three modules and one copy disagreed: `campaign_cycle`
@@ -319,13 +327,53 @@ def _to_markdown(record: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# Filenames resolve to one second, so a burst of freezes needs a suffix; this
+# bounds the search so a directory that somehow holds every name cannot spin.
+_MAX_NAME_ATTEMPTS = 1000
+
+
 def write_record(record: dict[str, Any], path: Path) -> Path:
-    """Write the record to `path` (JSON) and a sibling `.md`; return the JSON path."""
+    """Write the record to `path` (JSON) and a sibling `.md`; return the JSON path.
+
+    Write-once. A pre-registration is a commitment made before the sample
+    exists, and campaign drift reads the sequence of them, so replacing one
+    destroys exactly the history the record exists to keep. Until 2026-09-17
+    this overwrote silently, and `latos next` named files to the second, so two
+    runs inside one second left only the second record.
+
+    Raises:
+        FileExistsError: If the JSON or its `.md` sibling is already there.
+    """
     path = Path(path)
+    note = path.with_suffix(".md")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record, indent=2), encoding="utf-8")
-    path.with_suffix(".md").write_text(_to_markdown(record), encoding="utf-8")
+    for target in (path, note):
+        if target.exists():
+            raise FileExistsError(
+                f"{target} already exists, and a frozen pre-registration is never overwritten."
+            )
+    # Exclusive creation, so a writer that lost a race fails instead of replacing.
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, indent=2))
+    with note.open("x", encoding="utf-8") as handle:
+        handle.write(_to_markdown(record))
     return path
+
+
+def unused_record_path(directory: Path, stamp: str) -> Path:
+    """`prereg_<stamp>.json` in `directory`, suffixed if that name is taken.
+
+    The one naming rule for every writer. It lived only in the server until
+    2026-09-17, which is how the bench command came to overwrite records the
+    desktop app would have kept.
+    """
+    directory = Path(directory)
+    candidate = directory / f"prereg_{stamp}.json"
+    suffix = 2
+    while candidate.exists() or candidate.with_suffix(".md").exists():
+        candidate = directory / f"prereg_{stamp}_{suffix}.json"
+        suffix += 1
+    return candidate
 
 
 def freeze(
@@ -337,3 +385,30 @@ def freeze(
 ) -> Path:
     """Build the record and write it in one call. Returns the JSON path."""
     return write_record(build_record(result, prior_best=prior_best, robustness=robustness), path)
+
+
+def freeze_new(
+    result: OptimizationResult,
+    directory: Path,
+    *,
+    prior_best: float,
+    robustness: RobustnessReport | None = None,
+) -> Path:
+    """Freeze into a name no earlier record holds, and return the JSON path.
+
+    Named for the moment the recommendation was produced
+    (`result.config.created_at`), so the filename and the record agree.
+
+    Raises:
+        FileExistsError: Only if every candidate name was taken, which needs
+            about a thousand freezes inside one second.
+    """
+    stamp = result.config.created_at.strftime("%Y%m%dT%H%M%SZ")
+    record = build_record(result, prior_best=prior_best, robustness=robustness)
+    for _ in range(_MAX_NAME_ATTEMPTS):
+        try:
+            return write_record(record, unused_record_path(directory, stamp))
+        except FileExistsError:
+            # Another writer took the name between the check and the write.
+            continue
+    raise FileExistsError(f"No free pre-registration name for {stamp} in {directory}")

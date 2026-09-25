@@ -50,18 +50,21 @@ class DeleteProjectRequest(BaseModel):
 
 
 class DeleteProjectResult(BaseModel):
-    """Outcome of a project delete. Raw files are never touched.
+    """Outcome of a project reset. Raw files are never touched.
 
     Attributes:
         root: The project folder acted on.
-        removed: True if a ``.latos/`` store existed and was removed.
-        recycled: True if it went to the Recycle Bin (recoverable), False if it
-            had to be permanently deleted.
+        removed: True if a ``.latos/`` store existed and was cleared.
+        recycled: True if everything removed went to the Recycle Bin
+            (recoverable), False if anything had to be permanently deleted.
+        kept_preregistrations: Frozen pre-registrations left in place under
+            ``.latos/prereg/``. A reset never removes them.
     """
 
     root: str
     removed: bool
     recycled: bool
+    kept_preregistrations: int = 0
 
 
 class ProjectSummary(BaseModel):
@@ -431,6 +434,9 @@ class FreezeResult(BaseModel):
     """
 
     path: str  # where the JSON record was written (a .md sibling sits beside it)
+    # What the prediction is a prediction OF, as the engine ran it — e.g.
+    # "|seebeck_uv_k|" when a sign-bearing target was ranked by magnitude.
+    target_name: str = ""
     recommendation: RecommendationOut
     prior_best: float
     robustness_stable: bool

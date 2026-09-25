@@ -44,7 +44,6 @@ import argparse
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -54,7 +53,7 @@ from latos.core.enums import Severity
 from latos.ingestion.parsed_data import ParsedData
 from latos.ingestion.parsers.ite_workbook import IteWorkbookParser
 from latos.optimization.engine import OptimizationResult, optimize
-from latos.optimization.prereg import freeze, prereg_dir
+from latos.optimization.prereg import freeze_new, prereg_dir
 
 __all__ = [
     "CycleOutcome",
@@ -274,14 +273,15 @@ def run_cycle(
             (), None, None, tuple(f"Could not read the workbook: {i.message}" for i in fatal)
         )
 
-    fits = tuple(fit for fit in (_fit_one(entry) for entry in parsed) if fit is not None)
+    reduced = [_fit_one(entry) for entry in parsed]
+    fits = tuple(r for r in reduced if isinstance(r, SampleFit))
+    unused = [r for r in reduced if isinstance(r, str)]
     messages: list[str] = []
 
-    skipped = len(parsed) - len(fits)
-    if skipped:
+    if unused:
         messages.append(
-            f"{skipped} sample(s) contributed no value: fewer than "
-            f"{_MIN_POINTS_PER_SAMPLE} usable (delta-T, delta-V) points, or no composition."
+            f"{len(unused)} sample(s) contributed no value:\n"
+            + "\n".join(f"  {reason}" for reason in unused)
         )
 
     # Before reading anything into the signs, check they were all measured the
@@ -333,34 +333,62 @@ def run_cycle(
     # validation screen opens. Going through `prereg_dir` is what makes a
     # freeze written at the bench visible to the screen that scores it.
     destination = out_dir if out_dir is not None else prereg_dir(workbook.parent)
-    destination.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    path = freeze(result, destination / f"prereg_{stamp}.json", prior_best=result.best_y)
+    path = freeze_new(result, destination, prior_best=result.best_y)
 
     return CycleOutcome(fits, result, path, tuple(messages), points)
 
 
-def _fit_one(entry: ParsedData) -> SampleFit | None:
-    """Reduce one parsed sample to a composition and a fitted coefficient."""
+def _fit_one(entry: ParsedData) -> SampleFit | str:
+    """Reduce one parsed sample to a composition and a fitted coefficient.
+
+    Returns, instead, the sample id and every reason it cannot contribute a
+    value. Until 2026-09-17 the report gave the same two possible causes for
+    any skipped sample, so a series measured at one repeated delta-T was
+    reported as short of points.
+    """
     arrays, metadata = entry.arrays, entry.metadata
     sample_id = str(metadata.get("sample_id", "(unlabelled)"))
 
-    composition = metadata.get("mass_fraction_x")
-    delta_t = arrays.get("delta_t_k")
-    delta_v = arrays.get("delta_v_mv")
-    if composition is None or delta_t is None or delta_v is None:
-        return None
-    if np.asarray(delta_t).size < _MIN_POINTS_PER_SAMPLE:
-        return None
+    # The parser's only error against `sample_id` is a repeated id, and then it
+    # attributes no measurement to either row.
+    if any(i.field == "sample_id" and i.severity is Severity.ERROR for i in entry.issues):
+        return f"{sample_id}: the id is on more than one sample row, so no measurement was used"
 
-    fit = fit_seebeck_slope(np.asarray(delta_t, dtype=float), np.asarray(delta_v, dtype=float))
+    problems: list[str] = []
+    composition: float | None = None
+    if metadata.get("mass_fraction_x") is None:
+        problems.append(
+            "no composition: a mass is blank, not a number or negative, or both are zero"
+        )
+    else:
+        composition = float(metadata["mass_fraction_x"])
+        if not 0.0 <= composition <= 1.0:
+            # The parser no longer produces one. This stays because the engine
+            # does not check that observations lie inside the bounds it is given.
+            problems.append(f"composition {composition} is outside [0, 1]")
+
+    delta_t = np.asarray(arrays.get("delta_t_k", ()), dtype=float)
+    delta_v = np.asarray(arrays.get("delta_v_mv", ()), dtype=float)
+    if delta_t.size < _MIN_POINTS_PER_SAMPLE:
+        problems.append(f"fewer than {_MIN_POINTS_PER_SAMPLE} usable (delta-T, delta-V) points")
+    elif delta_t.max() == delta_t.min():
+        # Checked here rather than left to the fit. The mean of repeated values
+        # can differ from them by rounding, and the fit then returns a finite
+        # slope made of rounding error: three points at 0.1 K gave 8.0.
+        problems.append(
+            f"every point was taken at delta-T = {delta_t[0]:g} K, which fixes no slope"
+        )
+    if problems or composition is None:
+        return f"{sample_id}: {'; '.join(problems)}"
+
+    fit = fit_seebeck_slope(delta_t, delta_v)
     if not math.isfinite(fit.slope):
-        return None
+        return f"{sample_id}: the fitted slope is not a finite number"
 
     notes = tuple(issue.message for issue in entry.issues if issue.severity is not Severity.INFO)
     return SampleFit(
         sample_id=sample_id,
-        composition=float(composition),
+        composition=composition,
         seebeck_mv_k=fit.slope,
         stderr_mv_k=fit.slope_stderr if math.isfinite(fit.slope_stderr) else None,
         offset_mv=fit.intercept,

@@ -123,6 +123,27 @@ class TestApply:
         project = _project(tmp_path, [("CS-1", ())])
         assert synthesis_log.apply_log(tmp_path, project) is None
 
+    def test_a_name_two_samples_share_is_applied_to_neither(self, tmp_path: Path):
+        """July #7, still live on 2026-09-17: the first sample took the row."""
+        project = _project(tmp_path, [("S-1", ()), ("S_1", ()), ("S-2", ())])
+        _write_log(tmp_path, "sample,doping_pct\ns 1,1\nS-2,2\n")
+        report = synthesis_log.apply_log(tmp_path, project)
+        assert report is not None
+        assert report.applied == 1
+        assert report.matched_samples == ("S-2",)
+        assert report.unmatched_rows == ()
+        assert any("'s 1'" in p and "more than one sample" in p for p in report.problems)
+        params = synthesis_store.load_params(tmp_path)
+        ids = {s.canonical_name: s.id for s in project.samples}
+        assert set(params) == {ids["S-2"]}
+
+    def test_a_sample_whose_own_names_coincide_is_not_ambiguous(self, tmp_path: Path):
+        project = _project(tmp_path, [("S-1", ("S_1",))])
+        _write_log(tmp_path, "sample,doping_pct\nS 1,1\n")
+        report = synthesis_log.apply_log(tmp_path, project)
+        assert report is not None and report.applied == 1
+        assert not report.problems
+
 
 class TestIngestHook:
     def test_log_applied_at_end_of_ingest(self, tmp_path: Path):

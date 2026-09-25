@@ -72,7 +72,9 @@ class ResistivitySeebeckXlsxParser(BaseParser):
     """Parser for Linseis LSR resistivity + Seebeck `.xlsx` exports."""
 
     name: ClassVar[str] = "resistivity-seebeck-xlsx"
-    version: ClassVar[str] = "1.0.0"
+    # 1.0.1 (2026-09-17): a sheet that fails to read is an issue rather
+    # than an exception.
+    version: ClassVar[str] = "1.0.1"
     technique: ClassVar[Technique] = Technique.THERMOELECTRIC
     supported_extensions: ClassVar[tuple[str, ...]] = (".xlsx",)
 
@@ -115,16 +117,30 @@ class ResistivitySeebeckXlsxParser(BaseParser):
                 ]
             )
         try:
-            return self._parse_sheet(wb[wb.sheetnames[0]], path)
+            rows = list(wb[wb.sheetnames[0]].iter_rows(values_only=True))
+        except Exception as exc:
+            # A read-only sheet is parsed lazily, so a damaged file can open
+            # cleanly and fail only here; `parse` must not raise.
+            return self._empty(
+                [
+                    ValidationIssue(
+                        field="file",
+                        severity=Severity.ERROR,
+                        message=f"Could not read the sheet: {exc}",
+                        detected_at=utc_now(),
+                    ),
+                ]
+            )
         finally:
             wb.close()
+        return self._parse_rows(rows, path)
 
     # ─── Internals ───────────────────────────────────────────────────
-    def _parse_sheet(self, sheet: Any, path: Path) -> ParsedData:
+    def _parse_rows(self, rows: list[tuple[Any, ...]], path: Path) -> ParsedData:
         temperature_k: list[float] = []
         resistivity: list[float] = []
         seebeck: list[float] = []
-        for row in sheet.iter_rows(values_only=True):
+        for row in rows:
             if not _is_data_row(row):
                 continue
             temperature_k.append(float(row[1]) + _C_TO_K)

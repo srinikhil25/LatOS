@@ -201,11 +201,36 @@ def outcome_path_for(prereg_path: Path) -> Path:
 
 
 def write_outcome(prereg_path: Path, verdict: OutcomeVerdict) -> Path:
-    """Persist a verdict next to its frozen record; return the outcome path."""
+    """Persist a verdict next to its frozen record; return the outcome path.
+
+    Write-once, like the record it scores. A verdict that can be replaced is a
+    prediction that can be re-scored until it passes, and until 2026-09-17 a
+    second validation did exactly that: a measurement outside the interval was
+    replaced by one inside it, and the file kept no trace of the first.
+
+    Raises:
+        FileExistsError: If the record already has an outcome.
+    """
     out = outcome_path_for(prereg_path)
     payload = {"kind": "latos.bo.outcome", "prereg": prereg_path.name, **asdict(verdict)}
-    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    with out.open("x", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, indent=2))
     return out
+
+
+def _read_outcome(path: Path) -> dict[str, Any] | None:
+    """The recorded verdict beside a record, or None if absent or unreadable.
+
+    Unreadable is not absent — the file still blocks a second validation — but
+    one damaged verdict must not hide the prediction it belongs to.
+    """
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,7 +274,9 @@ def list_preregistrations(root: Path) -> list[PreregEntry]:
 
     Skips the ``*.outcome.json`` siblings themselves and attaches each
     recorded outcome (if present) to its parent entry. Malformed records
-    are skipped, not fatal.
+    are skipped, not fatal — whatever the malformation, since one hand-edited
+    file must not empty the whole list. A malformed outcome leaves its record
+    listed without a verdict.
     """
     directory = prereg_dir(root)
     if not directory.is_dir():
@@ -263,12 +290,7 @@ def list_preregistrations(root: Path) -> list[PreregEntry]:
             pred = record["prediction_at_recommendation"]
             obj = record.get("objective", {})
             lo, hi = (float(v) for v in pred["predictive_interval_95"])
-            outcome_file = outcome_path_for(path)
-            outcome = (
-                json.loads(outcome_file.read_text(encoding="utf-8"))
-                if outcome_file.is_file()
-                else None
-            )
+            outcome = _read_outcome(outcome_path_for(path))
             entries.append(
                 PreregEntry(
                     path=str(path),
@@ -285,7 +307,7 @@ def list_preregistrations(root: Path) -> list[PreregEntry]:
                     search_bounds=_search_bounds(obj),
                 )
             )
-        except (KeyError, ValueError, OSError):
+        except (KeyError, ValueError, OSError, TypeError, AttributeError):
             continue
     entries.sort(key=lambda e: e.created_at, reverse=True)
     return entries

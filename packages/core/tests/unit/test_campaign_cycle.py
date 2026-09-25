@@ -14,12 +14,14 @@ prediction" as the thing that must not break.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import ClassVar
 
 import numpy as np
 import openpyxl
 import pytest
 
+from latos import campaign_cycle
 from latos.campaign_cycle import (
     CycleOutcome,
     SampleFit,
@@ -27,6 +29,7 @@ from latos.campaign_cycle import (
     main,
     run_cycle,
 )
+from latos.core.enums import Technique
 from latos.ingestion.ite_workbook_template import (
     FIRST_DATA_ROW,
     HEADER_ROW,
@@ -34,6 +37,7 @@ from latos.ingestion.ite_workbook_template import (
     SAMPLES_SHEET,
     write_template,
 )
+from latos.ingestion.parsed_data import ParsedData
 from latos.optimization import list_preregistrations, prereg_dir
 
 DELTAS = (2.0, 5.0, 10.0)
@@ -524,3 +528,105 @@ class TestTheSignConventionIsHeldConstant:
         wb.save(path)
         outcome = run_cycle(path, freeze_prereg=False)
         assert any(m.startswith("electrode_material was NOT constant") for m in outcome.messages)
+
+
+class TestTwoCyclesInOneSecond:
+    """Found 2026-09-17: the second run replaced the first frozen record."""
+
+    def test_both_records_survive(self, tmp_path, monkeypatch):
+        path = _campaign(tmp_path, {"A": (0.0, -0.78), "B": (0.5, 0.1), "C": (1.0, 0.4)})
+        moment = datetime(2026, 9, 17, 12, 0, 0, tzinfo=UTC)
+        real = campaign_cycle.optimize
+        monkeypatch.setattr(
+            campaign_cycle, "optimize", lambda *a, **k: real(*a, created_at=moment, **k)
+        )
+
+        first = run_cycle(path)
+        body = first.prereg_path.read_text(encoding="utf-8")
+        second = run_cycle(path)
+
+        assert first.prereg_path != second.prereg_path
+        assert first.prereg_path.read_text(encoding="utf-8") == body
+        assert len(list_preregistrations(path.parent)) == 2
+
+
+class TestEachSkippedSampleSaysWhy:
+    """Found 2026-09-17: one message listed both usual causes for every skip."""
+
+    BASE: ClassVar[dict] = {"A": (0.0, 1.1), "B": (0.5, 2.3), "C": (1.0, 1.6)}
+
+    def _unused(self, outcome: CycleOutcome) -> str:
+        (message,) = [m for m in outcome.messages if "contributed no value" in m]
+        return message
+
+    def test_one_repeated_delta_t_is_named(self, tmp_path):
+        path = _campaign(tmp_path, self.BASE, deltas=(5.0, 5.0, 5.0))
+        message = self._unused(run_cycle(path, freeze_prereg=False))
+        assert message.startswith("3 sample(s)")
+        assert message.count("delta-T = 5 K, which fixes no slope") == 3
+        assert "fewer than" not in message
+
+    def test_a_short_series_is_named(self, tmp_path):
+        path = _campaign(tmp_path, self.BASE, deltas=(5.0,))
+        message = self._unused(run_cycle(path, freeze_prereg=False))
+        assert "  A: fewer than 2 usable" in message
+        assert "no composition" not in message
+
+    def test_a_missing_composition_is_named(self, tmp_path):
+        path = _campaign(tmp_path, {**self.BASE, "D": (0.25, 2.0)})
+        wb = openpyxl.load_workbook(path)
+        sheet = wb[SAMPLES_SHEET]
+        column = next(c.column for c in sheet[HEADER_ROW] if c.value == "mass_IL_A_mg")
+        sheet.cell(FIRST_DATA_ROW + 3, column, -5.0)
+        wb.save(path)
+
+        outcome = run_cycle(path, freeze_prereg=False)
+        message = self._unused(outcome)
+        assert message.startswith("1 sample(s)")
+        assert "  D: no composition" in message
+        assert "fewer than" not in message
+        assert sorted(f.sample_id for f in outcome.fits) == ["A", "B", "C"]
+
+    def test_a_repeated_id_is_named_and_nothing_is_invented(self, tmp_path):
+        """The 2026-09-17 probe: a copied row became a fit at x = 0.5."""
+        path = _campaign(tmp_path, self.BASE)
+        wb = openpyxl.load_workbook(path)
+        sheet = wb[SAMPLES_SHEET]
+        header = {c.value: c.column for c in sheet[HEADER_ROW] if c.value}
+        row = FIRST_DATA_ROW + len(self.BASE)
+        sheet.cell(row, header["sample_id"], "A")
+        sheet.cell(row, header["mass_IL_A_mg"], 200.0)
+        sheet.cell(row, header["mass_IL_B_mg"], 200.0)
+        wb.save(path)
+
+        outcome = run_cycle(path, freeze_prereg=False)
+        assert sorted(f.sample_id for f in outcome.fits) == ["B", "C"]
+        message = self._unused(outcome)
+        assert message.count("A: the id is on more than one sample row") == 2
+        # Two distinct compositions left, so no surrogate, and nothing frozen.
+        assert outcome.result is None
+
+    @staticmethod
+    def _entry(delta_t, delta_v, composition) -> ParsedData:
+        return ParsedData(
+            technique=Technique.THERMOELECTRIC,
+            arrays={"delta_t_k": np.array(delta_t), "delta_v_mv": np.array(delta_v)},
+            metadata={"sample_id": "X", "mass_fraction_x": composition},
+            instrument=None,
+            measured_at=None,
+            issues=(),
+            parser_name="ite-workbook",
+            parser_version="1.1.0",
+        )
+
+    def test_a_composition_outside_the_simplex_is_refused(self):
+        """Unreachable through the parser; guards what the engine does not check."""
+        entry = self._entry([2.0, 5.0], [1.0, 2.0], -1.0)
+        assert campaign_cycle._fit_one(entry) == "X: composition -1.0 is outside [0, 1]"
+
+    def test_a_repeated_delta_t_that_rounds_is_still_refused(self):
+        """The mean of three 0.1 K points is not 0.1, and the fit returned S = 8.0."""
+        entry = self._entry([0.1, 0.1, 0.1], [1.0, 1.2, 0.9], 0.5)
+        assert campaign_cycle._fit_one(entry) == (
+            "X: every point was taken at delta-T = 0.1 K, which fixes no slope"
+        )

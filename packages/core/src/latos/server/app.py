@@ -64,7 +64,7 @@ from latos.optimization import (
     OptimizationResultND,
     Recommendation,
     RecommendationND,
-    freeze,
+    freeze_new,
     length_scale_robustness,
     optimize,
     optimize_nd,
@@ -326,32 +326,66 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
 
 
 def _delete_project_store(state: ServerState, root: Path) -> DeleteProjectResult:
-    """Recycle a project's ``.latos/`` store; forget it if it was the open one.
+    """Reset a project: recycle its ``.latos/`` store except the pre-registrations.
 
-    Never touches the raw files. Idempotent when the store is already gone.
+    Never touches the raw files, and never touches ``.latos/prereg/``.
+    Everything else in the store is Latos's working data — the database, the
+    parsed arrays, the labelling decisions — and a reset is allowed to take it.
+    The frozen predictions are not working data: they are commitments made
+    before a sample existed, and the closed-loop claim rests on them. Until
+    2026-09-17 a reset recycled them with everything else, behind a
+    permanent-delete fallback justified by the store being "always
+    regenerable", which is false for exactly those files.
+
+    Forgets the project if it was the open one. Idempotent when the store is
+    already gone.
     """
     if root == Path(root.anchor):
         raise HTTPException(status_code=400, detail="Refusing to act on a filesystem root")
     store = root / ".latos"
     existed = store.is_dir()
     recycled = True
+    kept = 0
     if existed:
+        keep = prereg_dir(root)
+        kept = _count_records(keep)
         try:
-            recycled = trash_path(store)
+            for child in sorted(store.iterdir()):
+                if child == keep and any(keep.iterdir()):
+                    continue
+                recycled = trash_path(child) and recycled
+            if not any(store.iterdir()):
+                store.rmdir()
         except OSError as exc:
             raise HTTPException(
                 status_code=500, detail=f"Could not delete the store: {exc}"
             ) from exc
     if state.root is not None and os.path.normcase(str(state.root)) == os.path.normcase(str(root)):
         state.reset()
-    return DeleteProjectResult(root=str(root), removed=existed, recycled=recycled)
+    return DeleteProjectResult(
+        root=str(root), removed=existed, recycled=recycled, kept_preregistrations=kept
+    )
+
+
+def _count_records(directory: Path) -> int:
+    """Frozen records in `directory`, not counting their outcome files."""
+    if not directory.is_dir():
+        return 0
+    return sum(1 for p in directory.glob("prereg_*.json") if ".outcome." not in p.name)
 
 
 def _json_safe(value: object) -> object:
-    """Replace non-finite floats with None so the payload is valid JSON."""
+    """Replace non-finite floats with None, at any depth, so the payload is valid JSON.
+
+    Dicts included: a NaN nested one level down used to reach the response
+    intact, and the encoder rejects it, so one analyzer output with a nested
+    NaN turned the whole analysis panel into a 500.
+    """
     if isinstance(value, float):
         return value if math.isfinite(value) else None
-    if isinstance(value, list):
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
         return [_json_safe(v) for v in value]
     return value
 
@@ -1133,11 +1167,10 @@ def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> Free
     except OptimizationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    stamp = res.config.created_at.strftime("%Y%m%dT%H%M%SZ")
-    out_path = _unused_prereg_path(prereg_dir(state.root), stamp)
-    freeze(res, out_path, prior_best=res.best_y, robustness=robustness)
+    out_path = freeze_new(res, prereg_dir(state.root), prior_best=res.best_y, robustness=robustness)
     return FreezeResult(
         path=str(out_path),
+        target_name=asm.target_label,
         recommendation=_rec_out(res.recommendation),
         prior_best=res.best_y,
         robustness_stable=robustness.stable,
@@ -1145,22 +1178,6 @@ def _freeze_recommendation(state: ServerState, body: OptimizeRunRequest) -> Free
         reliability_level=res.reliability.level if res.reliability else "unknown",
         reliability_note=res.reliability.note if res.reliability else "",
     )
-
-
-def _unused_prereg_path(directory: Path, stamp: str) -> Path:
-    """`prereg_<stamp>.json`, suffixed if that second already has a record.
-
-    The stamp resolves to one second, so two freezes in the same second would
-    land on the same filename. A pre-registration is meant to be an immutable
-    commitment, and campaign drift reads the sequence of them, so overwriting
-    one would destroy exactly the history the record exists to preserve.
-    """
-    candidate = directory / f"prereg_{stamp}.json"
-    suffix = 2
-    while candidate.exists():
-        candidate = directory / f"prereg_{stamp}_{suffix}.json"
-        suffix += 1
-    return candidate
 
 
 @dataclass(frozen=True)
@@ -1230,6 +1247,14 @@ def _assemble_optimization(state: ServerState, body: OptimizeRunRequest) -> _Ass
     target_label = body.target_property
     if body.target_property == optimization_data.DERIVED_ZT and body.at_temperature_k:
         target_label = f"{target_label} @ {body.at_temperature_k:g} K"
+
+    # A sign-bearing target is ranked by magnitude: an n-type sample at
+    # -210 uV/K is the stronger thermoelectric, and a signed maximum ranked it
+    # below every p-type sample. "Reach a value" keeps the sign, because the
+    # value asked for is itself signed.
+    if body.objective != "target" and optimization_data.is_sign_bearing(body.target_property):
+        ys = np.abs(ys)
+        target_label = f"|{target_label}|"
 
     direction = "maximize"
     if body.objective == "minimize":
@@ -1534,13 +1559,34 @@ def _validate_prereg(state: ServerState, body: ValidateOutcomeRequest) -> Outcom
         in_dir = False
     if not in_dir or not resolved.is_file():
         raise HTTPException(status_code=404, detail="Unknown pre-registration for this project")
+    if not math.isfinite(body.measured_value):
+        raise HTTPException(status_code=400, detail="The measured value must be a finite number.")
+    if optimization.outcome_path_for(resolved).exists():
+        raise HTTPException(status_code=409, detail=_ALREADY_VALIDATED)
     try:
         record = json.loads(resolved.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"Could not read the record: {exc}") from exc
-    verdict = optimization.validate_outcome(record, body.measured_value)
-    optimization.write_outcome(resolved, verdict)
+    try:
+        verdict = optimization.validate_outcome(record, body.measured_value)
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The pre-registration record is malformed and cannot be scored ({exc!r}).",
+        ) from exc
+    try:
+        optimization.write_outcome(resolved, verdict)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=_ALREADY_VALIDATED) from exc
     return _verdict_out(verdict)
+
+
+_ALREADY_VALIDATED = (
+    "This prediction already has a recorded outcome. Outcomes are write-once: one that "
+    "could be replaced would let a missed prediction be re-scored until it passed. If the "
+    "recorded value was entered wrongly, that is a correction to make by hand in its "
+    ".outcome.json file, where it stays visible, not a second validation."
+)
 
 
 def _campaign_drift(state: ServerState) -> list[CampaignDriftOut]:
@@ -1612,8 +1658,22 @@ def _verdict_out(verdict: optimization.OutcomeVerdict) -> OutcomeVerdictOut:
     )
 
 
-def _verdict_out_from_dict(data: dict[str, object]) -> OutcomeVerdictOut:
-    """Rebuild an OutcomeVerdictOut from a persisted outcome payload."""
+def _verdict_out_from_dict(data: dict[str, object]) -> OutcomeVerdictOut | None:
+    """Rebuild an OutcomeVerdictOut from a persisted outcome payload.
+
+    None when a field is missing or mistyped. One damaged outcome file used to
+    make `GET /optimize/prereg` a 500, which hid every prediction in the
+    project; now that record shows no verdict, and validating it again is
+    refused with an explanation, because the file still exists.
+    """
+    try:
+        return _parse_verdict(data)
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+
+
+def _parse_verdict(data: dict[str, object]) -> OutcomeVerdictOut:
+    """`_verdict_out_from_dict` without the tolerance; raises on a bad payload."""
     interval = data.get("predictive_interval_95") or [0.0, 0.0]
     return OutcomeVerdictOut(
         measured=float(data["measured"]),  # type: ignore[arg-type]

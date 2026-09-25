@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from latos.optimization.validate import (
     list_preregistrations,
     outcome_path_for,
@@ -170,3 +172,52 @@ class TestPreregRecordCarriesDirection:
         )
         record = build_record(res, prior_best=res.best_y)
         assert record["objective"]["direction"] == "minimize"
+
+
+class TestAVerdictIsWriteOnce:
+    """Found 2026-09-17: a second validation replaced the first without trace."""
+
+    def test_a_second_outcome_is_refused_and_the_first_kept(self, tmp_path: Path):
+        prereg = tmp_path / "prereg_20260917T120000Z.json"
+        prereg.write_text(json.dumps(_record()), encoding="utf-8")
+        write_outcome(prereg, validate_outcome(_record(), measured=0.10))
+        first = outcome_path_for(prereg).read_text(encoding="utf-8")
+
+        with pytest.raises(FileExistsError):
+            write_outcome(prereg, validate_outcome(_record(), measured=0.95))
+        assert outcome_path_for(prereg).read_text(encoding="utf-8") == first
+
+
+class TestOneBadFileDoesNotEmptyTheList:
+    """Found 2026-09-17 (and in July, on a branch never merged)."""
+
+    def _dir(self, root: Path) -> Path:
+        d = root / ".latos" / "prereg"
+        d.mkdir(parents=True)
+        return d
+
+    def test_an_unreadable_outcome_keeps_its_record_listed(self, tmp_path: Path):
+        d = self._dir(tmp_path)
+        prereg = d / "prereg_20260917T120000Z.json"
+        prereg.write_text(json.dumps(_record()), encoding="utf-8")
+        outcome_path_for(prereg).write_text("{ truncated", encoding="utf-8")
+
+        listed = list_preregistrations(tmp_path)
+        assert len(listed) == 1
+        assert listed[0].outcome is None
+
+    @pytest.mark.parametrize(
+        "damage",
+        [
+            {"prediction_at_recommendation": [1, 2, 3]},  # TypeError, not KeyError
+            {"reliability": None},  # AttributeError on .get
+            {"prediction_at_recommendation": {"x": 1.0}},  # KeyError
+        ],
+    )
+    def test_a_damaged_record_is_skipped_not_fatal(self, tmp_path: Path, damage):
+        d = self._dir(tmp_path)
+        (d / "prereg_20260917T120000Z.json").write_text(
+            json.dumps({**_record(), **damage}), encoding="utf-8"
+        )
+        (d / "prereg_20260917T130000Z.json").write_text(json.dumps(_record()), encoding="utf-8")
+        assert len(list_preregistrations(tmp_path)) == 1

@@ -12,9 +12,12 @@ from latos import __version__
 from latos.optimization import (
     build_record,
     freeze,
+    freeze_new,
     length_scale_robustness,
     observations_digest,
     optimize,
+    unused_record_path,
+    write_record,
 )
 
 
@@ -326,3 +329,36 @@ class TestTheRecordNamesItsBuild:
         del record["latos_version"]
         note = _to_markdown(record)
         assert "unknown" in note
+
+
+class TestARecordIsNeverOverwritten:
+    """Found 2026-09-17: `write_record` replaced an existing file silently, and
+    the bench command named files to the second."""
+
+    def test_write_record_refuses_an_existing_path(self, tmp_path: Path):
+        res, _, _ = _result()
+        path = freeze(res, tmp_path / "prereg.json", prior_best=res.best_y)
+        before = path.read_text(encoding="utf-8")
+        with pytest.raises(FileExistsError, match="never overwritten"):
+            write_record(build_record(res, prior_best=0.0), path)
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_an_orphaned_note_also_blocks_the_name(self, tmp_path: Path):
+        """The pair is one record; half of one is still somebody's."""
+        (tmp_path / "prereg.md").write_text("hand-written", encoding="utf-8")
+        res, _, _ = _result()
+        with pytest.raises(FileExistsError):
+            write_record(build_record(res, prior_best=res.best_y), tmp_path / "prereg.json")
+
+    def test_freezes_inside_one_second_all_survive(self, tmp_path: Path):
+        res, _, _ = _result()
+        paths = [freeze_new(res, tmp_path, prior_best=res.best_y) for _ in range(3)]
+        assert len(set(paths)) == 3
+        assert all(p.exists() and p.with_suffix(".md").exists() for p in paths)
+        stamp = res.config.created_at.strftime("%Y%m%dT%H%M%SZ")
+        assert paths[0].name == f"prereg_{stamp}.json"
+        assert paths[1].name == f"prereg_{stamp}_2.json"
+
+    def test_the_name_skips_a_taken_note(self, tmp_path: Path):
+        (tmp_path / "prereg_X.md").write_text("", encoding="utf-8")
+        assert unused_record_path(tmp_path, "X").name == "prereg_X_2.json"

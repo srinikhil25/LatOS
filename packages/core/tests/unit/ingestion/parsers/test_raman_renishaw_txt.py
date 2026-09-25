@@ -238,3 +238,13 @@ class TestRobustness:
     def test_never_raises_on_a_missing_file(self, tmp_path):
         parsed = RenishawRamanTxtParser().parse(tmp_path / "absent.txt")
         assert Severity.ERROR in severities(parsed)
+
+    def test_a_bad_intensity_costs_one_line_not_the_spectrum(self, tmp_path):
+        """Found 2026-09-17: the wavenumber was kept before the intensity failed."""
+        x, y = spectrum(n=200, noise=0.0)
+        path = write(tmp_path, x, y)
+        path.write_bytes(path.read_bytes() + b"\r\n99.5\tsaturated\r\n")
+        parsed = RenishawRamanTxtParser().parse(path)
+        assert parsed.arrays["raman_shift_cm1"].size == 200
+        assert parsed.arrays["intensity"].size == 200
+        assert "1 line(s) could not be read" in messages(parsed)
