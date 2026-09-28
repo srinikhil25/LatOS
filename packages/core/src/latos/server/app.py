@@ -83,6 +83,7 @@ from latos.server import (
 from latos.server.edits import EditError
 from latos.server.imaging import render_to_png
 from latos.server.schemas import (
+    AnalyzerArrays,
     AnalyzerResultOut,
     AxisOut,
     CampaignDriftOut,
@@ -291,6 +292,7 @@ def create_app(*, orchestrator_factory: OrchestratorFactory | None = None) -> Fa
     _register_report_routes(app, state)
 
     _register_sample_read_routes(app, state)
+    _register_analysis_routes(app, state)
 
     @app.get("/measurements/{measurement_id}/arrays")
     def measurement_arrays(measurement_id: str) -> MeasurementArrays:
@@ -767,6 +769,16 @@ def _register_sample_read_routes(app: FastAPI, state: ServerState) -> None:
             warnings=zt.warnings,
         )
 
+
+def _register_analysis_routes(app: FastAPI, state: ServerState) -> None:
+    """Analyzer results for one measurement: the numbers, and the curves.
+
+    Split from the sample-read routes because these two answer the same
+    question at different weights — a handful of scalars that every panel
+    render asks for, and the several-thousand-point curves behind them
+    that only a chart does.
+    """
+
     @app.get("/measurements/{measurement_id}/analysis")
     def measurement_analysis(measurement_id: str) -> list[AnalyzerResultOut]:
         """Run the applicable analyzers on a measurement (stateless, on demand).
@@ -785,6 +797,63 @@ def _register_sample_read_routes(app: FastAPI, state: ServerState) -> None:
             raise HTTPException(status_code=404, detail="Unknown measurement")
         overrides = _hall_cross_technique_overrides(result, store, measurement)
         return _run_analysis(measurement, store.load(measurement_id), overrides)
+
+    @app.get("/measurements/{measurement_id}/analysis/{analyzer_name}/arrays")
+    def measurement_analysis_arrays(
+        measurement_id: str,
+        analyzer_name: str,
+    ) -> AnalyzerArrays:
+        """The curves one analyzer derived, so the UI can plot its fit.
+
+        `/analysis` returns each analyzer's scalars and issues and drops
+        the curves behind them, which is right for a panel that only
+        lists numbers but leaves the fit itself invisible. This route
+        re-runs the named analyzer and serializes `derived_arrays`.
+
+        Re-running rather than caching matches `/analysis`: these fits
+        are cheap relative to a round trip, and a cached overlay that no
+        longer matches the scalars beside it is worse than none.
+        """
+        result = state.result
+        store = state.array_store()
+        if result is None or store is None:
+            raise HTTPException(status_code=404, detail="No project is open")
+        measurement = _find_measurement(result, measurement_id)
+        if measurement is None:
+            raise HTTPException(status_code=404, detail="Unknown measurement")
+        analyzer = next(
+            (a for a in analyzer_registry().find_for(measurement) if a.name == analyzer_name),
+            None,
+        )
+        if analyzer is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No analyzer named {analyzer_name!r} applies to this measurement",
+            )
+        overrides = _hall_cross_technique_overrides(result, store, measurement)
+        output = analyzer.analyze(
+            AnalyzerInputs(
+                measurement=measurement,
+                arrays=store.load(measurement_id),
+                params=analyzer.merge_params((overrides or {}).get(analyzer.name)),
+            )
+        )
+        if not output.derived_arrays:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Analyzer {analyzer_name!r} derives no plottable arrays",
+            )
+        # NaN/inf are not valid JSON — emit None so traces show gaps.
+        payload = {
+            name: [x if math.isfinite(x) else None for x in arr.tolist()]
+            for name, arr in output.derived_arrays.items()
+        }
+        return AnalyzerArrays(
+            measurement_id=measurement_id,
+            analyzer=analyzer_name,
+            names=list(payload.keys()),
+            arrays=payload,
+        )
 
 
 def _register_review_routes(app: FastAPI, state: ServerState) -> None:

@@ -450,11 +450,11 @@ function SpectrumPlot({
       <ChartFrame basename="latos-peak-fit" label="peak-fit figure">
       <svg viewBox={`0 0 ${W} ${H + RH + 24}`} className="w-full" role="img" aria-label="fit overlay">
         {/* frames */}
-        <rect x={pad} y={pad} width={W - 2 * pad} height={H - 2 * pad} fill="none" stroke="var(--latos-edge)" />
+        <rect x={pad} y={pad} width={W - 2 * pad} height={H - 2 * pad} fill="none" stroke="var(--latos-border)" />
         {/* data */}
         <path d={path(y, syTop)} fill="none" stroke="var(--latos-text-secondary)" strokeWidth={1} opacity={0.7} />
         {/* baseline */}
-        <path d={path(baseline, syTop)} fill="none" stroke="var(--latos-edge)" strokeWidth={1} strokeDasharray="4 3" />
+        <path d={path(baseline, syTop)} fill="none" stroke="var(--latos-border)" strokeWidth={1} strokeDasharray="4 3" />
         {/* fit */}
         <path d={path(fit, syTop)} fill="none" stroke="var(--latos-accent)" strokeWidth={1.6} />
         {/* peak markers */}
@@ -472,7 +472,7 @@ function SpectrumPlot({
           />
         ))}
         {/* residual strip */}
-        <line x1={pad} x2={W - pad} y1={H + RH / 2} y2={H + RH / 2} stroke="var(--latos-edge)" strokeWidth={0.5} />
+        <line x1={pad} x2={W - pad} y1={H + RH / 2} y2={H + RH / 2} stroke="var(--latos-border)" strokeWidth={0.5} />
         <path d={path(resid, syRes)} fill="none" stroke="var(--latos-text-secondary)" strokeWidth={0.75} opacity={0.7} />
         <text x={pad} y={H + RH + 18} fontSize="11" fill="var(--latos-text-secondary)">
           residual

@@ -315,6 +315,35 @@ export function getMeasurementAnalysis(id: string): Promise<AnalyzerResult[]> {
   return request<AnalyzerResult[]>(`/measurements/${id}/analysis`);
 }
 
+/** The curves an analyzer derived, so its fit can be drawn and not just read.
+ *
+ * Separate from `getMeasurementAnalysis` on purpose: that call is made for
+ * every selected measurement and returns scalars, while these arrays run to
+ * thousands of points and are only wanted when a chart is actually shown.
+ *
+ * Returns null when the analyzer derives no arrays (most of them do not) or
+ * no project is open, so callers can render nothing without special-casing.
+ */
+export async function getAnalysisArrays(
+  id: string,
+  analyzer: string,
+): Promise<AnalyzerArrays | null> {
+  try {
+    return await request<AnalyzerArrays>(
+      `/measurements/${id}/analysis/${encodeURIComponent(analyzer)}/arrays`,
+    );
+  } catch {
+    return null;
+  }
+}
+
+export interface AnalyzerArrays {
+  measurement_id: string;
+  analyzer: string;
+  names: string[];
+  arrays: Record<string, (number | null)[]>;
+}
+
 /** URL of the rendered PNG for an image measurement (TEM/SEM/STEM). */
 export function measurementImageUrl(id: string): string {
   return `${BASE}/measurements/${id}/image`;

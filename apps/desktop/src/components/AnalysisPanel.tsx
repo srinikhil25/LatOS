@@ -1,6 +1,10 @@
 /** AnalysisPanel — runs the applicable analyzers on a measurement and
  * shows their results (band gap for UV-DRS, fitted peaks for XRD, …).
  *
+ * Where an analyzer derives curves as well as scalars, the overlay is
+ * drawn under its numbers: a fit quality is a claim about a shape, and
+ * the reader needs to see the shape to judge the claim.
+ *
  * Results are computed on demand by the sidecar; this panel just fetches
  * and renders them. Long arrays (e.g. 22 peak positions) are summarized
  * rather than dumped. Issues are shown with their severity colour so a
@@ -10,6 +14,7 @@
 import { useEffect, useState } from "react";
 import { getMeasurementAnalysis, type AnalyzerResult } from "../lib/api";
 import { outputKeyLabel } from "../lib/labels";
+import { AnalysisOverlayChart } from "./AnalysisOverlayChart";
 
 const ARRAY_PREVIEW = 6;
 
@@ -83,6 +88,7 @@ export function AnalysisPanel({ measurementId }: { measurementId: string }) {
               </div>
             ))}
           </dl>
+          <AnalysisOverlayChart measurementId={measurementId} analyzer={r.analyzer} />
           {r.issues.length > 0 && (
             <ul className="mt-2 space-y-0.5 border-t border-edge pt-2 text-xs">
               {r.issues.map((issue, i) => (

@@ -365,6 +365,83 @@ class TestMeasurementArrays:
         assert body["arrays"]["intensity"] == [1.0, None, 3.0]
 
 
+class TestAnalysisArrays:
+    """GET /measurements/{id}/analysis/{analyzer}/arrays — the fitted curves.
+
+    The scalars are already covered by /analysis; what matters here is that
+    the curves behind them survive serialization, because without those the
+    analysis panel can report a fit quality nobody can check.
+    """
+
+    @staticmethod
+    def _write_scan(client: TestClient, tmp_path: Path) -> str:
+        """A synthetic XRD scan with one clear peak; returns its measurement id."""
+        import numpy as np
+
+        from latos.ingestion.array_store import ArrayStore
+        from latos.ingestion.parsed_data import ParsedData
+
+        _open_and_join(client, tmp_path)
+        mid = client.get("/samples").json()[0]["measurements"][0]["id"]
+        two_theta = np.linspace(10.0, 40.0, 300)
+        intensity = 100.0 + 800.0 * np.exp(-0.5 * ((two_theta - 25.0) / 0.3) ** 2)
+        ArrayStore(tmp_path / ".latos" / "arrays").write(
+            mid,
+            ParsedData(
+                technique=Technique.XRD,
+                arrays={"two_theta": two_theta, "intensity": intensity},
+                metadata={},
+                instrument=None,
+                measured_at=None,
+                issues=(),
+                parser_name="test",
+                parser_version="1.0.0",
+            ),
+        )
+        return mid
+
+    def test_before_open_404(self, client: TestClient):
+        response = client.get("/measurements/abc123/analysis/xrd-peak-fit/arrays")
+        assert response.status_code == 404
+
+    def test_unknown_measurement_404(self, client: TestClient, tmp_path: Path):
+        _open_and_join(client, tmp_path)
+        response = client.get("/measurements/not-a-real-id/analysis/xrd-peak-fit/arrays")
+        assert response.status_code == 404
+
+    def test_unknown_analyzer_404(self, client: TestClient, tmp_path: Path):
+        mid = self._write_scan(client, tmp_path)
+        response = client.get(f"/measurements/{mid}/analysis/not-an-analyzer/arrays")
+        assert response.status_code == 404
+        assert "No analyzer named" in response.json()["detail"]
+
+    def test_derived_curves_round_trip(self, client: TestClient, tmp_path: Path):
+        mid = self._write_scan(client, tmp_path)
+        response = client.get(f"/measurements/{mid}/analysis/xrd-peak-fit/arrays")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["measurement_id"] == mid
+        assert body["analyzer"] == "xrd-peak-fit"
+        # The overlay the panel draws: the observed curve, what was removed
+        # from it, what was fitted to it, and what is left over.
+        for name in ("two_theta", "intensity_observed", "baseline", "fit_line", "residual"):
+            assert name in body["arrays"], name
+        # Equal-length columns are the analyzer contract; the chart indexes
+        # every trace against the abscissa and would misalign otherwise.
+        lengths = {len(v) for v in body["arrays"].values()}
+        assert lengths == {300}
+        assert body["names"][0] == "two_theta"
+
+    def test_analyzer_without_derived_arrays_404(self, client: TestClient, tmp_path: Path):
+        """An analyzer that derives no curves says so rather than returning {}.
+
+        The UI treats 404 as "nothing to draw" and renders no chart frame.
+        """
+        mid = self._write_scan(client, tmp_path)
+        response = client.get(f"/measurements/{mid}/analysis/eds-composition/arrays")
+        assert response.status_code == 404
+
+
 class TestMeasurementImage:
     def test_before_open_404(self, image_client: TestClient):
         assert image_client.get("/measurements/abc/image").status_code == 404

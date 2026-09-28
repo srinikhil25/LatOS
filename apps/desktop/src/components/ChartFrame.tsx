@@ -25,10 +25,16 @@ export interface ChartFrameProps {
   basename: string;
   /** Accessible description of what is being saved. */
   label?: string;
+  /**
+   * Resolution multiplier for the saved PNG. The default 2 is right for
+   * pasting into a document; a figure headed for a slide or a paper wants
+   * more, because it is scaled up rather than down.
+   */
+  scale?: number;
   children: React.ReactNode;
 }
 
-export function ChartFrame({ basename, label = "figure", children }: ChartFrameProps) {
+export function ChartFrame({ basename, label = "figure", scale, children }: ChartFrameProps) {
   const figureRef = useRef<HTMLDivElement>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +45,7 @@ export function ChartFrame({ basename, label = "figure", children }: ChartFrameP
     setPhase("saving");
     setError(null);
     try {
-      await exportChartPng(root, basename);
+      await exportChartPng(root, basename, scale === undefined ? {} : { scale });
       setPhase("saved");
       setTimeout(() => setPhase("idle"), 2000);
     } catch (err) {

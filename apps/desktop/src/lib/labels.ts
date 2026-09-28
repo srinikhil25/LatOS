@@ -16,6 +16,7 @@ const AXIS_LABELS: Record<string, string> = {
   // ─ XRD ─
   two_theta: "2θ (°)",
   intensity: "Intensity (a.u.)",
+  intensity_observed: "Intensity (a.u.)",
   counts: "Counts",
   // ─ XPS ─
   binding_energy: "Binding energy (eV)",

@@ -635,6 +635,31 @@ class MeasurementArrays(BaseModel):
     arrays: dict[str, list[float | None]]
 
 
+class AnalyzerArrays(BaseModel):
+    """An analyzer's derived curves, so its result can be plotted.
+
+    GET /measurements/{id}/analysis/{analyzer}/arrays.
+
+    An analyzer such as the XRD peak fit produces the curves it worked on
+    (`intensity_observed`, `baseline`, `fit_line`, `residual`) alongside its
+    scalars. Those curves are what a reader needs to judge a fit: an R² of
+    0.74 means little until you can see which part of the scan it describes.
+
+    They are served here rather than on `/analysis` because most callers of
+    that route only read the numbers, and shipping several thousand points
+    per analyzer on every panel render would make the common case pay for
+    the rare one.
+
+    `arrays` values use `None` for non-finite samples, as `MeasurementArrays`
+    does; the UI treats them as gaps.
+    """
+
+    measurement_id: str
+    analyzer: str
+    names: list[str]
+    arrays: dict[str, list[float | None]]
+
+
 # ─── Fit engine (Stage 4) ──────────────────────────────────────────────
 class DetectPeaksRequest(BaseModel):
     """POST /fit/detect-peaks — auto-detect candidate peak centers."""

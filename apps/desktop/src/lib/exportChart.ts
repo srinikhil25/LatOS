@@ -7,7 +7,7 @@
  *
  * Two details matter for fidelity:
  *
- *  - Our SVGs paint with theme tokens (`var(--latos-edge)`). Those are
+ *  - Our SVGs paint with theme tokens (`var(--latos-border)`). Those are
  *    defined on `:root`, so a serialized SVG loses them and renders
  *    black-on-black. We therefore re-declare the resolved tokens inside
  *    the clone, which also means an export matches the theme on screen.
@@ -24,7 +24,7 @@ const FALLBACK_TOKENS = [
   "--latos-surface",
   "--latos-muted-surface",
   "--latos-border",
-  "--latos-edge",
+  "--latos-border",
   "--latos-text",
   "--latos-text-secondary",
 ];
