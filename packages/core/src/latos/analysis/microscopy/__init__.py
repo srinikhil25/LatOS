@@ -27,6 +27,7 @@ from latos.analysis.microscopy.lattice import (
     iter_tiles,
     scan_frame,
 )
+from latos.analysis.microscopy.lattice_spacing import MicroscopyLatticeAnalyzer
 
 __all__ = [
     "DEFAULT_D_WINDOW_NM",
@@ -37,6 +38,7 @@ __all__ = [
     "FrameSpacing",
     "InfoBarLayout",
     "LatticePeak",
+    "MicroscopyLatticeAnalyzer",
     "SpacingEstimate",
     "StripTemplates",
     "aggregate_frames",

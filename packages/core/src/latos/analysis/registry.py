@@ -140,13 +140,21 @@ def default_registry() -> AnalyzerRegistry:
     ΔV-versus-ΔT series and a thermovoltage run has no κ, so each declines the
     other's data in `analyze` and reports why.
 
-    Microscopy (particle-size from TEM/SEM images) is deliberately absent —
-    it needs the Stage 5 vision work, not a numeric kernel.
+    - `MicroscopyLatticeAnalyzer`: fringe spacing from a calibrated TEM frame,
+      by windowed FFT. Both halves of it — the info-bar pixel size and the FFT
+      kernel — were written and tested long before anything dispatched to them,
+      so until it was registered no TEM-derived length existed in any project.
+
+    Particle size from TEM/SEM images remains absent: segmenting a particle is
+    the Stage 5 vision work, not a numeric kernel.
     """
     # Local imports keep the module light when only the registry types
     # are needed (e.g. by tests that build their own one-analyzer registry).
     from latos.analysis.eds.composition import EdsCompositionAnalyzer  # noqa: PLC0415
     from latos.analysis.hall.metrics import HallMetricsAnalyzer  # noqa: PLC0415
+    from latos.analysis.microscopy.lattice_spacing import (  # noqa: PLC0415
+        MicroscopyLatticeAnalyzer,
+    )
     from latos.analysis.thermovoltage.slope import ThermovoltageSlopeAnalyzer  # noqa: PLC0415
     from latos.analysis.transport.summary import TransportSummaryAnalyzer  # noqa: PLC0415
     from latos.analysis.uv_drs.tauc import UvDrsTaucAnalyzer  # noqa: PLC0415
@@ -162,5 +170,6 @@ def default_registry() -> AnalyzerRegistry:
             XpsRegionsAnalyzer(),
             TransportSummaryAnalyzer(),
             ThermovoltageSlopeAnalyzer(),
+            MicroscopyLatticeAnalyzer(),
         ],
     )
