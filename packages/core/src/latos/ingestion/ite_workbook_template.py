@@ -174,8 +174,9 @@ MEASUREMENT_COLUMNS: tuple[Column, ...] = (
         18,
         1,
         "",
-        "Must be 'V+ on the COLD electrode' — see rule 2, this is not a free choice. "
-        "Record it every run so a change becomes visible.",
+        "Which lead sat on the cold electrode. Latos reads this and sets the sign of S "
+        "from it, so record it every run. Blank or unrecognised means no sign, and the "
+        "sample is skipped. Rule 2 still says wire V+ to COLD.",
     ),
     Column("electrode_material", 17, 1, "", "Sets the sign. Never change mid-campaign."),
     Column("electrode_spacing_mm", 18, 1, "mm", "Equilibration time scales as the square of this."),
@@ -221,6 +222,10 @@ REQUIRED_MEASUREMENT_FIELDS: tuple[str, ...] = (
 _VALIDATIONS = {
     "steady_state_reached": '"yes,no,unsure"',
     "fresh_or_remeasure": '"fresh,remeasure"',
+    # A closed list because this field now sets the sign of every reported
+    # coefficient. A typo here used to be harmless and is not any more: an
+    # unrecognised value is refused rather than assumed, which costs the sample.
+    "polarity_convention": '"V+ on the COLD electrode,V+ on the HOT electrode"',
 }
 
 _HEAD_FILL = PatternFill("solid", fgColor="1F4E79")
@@ -265,11 +270,12 @@ _GUIDE = (
         "2. Connect the voltmeter's V+ lead to the COLD electrode, and never change it. "
         "Latos reports the coefficient as the slope of delta-V against delta-T, so the "
         "recorded delta-V has to be V_cold - V_hot for S = -dV/dT to come out with the "
-        "right sign. Wired the other way, every sign in the campaign inverts consistently "
-        "and silently: the optimizer works on the magnitude, so nothing downstream will "
-        "notice, and a p-type mixture will be written down as n-type. If a liquid whose "
-        "sign is known from the literature reads the other way, suspect the wiring before "
-        "the chemistry.",
+        "right sign. Record which lead you used in polarity_convention on every row: "
+        "Latos reads that column and corrects the sign from it, so an inverted rig that "
+        "was written down honestly is reported correctly rather than inverting the whole "
+        "campaign. What it cannot do is read your mind -- a blank or unrecognised value "
+        "means no sign, and the sample is skipped. If a liquid whose sign is known from "
+        "the literature reads the other way, suspect the wiring before the chemistry.",
         False,
     ),
     (

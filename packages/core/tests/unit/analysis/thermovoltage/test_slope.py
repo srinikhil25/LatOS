@@ -16,8 +16,11 @@ import pytest
 
 from latos.analysis.base_analyzer import AnalyzerInputs
 from latos.analysis.thermovoltage.slope import (
+    POLARITY_V_PLUS_ON_COLD,
+    POLARITY_V_PLUS_ON_HOT,
     ThermovoltageSlopeAnalyzer,
     fit_seebeck_slope,
+    resolve_polarity,
 )
 from latos.core.enums import Severity, Technique
 
@@ -38,9 +41,21 @@ def _measure_stub(*, with_file: bool = True):
     return m
 
 
-def _run(arrays: dict[str, np.ndarray]):
+def _run(arrays: dict[str, np.ndarray], polarity: object = POLARITY_V_PLUS_ON_COLD):
+    """Analyze `arrays`, stating the wiring rather than leaning on a default.
+
+    The wiring is explicit here so the rest of the suite keeps asserting that a
+    clean series produces no warnings at all: an unstated wiring is itself
+    worth one, because it decides the sign. Pass `None` to exercise that path.
+    """
     analyzer = ThermovoltageSlopeAnalyzer()
-    return analyzer.analyze(AnalyzerInputs(measurement=_measure_stub(), arrays=arrays))
+    return analyzer.analyze(
+        AnalyzerInputs(
+            measurement=_measure_stub(),
+            arrays=arrays,
+            params={"polarity_convention": polarity},
+        )
+    )
 
 
 def _series(slope: float, intercept: float, deltas: list[float], noise: float = 0.0):
@@ -267,7 +282,7 @@ class TestContract:
     def test_metadata(self):
         analyzer = ThermovoltageSlopeAnalyzer()
         assert analyzer.name == "thermovoltage-slope"
-        assert analyzer.version == "1.0.0"
+        assert analyzer.version == "1.1.0"
         assert analyzer.accepts_techniques == (Technique.THERMOELECTRIC,)
 
     def test_accepts_needs_a_source_file(self):
@@ -282,3 +297,166 @@ class TestContract:
         out = _run(_series(slope=2.0, intercept=1.0, deltas=[2.0, 10.0]))
         json.dumps(out.outputs)  # must not raise
         assert out.outputs["seebeck_stderr_mv_k"] is None
+
+
+class TestResolvePolarity:
+    """The field that decides where the minus sign in S = -dV/dT lives.
+
+    It is free text written at the bench, so the resolver has to be generous
+    about spelling and absolutely strict about guessing. Every case below is
+    one of those two halves.
+    """
+
+    @pytest.mark.parametrize(
+        "recorded",
+        [
+            "V+ on the COLD electrode",
+            "v+ on cold",
+            "  V+  on the cold electrode  ",
+            "cold",
+            "COLD",
+            "positive lead on the cold side",
+        ],
+    )
+    def test_the_cold_wiring_is_recognised_however_it_is_written(self, recorded):
+        resolved = resolve_polarity(recorded)
+        assert resolved.sign == 1
+        assert resolved.convention == POLARITY_V_PLUS_ON_COLD
+        assert resolved.source == "recorded"
+        assert resolved.problem is None
+
+    @pytest.mark.parametrize(
+        "recorded",
+        ["V+ on the HOT electrode", "v+ on hot", "hot", "positive lead on the hot side"],
+    )
+    def test_the_hot_wiring_negates(self, recorded):
+        resolved = resolve_polarity(recorded)
+        assert resolved.sign == -1
+        assert resolved.convention == POLARITY_V_PLUS_ON_HOT
+        assert resolved.problem is None
+
+    @pytest.mark.parametrize(
+        ("recorded", "expected"),
+        [
+            ("V+ on cold, V- on hot", 1),
+            ("V- on hot, V+ on cold", 1),
+            ("V- on cold, V+ on hot", -1),
+            ("V+ on hot, V- on cold", -1),
+        ],
+    )
+    def test_a_description_of_both_leads_resolves_from_the_v_plus_one(self, recorded, expected):
+        """Describing the whole rig is more informative, not less.
+
+        Order must not matter: it is which lead the side word belongs to that
+        carries the meaning, and "V+" is the only thing that says so.
+        """
+        resolved = resolve_polarity(recorded)
+        assert resolved.sign == expected
+        assert resolved.problem is None
+
+    def test_both_sides_with_no_v_plus_is_refused(self):
+        resolved = resolve_polarity("hot and cold electrodes")
+        assert resolved.problem is not None
+        assert "names both" in resolved.problem
+        assert resolved.convention is None
+
+    @pytest.mark.parametrize("recorded", ["standard", "as per rule 2", "yes", "Pt/Pt"])
+    def test_a_value_naming_no_side_is_refused(self, recorded):
+        """Guessing here is how a whole campaign inverts."""
+        resolved = resolve_polarity(recorded)
+        assert resolved.problem is not None
+        assert "does not say which electrode" in resolved.problem
+        # The message has to carry the fix, or it costs a sample twice.
+        assert POLARITY_V_PLUS_ON_COLD in resolved.problem
+        assert POLARITY_V_PLUS_ON_HOT in resolved.problem
+
+    @pytest.mark.parametrize("recorded", [None, "", "   ", [], [None, ""]])
+    def test_nothing_recorded_is_reported_as_assumed_not_as_known(self, recorded):
+        """The caller decides what to do about it, so it is not an error here.
+
+        A workbook makes the field mandatory; an instrument trace cannot carry
+        it at all. Those want different answers, so this only states which
+        case it is.
+        """
+        resolved = resolve_polarity(recorded)
+        assert resolved.source == "assumed"
+        assert resolved.sign == 1
+        assert resolved.convention == POLARITY_V_PLUS_ON_COLD
+        assert resolved.problem is None
+
+    def test_a_unanimous_per_point_list_resolves(self):
+        """The workbook parser records this field once per delta-T point."""
+        resolved = resolve_polarity(["v+ on cold"] * 4)
+        assert resolved.sign == 1
+        assert resolved.source == "recorded"
+
+    def test_a_list_that_disagrees_with_itself_is_refused(self):
+        """One series measured on two wirings has no single sign."""
+        resolved = resolve_polarity(["v+ on cold", "v+ on cold", "v+ on hot"])
+        assert resolved.problem is not None
+        assert "changes within one series" in resolved.problem
+
+
+class TestThePolarityReachesTheArithmetic:
+    """The contract the field existed without for three weeks.
+
+    `polarity_convention` was recorded, required, and drift-checked, and its
+    value was never read. These tests fail if it stops being read again.
+    """
+
+    @staticmethod
+    def _arrays():
+        """A fresh +2.0 mV/K series with a +0.3 mV offset, as recorded."""
+        return {
+            "delta_t_k": np.array([2.0, 5.0, 10.0]),
+            "delta_v_mv": np.array([4.3, 10.3, 20.3]),
+        }
+
+    def test_the_hot_wiring_flips_the_reported_coefficient(self):
+        cold = _run(self._arrays(), POLARITY_V_PLUS_ON_COLD)
+        hot = _run(self._arrays(), POLARITY_V_PLUS_ON_HOT)
+        assert cold.outputs["seebeck_mv_k"] == pytest.approx(2.0)
+        assert hot.outputs["seebeck_mv_k"] == pytest.approx(-2.0)
+        assert hot.outputs["offset_mv"] == pytest.approx(-cold.outputs["offset_mv"])
+
+    def test_only_the_sign_moves(self):
+        """Fit quality is a property of the data, not of the wiring."""
+        cold = _run(self._arrays(), POLARITY_V_PLUS_ON_COLD)
+        hot = _run(self._arrays(), POLARITY_V_PLUS_ON_HOT)
+        for key in ("seebeck_stderr_mv_k", "offset_stderr_mv", "offset_fraction", "r_squared"):
+            assert hot.outputs[key] == pytest.approx(cold.outputs[key]), key
+        assert hot.outputs["n_points"] == cold.outputs["n_points"]
+
+    def test_the_payload_states_the_wiring_it_used(self):
+        out = _run(self._arrays(), POLARITY_V_PLUS_ON_HOT)
+        assert out.outputs["polarity_convention"] == POLARITY_V_PLUS_ON_HOT
+        assert out.outputs["polarity_sign"] == -1
+        assert out.outputs["polarity_source"] == "recorded"
+
+    def test_the_fit_line_still_overlays_the_recorded_data(self):
+        """Derived arrays stay in the orientation the data arrived in.
+
+        Negating them as well would put the fit line on the opposite side of
+        the axis from the points it was fitted to.
+        """
+        out = _run(self._arrays(), POLARITY_V_PLUS_ON_HOT)
+        fitted = out.derived_arrays["fit_delta_v_mv"]
+        np.testing.assert_allclose(fitted, self._arrays()["delta_v_mv"], atol=1e-9)
+
+    def test_an_unstated_wiring_is_warned_about_rather_than_assumed_quietly(self):
+        """An instrument file cannot record the rig, so this path has to work.
+
+        What it must not do is stay silent: the assumption decides whether a
+        mixture is reported as p-type or n-type.
+        """
+        out = _run(self._arrays(), None)
+        assert out.outputs["polarity_source"] == "assumed"
+        assert out.outputs["seebeck_mv_k"] == pytest.approx(2.0)
+        (issue,) = [i for i in out.issues if i.field == "polarity_convention"]
+        assert issue.severity is Severity.WARNING
+        assert "COLD" in issue.message
+
+    def test_an_uninterpretable_wiring_refuses_to_report_a_coefficient(self):
+        out = _run(self._arrays(), "standard")
+        assert out.outputs == {}
+        assert any("does not say which electrode" in i.message for i in out.issues)

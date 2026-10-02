@@ -486,12 +486,38 @@ class TestTheSignConventionIsHeldConstant:
         "IL-003": (0.5, 2.35),
     }
 
-    def test_a_blank_polarity_is_reported(self, tmp_path):
+    def test_a_blank_polarity_costs_the_sample_rather_than_being_assumed(self, tmp_path):
+        """The field is the only record of where the V+ lead sat.
+
+        It used to be reported and then ignored: the sample was fitted anyway
+        on an assumed wiring, and |S| hid the consequence from every later
+        check. Nothing can establish the sign afterwards, so nothing tries.
+        """
         path = _campaign(tmp_path, self.SAMPLES, polarity="")
         outcome = run_cycle(path, freeze_prereg=False)
-        assert any(
-            "polarity_convention is empty" in note for fit in outcome.fits for note in fit.notes
+        assert outcome.fits == ()
+        assert outcome.result is None
+        (unused,) = [m for m in outcome.messages if "polarity_convention is blank" in m]
+        assert unused.count("polarity_convention is blank") == len(self.SAMPLES)
+        assert "V+ on the COLD electrode" in unused
+
+    def test_an_uninterpretable_polarity_is_refused_not_guessed(self, tmp_path):
+        """ "standard" is not a wiring. Guessing one is how a campaign inverts."""
+        path = _campaign(tmp_path, self.SAMPLES, polarity="standard")
+        outcome = run_cycle(path, freeze_prereg=False)
+        assert outcome.fits == ()
+        assert all(
+            "does not say which electrode" in m
+            for m in outcome.messages
+            if "polarity_convention" in m
         )
+
+    def test_a_wiring_naming_both_sides_is_resolved_from_the_v_plus_lead(self, tmp_path):
+        """A full description of the rig is more informative, not less."""
+        path = _campaign(tmp_path, self.SAMPLES, polarity="V- on hot, V+ on cold")
+        outcome = run_cycle(path, freeze_prereg=False)
+        assert len(outcome.fits) == len(self.SAMPLES)
+        assert {f.polarity for f in outcome.fits} == {"V+ on the COLD electrode"}
 
     def test_a_recorded_polarity_raises_nothing(self, tmp_path):
         outcome = run_cycle(_campaign(tmp_path, self.SAMPLES), freeze_prereg=False)
@@ -517,7 +543,51 @@ class TestTheSignConventionIsHeldConstant:
         ]
         assert len(drift) == 1
         assert "sets the sign of S" in drift[0]
-        assert "artefact" in drift[0]
+        # Each sample is now corrected for its own wiring, so the coefficients
+        # are comparable. The message has to say that rather than implying the
+        # campaign is unusable, or it trains people to ignore it.
+        assert "comparable" in drift[0]
+        assert {f.polarity for f in outcome.fits} == {
+            "V+ on the COLD electrode",
+            "V+ on the HOT electrode",
+        }
+
+    def test_an_inverted_rig_recorded_honestly_is_corrected(self, tmp_path):
+        """The bug this whole field exists to prevent.
+
+        Two campaigns, identical voltages, opposite wirings honestly recorded.
+        The reported coefficients must be exact negatives of each other --
+        which is only true if the field reaches the arithmetic. Before
+        2026-10-02 both campaigns reported the same sign and one of them was
+        wrong, with nothing anywhere to say which.
+        """
+        cold_dir, hot_dir = tmp_path / "cold", tmp_path / "hot"
+        cold_dir.mkdir()
+        hot_dir.mkdir()
+        cold = run_cycle(
+            _campaign(cold_dir, self.SAMPLES, polarity="V+ on the COLD electrode"),
+            freeze_prereg=False,
+        )
+        hot = run_cycle(
+            _campaign(hot_dir, self.SAMPLES, polarity="V+ on the HOT electrode"),
+            freeze_prereg=False,
+        )
+        by_id = {f.sample_id: f for f in hot.fits}
+        assert len(by_id) == len(cold.fits) == len(self.SAMPLES)
+        for fit in cold.fits:
+            other = by_id[fit.sample_id]
+            assert other.seebeck_mv_k == pytest.approx(-fit.seebeck_mv_k)
+            assert other.offset_mv == pytest.approx(-fit.offset_mv)
+            # Only the sign moves: the fit quality is a property of the data.
+            assert other.stderr_mv_k == pytest.approx(fit.stderr_mv_k)
+
+    def test_the_report_states_the_wiring_the_signs_are_on(self, tmp_path):
+        """Leaving the convention implicit is what let an inversion pass."""
+        outcome = run_cycle(
+            _campaign(tmp_path, self.SAMPLES, polarity="V+ on the HOT electrode"),
+            freeze_prereg=False,
+        )
+        assert "V+ on the HOT electrode" in outcome.report()
 
     def test_the_electrode_is_watched_the_same_way(self, tmp_path):
         path = _campaign(tmp_path, self.SAMPLES)
@@ -611,7 +681,13 @@ class TestEachSkippedSampleSaysWhy:
         return ParsedData(
             technique=Technique.THERMOELECTRIC,
             arrays={"delta_t_k": np.array(delta_t), "delta_v_mv": np.array(delta_v)},
-            metadata={"sample_id": "X", "mass_fraction_x": composition},
+            metadata={
+                "sample_id": "X",
+                "mass_fraction_x": composition,
+                # Present so each test below fails for its own reason only: an
+                # unresolvable wiring is itself a reason to skip a sample.
+                "polarity_convention": ["V+ on the COLD electrode"],
+            },
             instrument=None,
             measured_at=None,
             issues=(),

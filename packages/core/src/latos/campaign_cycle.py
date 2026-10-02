@@ -48,7 +48,12 @@ from pathlib import Path
 
 import numpy as np
 
-from latos.analysis.thermovoltage.slope import fit_seebeck_slope
+from latos.analysis.thermovoltage.slope import (
+    POLARITY_V_PLUS_ON_COLD,
+    POLARITY_V_PLUS_ON_HOT,
+    fit_seebeck_slope,
+    resolve_polarity,
+)
 from latos.core.enums import Severity
 from latos.ingestion.parsed_data import ParsedData
 from latos.ingestion.parsers.ite_workbook import IteWorkbookParser
@@ -104,22 +109,31 @@ _MIN_POOLED_DF = 3
 _MIN_REPLICATES_FOR_SPREAD = 2
 
 
-# Fields that fix the sign of every coefficient in the campaign. Latos reports
-# S as the plain slope of the recorded ΔV against ΔT, so the sign is set by how
-# the cell was wired rather than by anything in the file. Change either of these
-# halfway through and the coefficients before and after are measured on opposite
-# conventions — which nothing else would catch, because the objective is a
-# magnitude and the sign-disagreement check below is symmetric.
-_SIGN_FIXING_FIELDS: tuple[tuple[str, str], ...] = (
-    ("polarity_convention", "which voltmeter lead sat on the cold electrode"),
-    ("electrode_material", "the electrode chemistry"),
+# Fields that fix the sign of every coefficient in the campaign.
+#
+# `polarity_convention` is now read and applied per sample (see `_fit_one`), so
+# a campaign wired one way throughout is reported correctly whichever way that
+# was. It stays on this list because a change *mid-campaign* is still worth
+# saying out loud: the coefficients are then comparable but the rig was not
+# stable, and that is a fault in the experiment rather than in the arithmetic.
+#
+# `electrode_material` is different, and the asymmetry is deliberate. Nothing
+# in the record says what sign a given electrode chemistry imposes, so it
+# cannot be corrected for — only reported. Change it halfway through and the
+# coefficients before and after are on different conventions, which nothing
+# else would catch, because the objective is a magnitude and the
+# sign-disagreement check below is symmetric.
+# (field, what it is, whether Latos can correct for a change in it)
+_SIGN_FIXING_FIELDS: tuple[tuple[str, str, bool], ...] = (
+    ("polarity_convention", "which voltmeter lead sat on the cold electrode", True),
+    ("electrode_material", "the electrode chemistry", False),
 )
 
 
 def _sign_convention_drift(parsed: Sequence[ParsedData]) -> list[str]:
     """Report any sign-fixing field that was not held constant across the campaign."""
     messages: list[str] = []
-    for field, what in _SIGN_FIXING_FIELDS:
+    for field, what, corrected in _SIGN_FIXING_FIELDS:
         seen: set[str] = set()
         for entry in parsed:
             raw = entry.metadata.get(field)
@@ -127,12 +141,19 @@ def _sign_convention_drift(parsed: Sequence[ParsedData]) -> list[str]:
             seen.update(str(v).strip() for v in values if v is not None and str(v).strip())
         if len(seen) > 1:
             listed = ", ".join(repr(v) for v in sorted(seen))
+            consequence = (
+                "Each sample's sign has been corrected for its own wiring, so the "
+                "coefficients below are comparable -- but the rig changed mid-campaign, "
+                "which is worth knowing when you read them."
+                if corrected
+                else "Samples recorded under different settings are on different "
+                "conventions and cannot be compared until you decide which one is "
+                "right; any sign disagreement below may be an artefact of this "
+                "rather than a property of the mixtures."
+            )
             messages.append(
                 f"{field} was NOT constant across this campaign ({listed}). That is "
-                f"{what}, and it sets the sign of S. Samples recorded under different "
-                f"settings are on different conventions and cannot be compared until you "
-                f"decide which one is right; any sign disagreement below may be an "
-                f"artefact of this rather than a property of the mixtures."
+                f"{what}, and it sets the sign of S. {consequence}"
             )
     return messages
 
@@ -143,11 +164,14 @@ class SampleFit:
 
     sample_id: str
     composition: float  # mass fraction of ionic liquid A
-    seebeck_mv_k: float  # the fitted slope, signed
+    seebeck_mv_k: float  # S, signed, already corrected for the recorded wiring
     stderr_mv_k: float | None  # its standard error, None when undetermined
     offset_mv: float  # the electrode-polarisation intercept
     n_points: int
     notes: tuple[str, ...]  # anything the fit or the workbook flagged
+    # The wiring this sample's sign is on. Carried so the report can state it
+    # rather than leaving the reader to assume the campaign-wide default.
+    polarity: str = POLARITY_V_PLUS_ON_COLD
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +225,14 @@ class CycleOutcome:
                 f"offset {fit.offset_mv:+.3f} mV   ({fit.n_points} points)"
             )
             lines.extend(f"      - {note}" for note in fit.notes)
+
+        # State the convention the signs above are on. Leaving it implicit is
+        # what let an inverted rig pass unnoticed for as long as it did.
+        wirings = sorted({fit.polarity for fit in self.fits})
+        if len(wirings) == 1:
+            lines.append(f"  (S reported for: {wirings[0]})")
+        elif wirings:
+            lines.append(f"  (S corrected per sample; wirings used: {', '.join(wirings)})")
 
         # Only worth a second table when aggregation actually did something.
         if any(p.n_replicates > 1 for p in self.points):
@@ -367,6 +399,21 @@ def _fit_one(entry: ParsedData) -> SampleFit | str:
             # does not check that observations lie inside the bounds it is given.
             problems.append(f"composition {composition} is outside [0, 1]")
 
+    # The sign of S is set by the wiring, not by the file. A workbook makes the
+    # field mandatory, so an unreadable or missing one is a fault in the record
+    # and the sample is skipped: fitting it would report a coefficient whose
+    # sign nobody can defend, and |S| hides the error from every later check.
+    polarity = resolve_polarity(metadata.get("polarity_convention"))
+    if polarity.problem is not None:
+        problems.append(polarity.problem)
+    elif polarity.source == "assumed":
+        problems.append(
+            "polarity_convention is blank, and it is the only record of where the V+ "
+            f"lead sat, so the sign of S cannot be established. Enter "
+            f"{POLARITY_V_PLUS_ON_COLD!r} or {POLARITY_V_PLUS_ON_HOT!r} on every "
+            "measurement row"
+        )
+
     delta_t = np.asarray(arrays.get("delta_t_k", ()), dtype=float)
     delta_v = np.asarray(arrays.get("delta_v_mv", ()), dtype=float)
     if delta_t.size < _MIN_POINTS_PER_SAMPLE:
@@ -381,7 +428,9 @@ def _fit_one(entry: ParsedData) -> SampleFit | str:
     if problems or composition is None:
         return f"{sample_id}: {'; '.join(problems)}"
 
-    fit = fit_seebeck_slope(delta_t, delta_v)
+    # Negate the series rather than the fitted slope, so the intercept and the
+    # residuals come out on the same convention as the coefficient.
+    fit = fit_seebeck_slope(delta_t, delta_v * polarity.sign)
     if not math.isfinite(fit.slope):
         return f"{sample_id}: the fitted slope is not a finite number"
 
@@ -394,6 +443,7 @@ def _fit_one(entry: ParsedData) -> SampleFit | str:
         offset_mv=fit.intercept,
         n_points=fit.n,
         notes=notes,
+        polarity=polarity.convention or POLARITY_V_PLUS_ON_COLD,
     )
 
 

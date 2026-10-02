@@ -12,15 +12,29 @@ usual response — divide the voltage by the temperature difference and call it 
 — silently folds the electrode offset into the reported coefficient, and its
 size is invisible.
 
-**The sign convention this assumes, stated because nothing else states it.**
-`seebeck_mv_k` is the plain least-squares slope of the supplied ΔV against ΔT;
-no minus sign is applied anywhere. The physical definition is S = −ΔV/ΔT with
-ΔV = V_hot − V_cold, so the ΔV handed to this analyzer must be **V_cold −
-V_hot** — the voltmeter's V+ lead on the cold electrode. Wired the other way
-the reported coefficient is −S, and nothing downstream will catch it: the
-optimizer works on |S|, and the sign-disagreement check is symmetric. A whole
-campaign can invert consistently and look perfectly self-consistent, with every
-p-type mixture recorded as n-type.
+**The sign convention, and how the wiring reaches the arithmetic.**
+The physical definition is S = −ΔV/ΔT with ΔV = V_hot − V_cold, so the minus
+sign must appear exactly once between the cell and the reported number. Where
+it appears depends on which voltmeter lead sat on the cold electrode, and that
+is a fact about the rig which no measurement file records by itself.
+
+`fit_seebeck_slope` stays pure arithmetic: it returns the plain least-squares
+slope of whatever ΔV it is handed, with no minus sign applied anywhere. The
+convention is resolved one level up by `resolve_polarity`, from the recorded
+`polarity_convention`:
+
+* **V+ on the cold electrode** — the recorded ΔV is already V_cold − V_hot,
+  which equals −(V_hot − V_cold), so the slope *is* S. Sign +1.
+* **V+ on the hot electrode** — the recorded ΔV is V_hot − V_cold, so the
+  slope is −S and the series is negated before fitting. Sign −1.
+
+Until 2026-10-02 only the first case existed, and the field was recorded and
+checked for drift without ever being read. An honestly-recorded inverted rig
+therefore inverted the whole campaign in silence: the optimizer works on |S|,
+and the sign-disagreement check is symmetric, so every p-type mixture could be
+reported as n-type with nothing anywhere to contradict it. The convention now
+reaches the arithmetic, and a value that cannot be interpreted is refused
+rather than assumed.
 
 Measuring at three or more ΔT values fixes this. `S` is the slope, the offset is
 the intercept, and the residuals say whether the relationship was linear at all.
@@ -66,14 +80,20 @@ Output payload:
 * `offset_fraction` — |offset| as a share of |S·ΔT| at the largest ΔT
 * `r_squared`, `residual_max_mv`, `n_points`, `delta_t_span_k`
 * `offset_significant` — True when the intercept exceeds twice its own error
+* `polarity_convention`, `polarity_sign`, `polarity_source` — the wiring the
+  reported sign is on, whether it was negated, and whether that came from the
+  record or from the documented assumption
 
-Derived arrays: `fit_delta_t_k`, `fit_delta_v_mv`, `residual_mv`.
+Derived arrays: `fit_delta_t_k`, `fit_delta_v_mv`, `residual_mv`. These stay in
+the orientation the data was *recorded* in, so a fit line still overlays the raw
+series on a plot, even when the payload is reported on the opposite sign.
 """
 
 from __future__ import annotations
 
 import math
 import warnings
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import numpy as np
@@ -86,7 +106,28 @@ from latos.analysis.base_analyzer import (
 from latos.core.enums import Severity, Technique
 from latos.core.models import Measurement, ValidationIssue, utc_now
 
-__all__ = ["ThermovoltageSlopeAnalyzer", "fit_seebeck_slope"]
+__all__ = [
+    "POLARITY_V_PLUS_ON_COLD",
+    "POLARITY_V_PLUS_ON_HOT",
+    "PolarityResolution",
+    "ThermovoltageSlopeAnalyzer",
+    "fit_seebeck_slope",
+    "resolve_polarity",
+]
+
+# The two wirings, spelled the way the workbook asks for them. These strings are
+# what the template's dropdown offers and what the payload reports back, so a
+# record and a result can be compared literally.
+POLARITY_V_PLUS_ON_COLD = "V+ on the COLD electrode"
+POLARITY_V_PLUS_ON_HOT = "V+ on the HOT electrode"
+
+# Recognising the wiring from free text. Matching is deliberately generous about
+# everything except the one word that carries the meaning: a bench entry of
+# "V+ on cold", "v+ COLD" or just "cold" all say the same thing, and refusing
+# them would cost a sample over punctuation. What is never guessed is a value
+# naming both sides with no "V+" to anchor which is which.
+_SIDE_WORDS = ("cold", "hot")
+_V_PLUS_MARKERS = ("v+", "v +", "vplus", "v-plus")
 
 # Two points define a line exactly, leaving no residual and no way to judge the
 # fit. We still report the slope — it is the best available estimate and
@@ -132,6 +173,124 @@ _MIN_RELATIVE_SPAN = 0.05
 # An intercept counts as real when it clears two standard errors, the usual
 # two-sigma convention.
 _OFFSET_SIGNIFICANCE_SIGMA = 2.0
+
+
+@dataclass(frozen=True, slots=True)
+class PolarityResolution:
+    """Which wiring the recorded ΔV is on, and how confidently that is known.
+
+    Attributes:
+        sign: Multiply the recorded ΔV by this before fitting. +1 when V+ sat
+            on the cold electrode, -1 when it sat on the hot one. Meaningless
+            when `problem` is set; callers must check that first.
+        convention: The canonical spelling of the resolved wiring, or None when
+            it could not be resolved.
+        source: "recorded" when the value came from the data, "assumed" when
+            nothing was recorded and the documented default was used.
+        problem: Why the recorded value could not be interpreted, phrased so a
+            reviewer can fix the cell it came from. None when resolved.
+    """
+
+    sign: int
+    convention: str | None
+    source: str
+    problem: str | None = None
+
+
+def _first_side_word(text: str) -> str | None:
+    """The earlier of "cold" and "hot" in `text`, or None when neither appears."""
+    found = [(text.find(word), word) for word in _SIDE_WORDS if word in text]
+    return min(found)[1] if found else None
+
+
+def resolve_polarity(recorded: Any) -> PolarityResolution:
+    """Turn a recorded `polarity_convention` into a sign for the fit.
+
+    The field is free text written at the bench, and it is the only thing that
+    says where the minus sign in S = −ΔV/ΔT belongs. Three outcomes, and the
+    difference between the last two is the whole point of this function:
+
+    * Resolved — the value names a side, and the sign follows.
+    * Assumed — nothing was recorded. The caller decides whether that is
+      acceptable: a workbook makes the field mandatory, a raw instrument trace
+      cannot carry it at all.
+    * Refused — something was recorded and it does not say which lead sat
+      where. Guessing here is how a campaign inverts, so it is reported.
+
+    Accepts either a single value or the per-point list the workbook parser
+    produces, in which case every entry must agree: polarity changing within
+    one series means the series is on two conventions at once.
+
+    Args:
+        recorded: The raw cell value, a list of them, or None.
+
+    Returns:
+        A `PolarityResolution`.
+    """
+    if isinstance(recorded, (list, tuple)):
+        distinct = {str(v).strip() for v in recorded if v is not None and str(v).strip()}
+        if len(distinct) > 1:
+            listed = ", ".join(repr(v) for v in sorted(distinct))
+            return PolarityResolution(
+                sign=1,
+                convention=None,
+                source="recorded",
+                problem=(
+                    f"polarity_convention changes within one series ({listed}), so the "
+                    "points were not all measured on the same wiring and no single sign "
+                    "applies to them"
+                ),
+            )
+        recorded = next(iter(distinct), None)
+
+    text = "" if recorded is None else str(recorded).strip().lower()
+    if not text:
+        return PolarityResolution(
+            sign=1,
+            convention=POLARITY_V_PLUS_ON_COLD,
+            source="assumed",
+            problem=None,
+        )
+
+    # Anchor on the V+ lead when the entry mentions it, so "V- on hot, V+ on
+    # cold" resolves to cold rather than being refused as ambiguous.
+    side: str | None = None
+    marker_positions = [text.find(m) for m in _V_PLUS_MARKERS if m in text]
+    if marker_positions:
+        start = min(marker_positions)
+        side = _first_side_word(text[start:])
+
+    if side is None:
+        named = [word for word in _SIDE_WORDS if word in text]
+        if len(named) == 1:
+            side = named[0]
+        elif len(named) > 1:
+            return PolarityResolution(
+                sign=1,
+                convention=None,
+                source="recorded",
+                problem=(
+                    f"polarity_convention {str(recorded)!r} names both the hot and the "
+                    "cold side without a 'V+' to say which lead was which. Record it as "
+                    f"{POLARITY_V_PLUS_ON_COLD!r} or {POLARITY_V_PLUS_ON_HOT!r}"
+                ),
+            )
+        else:
+            return PolarityResolution(
+                sign=1,
+                convention=None,
+                source="recorded",
+                problem=(
+                    f"polarity_convention {str(recorded)!r} does not say which electrode "
+                    "the V+ lead sat on, and the sign of S cannot be recovered without "
+                    f"it. Record it as {POLARITY_V_PLUS_ON_COLD!r} or "
+                    f"{POLARITY_V_PLUS_ON_HOT!r}"
+                ),
+            )
+
+    if side == "cold":
+        return PolarityResolution(sign=1, convention=POLARITY_V_PLUS_ON_COLD, source="recorded")
+    return PolarityResolution(sign=-1, convention=POLARITY_V_PLUS_ON_HOT, source="recorded")
 
 
 class SlopeFit:
@@ -239,9 +398,14 @@ class ThermovoltageSlopeAnalyzer(BaseAnalyzer):
     """Seebeck coefficient and electrode offset from a ΔV-versus-ΔT series."""
 
     name: ClassVar[str] = "thermovoltage-slope"
-    version: ClassVar[str] = "1.0.0"
+    # 1.1.0 (2026-10-02): `polarity_convention` now sets the reported sign
+    # instead of being ignored, and three polarity fields joined the payload.
+    version: ClassVar[str] = "1.1.0"
     accepts_techniques: ClassVar[tuple[Technique, ...]] = (Technique.THERMOELECTRIC,)
-    default_params: ClassVar[dict[str, Any]] = {}
+    # The wiring cannot be read off an instrument file, so it arrives as a
+    # parameter. `AnalyzerInputs` carries no parser metadata, which is why the
+    # workbook path resolves this itself in `campaign_cycle` rather than here.
+    default_params: ClassVar[dict[str, Any]] = {"polarity_convention": None}
 
     def accepts(self, measurement: Measurement) -> bool:
         """Accept any thermoelectric measurement with a source file.
@@ -254,6 +418,10 @@ class ThermovoltageSlopeAnalyzer(BaseAnalyzer):
 
     def analyze(self, inputs: AnalyzerInputs) -> AnalyzerOutput:
         """Reduce to (ΔT, ΔV) pairs, fit, and report what the fit exposes."""
+        polarity = resolve_polarity(inputs.params.get("polarity_convention"))
+        if polarity.problem is not None:
+            return _error(polarity.problem)
+
         pairs = _extract_pairs(inputs.arrays)
         if isinstance(pairs, str):
             return _error(pairs)
@@ -278,16 +446,36 @@ class ThermovoltageSlopeAnalyzer(BaseAnalyzer):
                 "The slope is not determined; measure at genuinely different ΔT.",
             )
 
-        fit = fit_seebeck_slope(delta_t, delta_v)
+        # Negating the series rather than the fitted parameters keeps every
+        # derived quantity — intercept, residuals, warning messages — on one
+        # consistent sign without each needing to remember to flip.
+        oriented = delta_v * polarity.sign
+
+        fit = fit_seebeck_slope(delta_t, oriented)
         if not math.isfinite(fit.slope):
             return _error("Slope is undefined — every ΔT value is identical.")
 
-        issues = list(_judge(fit, delta_t, delta_v, dropped))
+        issues = list(_judge(fit, delta_t, oriented, dropped))
+        if polarity.source == "assumed":
+            issues.append(
+                _warn(
+                    "polarity_convention",
+                    "No polarity_convention was supplied, so the sign assumes the V+ "
+                    f"lead sat on the COLD electrode ({POLARITY_V_PLUS_ON_COLD}). If it "
+                    "sat on the hot one, every coefficient reported here is -S. An "
+                    "instrument file cannot record this; pass it as a parameter.",
+                )
+            )
         outputs = _payload(fit, delta_t, span)
+        outputs["polarity_convention"] = polarity.convention
+        outputs["polarity_sign"] = polarity.sign
+        outputs["polarity_source"] = polarity.source
         derived = {
             "fit_delta_t_k": delta_t,
-            "fit_delta_v_mv": fit.slope * delta_t + fit.intercept,
-            "residual_mv": fit.residuals,
+            # Returned in the orientation the data was recorded in, so the fit
+            # line overlays the raw series even when the payload is negated.
+            "fit_delta_v_mv": polarity.sign * (fit.slope * delta_t + fit.intercept),
+            "residual_mv": polarity.sign * fit.residuals,
         }
         return AnalyzerOutput(outputs=outputs, derived_arrays=derived, issues=tuple(issues))
 
