@@ -194,6 +194,7 @@ def default_registry() -> ParserRegistry:
         CasaXpsCsvParser,
         EdsEmsaParser,
         HallXlsParser,
+        HiokiLoggerCsvParser,
         IteWorkbookParser,
         LfaXlsxParser,
         MicroscopyBmpParser,
@@ -253,6 +254,11 @@ def default_registry() -> ParserRegistry:
             # Renishaw exports .txt behind a '#Wave / #Intensity' header, which
             # no other format here writes, so it never collides.
             RenishawRamanTxtParser(),
+            # HIOKI HiLogger traces are .csv or .txt opening with a quoted
+            # '"File name"' row above a '"Ch","Mode"' table. Registered ahead of
+            # the generic .csv sniffers: a sample row starts with two floats, so
+            # CasaXPS would otherwise claim it as a spectrum.
+            HiokiLoggerCsvParser(),
             # Tektronix oscilloscope waveforms (.csv) — matched on the scope
             # header, registered before CasaXPS so a shock file never falls
             # through to it.

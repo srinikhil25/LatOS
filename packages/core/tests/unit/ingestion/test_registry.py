@@ -233,6 +233,7 @@ class TestDefaultRegistry:
             "microscopy-bmp",
             "shock-tektronix-csv",
             "shock-summary-csv",
+            "hioki-logger-csv",
         }
         actual_names = {p.name for p in r.parsers}
         assert expected_names == actual_names

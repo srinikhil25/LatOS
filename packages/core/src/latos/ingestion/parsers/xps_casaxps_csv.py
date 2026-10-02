@@ -89,6 +89,12 @@ class CasaXpsCsvParser(BaseParser):
         if _looks_like_scope_csv(lines):
             return 0.0
 
+        # Same story for a HIOKI HiLogger trace: its sample rows open with
+        # elapsed time and a voltage, which satisfies the numeric-pair test
+        # below. Reject it so dispatch routes it to the logger parser.
+        if _looks_like_hilogger_csv(lines):
+            return 0.0
+
         consecutive = 0
         max_consecutive = 0
         for line in lines:
@@ -221,6 +227,19 @@ def _looks_like_scope_csv(lines: list[str]) -> bool:
         return False
     joined = "".join(lines)
     return "Horizontal Units" in joined and "Vertical Units" in joined
+
+
+def _looks_like_hilogger_csv(lines: list[str]) -> bool:
+    """True if these header lines are a HIOKI HiLogger trace export (not XPS).
+
+    Deliberately duplicated rather than imported from `hioki_logger_csv`:
+    parsers in this package stay independent of one another, the same way
+    `_looks_like_scope_csv` duplicates the Tektronix check above.
+    """
+    first = next((ln for ln in lines if ln.strip()), "")
+    if first.startswith('"File name"'):
+        return True
+    return any(ln.lstrip('"').startswith("Time") and "CH-" in ln and "[" in ln for ln in lines)
 
 
 def _looks_like_xps_data_row(line: str) -> bool:
