@@ -169,3 +169,8 @@ literature/
 # by the build script against a licensed Origin install; the underlying
 # measurements live in data/MXene-data/.
 origin/
+
+
+
+#custom files
+ARCHITECTURE*.md

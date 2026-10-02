@@ -182,6 +182,103 @@ def _scale_bar(image: np.ndarray, nm_per_px: float) -> dict[str, Any]:
     }
 
 
+def _open_calibrated(
+    measurement: Any,
+    params: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, Calibration, str | None] | AnalyzerOutput:
+    """Open the frame and recover its pixel size, or say why neither happened.
+
+    Split out from `analyze` because every step here is a way the frame can be
+    unusable before any measurement is attempted, and each needs its own
+    message. Returns `(image, image_area, calibration, templates_source)` on
+    success, and a finished refusal on failure.
+    """
+    path = _first_image(measurement)
+    if path is None:
+        return _refused("No image file on this measurement.", Severity.ERROR)
+
+    templates, source = _find_templates(path, params.get("templates_path"))
+    if templates is None:
+        return _refused(
+            "No strip templates found for this instrument, so no pixel size can "
+            "be read from the info bar. Point `templates_path` at a set built "
+            f"for it, or place one matching {_TEMPLATE_GLOB} beside the data.",
+            Severity.ERROR,
+        )
+
+    image = _load_grayscale(path)
+    if image is None:
+        return _refused(f"Could not read {path.name} as a 2-D image.", Severity.ERROR)
+
+    calibration = decode_field_of_view(image, templates)
+    if not calibration.ok:
+        return _refused(_why_uncalibrated(image, calibration))
+
+    parts = split_info_bar(image)
+    return image, (image if parts is None else parts[0]), calibration, source
+
+
+def _resolvable_window(
+    *,
+    nm_per_px: float,
+    area_px: int,
+    tile_size: int,
+    d_window: tuple[float, float],
+    min_repeats: float,
+    min_px_per_period: float,
+) -> tuple[tuple[float, float] | None, ValidationIssue | None]:
+    """The spacings this frame can actually measure, and what it had to give up.
+
+    Two limits bracket the window, and they bite at opposite magnifications.
+
+    Coarse end — a spacing has to be sampled. The smallest spacing *sought*
+    sets this, not the one found: gating on the result would be circular, since
+    the answer would decide whether the question was allowed. Below the floor
+    the FFT still returns something, but what it returns tracks the pixel size
+    rather than the sample — a 2.3 um field in this dataset reported a 2.28 nm
+    "spacing" from a period of two pixels, which is aliasing, not a lattice.
+
+    Fine end — a spacing has to repeat. A window spanning S nm holds at most
+    S/`min_repeats` of the largest measurable spacing, so at high magnification
+    the top of the requested range is unreachable however strong that
+    reflection is. That is physical, not a parameter choice: at a 14.4 nm field
+    even the whole 2048-px frame gives 5.1 repeats of 2.80 nm. The window is
+    narrowed to what the frame supports and the caller is told, rather than the
+    range being reported as covered.
+    """
+    lo, hi = float(d_window[0]), float(d_window[1])
+    px_per_period = lo / nm_per_px
+    if px_per_period < min_px_per_period:
+        return None, _issue(
+            "lattice_d_nm",
+            Severity.WARNING,
+            f"Pixel size {nm_per_px:.4f} nm/px samples the smallest requested "
+            f"spacing ({lo:.2f} nm) over {px_per_period:.1f} px, below the "
+            f"{min_px_per_period:g} px floor. At this magnification the FFT "
+            f"reports its own resolution limit rather than the sample.",
+        )
+
+    span_nm = min(int(tile_size), int(area_px)) * nm_per_px
+    supportable = span_nm / min_repeats
+    if hi <= supportable:
+        return (lo, hi), None
+    if supportable <= lo:
+        return None, _issue(
+            "lattice_d_nm",
+            Severity.WARNING,
+            f"A {span_nm:.1f} nm view cannot hold {min_repeats:g} repeats of even "
+            f"the smallest requested spacing ({lo:.2f} nm), so nothing in the "
+            f"window is measurable on this frame.",
+        )
+    return (lo, supportable), _issue(
+        "d_window_nm",
+        Severity.INFO,
+        f"Window narrowed to {lo:.2f}-{supportable:.2f} nm: a {span_nm:.1f} nm view "
+        f"holds only {min_repeats:g} repeats of {supportable:.2f} nm, so spacings "
+        f"above that are not measurable on this frame however strong they are.",
+    )
+
+
 def _summarise(peaks: tuple[LatticePeak, ...]) -> dict[str, Any]:
     """Frame-level numbers from the windows that yielded a detection.
 
@@ -208,7 +305,7 @@ class MicroscopyLatticeAnalyzer(BaseAnalyzer):
     """Fringe spacing from a calibrated high-resolution TEM frame."""
 
     name: ClassVar[str] = "microscopy-lattice"
-    version: ClassVar[str] = "0.1.0"
+    version: ClassVar[str] = "0.2.0"
     accepts_techniques: ClassVar[tuple[Technique, ...]] = (
         Technique.TEM,
         Technique.STEM,
@@ -229,6 +326,11 @@ class MicroscopyLatticeAnalyzer(BaseAnalyzer):
         # Fewer repeats than this inside a window and the FFT cannot place the
         # peak well enough for the spacing to mean anything.
         "min_repeats": DEFAULT_MIN_REPEATS,
+        # Pixels the smallest sought spacing must span, or the frame is refused.
+        # On the MXene dataset the magnifications are discrete enough that
+        # anything from 15 to 50 selects the same frames; 25 sits mid-range, so
+        # the selection does not hinge on the exact value.
+        "min_px_per_period": 25.0,
     }
 
     def accepts(self, measurement: Any) -> bool:
@@ -242,51 +344,55 @@ class MicroscopyLatticeAnalyzer(BaseAnalyzer):
 
     def analyze(self, inputs: AnalyzerInputs) -> AnalyzerOutput:
         """Calibrate the frame, then measure its fringe spacing."""
-        path = _first_image(inputs.measurement)
-        if path is None:
-            return _refused("No image file on this measurement.", Severity.ERROR)
-
         params = inputs.params
-        templates, source = _find_templates(path, params.get("templates_path"))
-        if templates is None:
-            return _refused(
-                "No strip templates found for this instrument, so no pixel size "
-                "can be read from the info bar. Point `templates_path` at a set "
-                f"built for it, or place one matching {_TEMPLATE_GLOB} beside the data.",
-                Severity.ERROR,
-            )
+        opened = _open_calibrated(inputs.measurement, params)
+        if isinstance(opened, AnalyzerOutput):
+            return opened
 
-        image = _load_grayscale(path)
-        if image is None:
-            return _refused(f"Could not read {path.name} as a 2-D image.", Severity.ERROR)
+        image, area, calibration, source = opened
+        nm_per_px = float(calibration.nm_per_px)
+        tile_size = int(params.get("tile_size", 1024))
+        requested = tuple(params.get("d_window_nm", DEFAULT_D_WINDOW_NM))
+        min_repeats = float(params.get("min_repeats", DEFAULT_MIN_REPEATS))
 
-        calibration = decode_field_of_view(image, templates)
-        if not calibration.ok:
-            return _refused(_why_uncalibrated(image, calibration))
+        window, window_issue = _resolvable_window(
+            nm_per_px=nm_per_px,
+            area_px=min(area.shape),
+            tile_size=tile_size,
+            d_window=requested,
+            min_repeats=min_repeats,
+            min_px_per_period=float(params.get("min_px_per_period", 25.0)),
+        )
+        if window is None:
+            return AnalyzerOutput(outputs={}, issues=(window_issue,))
 
-        parts = split_info_bar(image)
-        area = image if parts is None else parts[0]
         peaks = scan_frame(
             area,
-            float(calibration.nm_per_px),
-            tile_size=int(params.get("tile_size", 1024)),
-            d_window_nm=tuple(params.get("d_window_nm", DEFAULT_D_WINDOW_NM)),
+            nm_per_px,
+            tile_size=tile_size,
+            d_window_nm=window,
             search_window_nm=tuple(params.get("search_window_nm", DEFAULT_SEARCH_WINDOW_NM)),
-            min_repeats=float(params.get("min_repeats", DEFAULT_MIN_REPEATS)),
+            min_repeats=min_repeats,
         )
 
         context: dict[str, Any] = {
-            "nm_per_px": round(float(calibration.nm_per_px), 6),
+            "nm_per_px": round(nm_per_px, 6),
             "field_of_view_nm": round(float(calibration.field_of_view_nm or 0.0), 3),
             "field_of_view_label": calibration.label,
             "image_area_px": int(calibration.image_width),
             "templates_source": source,
-            **_scale_bar(image, float(calibration.nm_per_px)),
+            # What was actually searched, which is not always what was asked
+            # for. A caller pooling frames needs to know the range differed.
+            "d_window_nm_used": [round(window[0], 3), round(window[1], 3)],
+            "px_per_smallest_period": round(window[0] / nm_per_px, 1),
+            **_scale_bar(image, nm_per_px),
         }
+        issues = () if window_issue is None else (window_issue,)
         if not peaks:
             return AnalyzerOutput(
                 outputs={"n_windows_detected": 0, **context},
                 issues=(
+                    *issues,
                     _issue(
                         "lattice_d_nm",
                         Severity.INFO,
@@ -295,7 +401,7 @@ class MicroscopyLatticeAnalyzer(BaseAnalyzer):
                     ),
                 ),
             )
-        return AnalyzerOutput(outputs={**_summarise(peaks), **context})
+        return AnalyzerOutput(outputs={**_summarise(peaks), **context}, issues=issues)
 
 
 def _why_uncalibrated(image: np.ndarray, calibration: Calibration) -> str:

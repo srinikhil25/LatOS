@@ -81,16 +81,24 @@ def _measurement(path: Path, *, technique: Technique = Technique.TEM) -> Measure
 @pytest.fixture
 def templates_npz(tmp_path: Path) -> Path:
     path = tmp_path / "jeol_synthetic_templates.npz"
-    templates_for([FIELD_TEXT, "2 m"], widths=(WIDTH,)).save(path)
+    templates_for(
+        [FIELD_TEXT, "2 m", "2.3 um", "14.4 nm"],
+        widths=(WIDTH,),
+    ).save(path)
     return path
 
 
-def _run(frame: np.ndarray, tmp_path: Path, templates: Path | None) -> tuple:
+def _run(
+    frame: np.ndarray,
+    tmp_path: Path,
+    templates: Path | None,
+    **overrides: object,
+) -> tuple:
     image_path = tmp_path / "frame.tif"
     tifffile.imwrite(image_path, frame)
     analyzer = MicroscopyLatticeAnalyzer()
     params = analyzer.merge_params(
-        {"templates_path": str(templates)} if templates else {"templates_path": None},
+        {"templates_path": str(templates) if templates else None, **overrides},
     )
     output = analyzer.analyze(
         AnalyzerInputs(measurement=_measurement(image_path), arrays={}, params=params),
@@ -194,6 +202,98 @@ class TestRefusal:
         assert output.outputs["n_windows_detected"] == 0
         assert output.outputs["nm_per_px"] == pytest.approx(NM_PER_PX, abs=5e-7)
         assert output.issues[0].severity is Severity.INFO
+
+
+class TestResolvability:
+    """The two limits that bracket what a frame can measure.
+
+    Both were found by running the registered analyzer over the real dataset,
+    not reasoned about in advance. At a 2.3 um field it reported a 2.28 nm
+    "spacing" from a period of two pixels, and across the whole set the median
+    spacing rose monotonically with the field of view — the signature of a
+    detector reporting its own resolution rather than the sample.
+    """
+
+    def test_coarse_pixels_are_refused_rather_than_measured(
+        self,
+        tmp_path: Path,
+        templates_npz: Path,
+    ) -> None:
+        """2.3 um over 1024 px samples 0.70 nm over a third of a pixel."""
+        output, _ = _run(_fringed_frame(field_text="2.3 um"), tmp_path, templates_npz)
+        assert "lattice_d_nm" not in output.outputs
+        assert output.issues[0].severity is Severity.WARNING
+        assert "below the 25 px floor" in output.issues[0].message
+
+    def test_the_floor_is_the_parameter_not_a_constant(
+        self,
+        tmp_path: Path,
+        templates_npz: Path,
+    ) -> None:
+        """The same frame passes at 25 and fails at 100, so the knob is wired."""
+        passes, _ = _run(_fringed_frame(), tmp_path, templates_npz)
+        assert passes.outputs["n_windows_detected"] >= 1
+        fails, _ = _run(
+            _fringed_frame(),
+            tmp_path,
+            templates_npz,
+            min_px_per_period=100.0,
+        )
+        assert "lattice_d_nm" not in fails.outputs
+
+    def test_gate_is_measured_against_the_smallest_sought_spacing(
+        self,
+        tmp_path: Path,
+        templates_npz: Path,
+    ) -> None:
+        """Not against the spacing found, which would be circular."""
+        output, _ = _run(_fringed_frame(), tmp_path, templates_npz)
+        expected = output.outputs["d_window_nm_used"][0] / NM_PER_PX
+        assert output.outputs["px_per_smallest_period"] == pytest.approx(expected, abs=0.1)
+
+    def test_high_magnification_narrows_the_window_and_says_so(
+        self,
+        tmp_path: Path,
+        templates_npz: Path,
+    ) -> None:
+        """A 14.4 nm view holds only 6 repeats of 2.4 nm, not of the 2.8 asked for."""
+        frame = make_frame("14.4 nm", width=WIDTH)
+        fine_nm_per_px = 14.4 / WIDTH
+        coords = np.arange(WIDTH, dtype=np.float64)
+        wave = np.sin(2.0 * np.pi * fine_nm_per_px * coords / 1.0)
+        frame[:WIDTH, :] = (128 + 100 * np.tile(wave, (WIDTH, 1))).astype(np.uint8)
+        output, _ = _run(frame, tmp_path, templates_npz)
+
+        used = output.outputs["d_window_nm_used"]
+        assert used[1] == pytest.approx(14.4 / 6.0, abs=0.01)
+        assert used[1] < 2.80
+        narrowing = [i for i in output.issues if i.field == "d_window_nm"]
+        assert narrowing and "narrowed to" in narrowing[0].message
+
+    def test_window_that_cannot_hold_its_smallest_spacing_is_refused(
+        self,
+        tmp_path: Path,
+        templates_npz: Path,
+    ) -> None:
+        """A tile too small for even the bottom of the range measures nothing."""
+        output, _ = _run(
+            _fringed_frame(),
+            tmp_path,
+            templates_npz,
+            tile_size=128,
+            d_window_nm=[0.70, 2.80],
+        )
+        assert "lattice_d_nm" not in output.outputs
+        assert "cannot hold" in output.issues[0].message
+
+    def test_a_frame_within_both_limits_reports_the_full_window(
+        self,
+        tmp_path: Path,
+        templates_npz: Path,
+    ) -> None:
+        output, _ = _run(_fringed_frame(), tmp_path, templates_npz)
+        assert output.outputs["d_window_nm_used"] == [0.7, 2.8]
+        assert output.issues == ()
 
 
 class TestDispatch:
