@@ -126,6 +126,34 @@ _MEASUREMENT_METADATA = (
 
 _MIN_POINTS = 2
 
+# Bounds on the implied |ΔV/ΔT| at which the numbers stop looking like
+# millivolts per kelvin. BOTH ARE JUDGEMENT CALLS, not measured limits, and
+# they exist to catch one specific mistake: a figure entered in the wrong
+# voltage unit. `delta_V_mV` is read as typed — there is no unit column and no
+# conversion — so a meter read in volts or microvolts is a silent factor of
+# 1000 in either direction.
+#
+# Reported ionic thermoelectric coefficients sit around 0.1 to 10 mV/K, which
+# is what makes the technique interesting: it is some three orders of magnitude
+# above electronic thermopower. So:
+#
+# * Under 0.05 mV/K (50 uV/K) is below the bottom of that range and in the
+#   territory of ordinary electronic thermopower instead. Multiplied by 1000 it
+#   lands back in range — which is what a meter read in VOLTS looks like typed
+#   into a millivolt column.
+# * Over 100 mV/K is above anything reported for this class of material, and
+#   divided by 1000 lands back in range — a meter read in MICROVOLTS.
+#
+# Neither is proof, so both are warnings. The floor does leave a gap: a real
+# cell under 0.05 mV/K would be flagged. For an ionic cell that is itself worth
+# a second look, and a warning costs nothing but a glance.
+_MIN_PLAUSIBLE_MV_PER_K = 5e-2
+_MAX_PLAUSIBLE_MV_PER_K = 1e2
+
+# A ΔT this small contributes a ratio dominated by its own rounding, so it is
+# left out of the median rather than allowed to dominate it.
+_MIN_DELTA_T_FOR_RATIO_K = 0.1
+
 
 class IteWorkbookParser(BaseParser):
     """One measurement per sample from the ionic-TE recording workbook."""
@@ -134,8 +162,9 @@ class IteWorkbookParser(BaseParser):
     # Bumped whenever the output for an unchanged file changes, because the parse
     # cache is keyed on (file hash, parser version). 1.1.0 (2026-09-17) covers
     # the polarity field added on 2026-09-10, which shipped without a bump, and
-    # the duplicate-id, non-numeric-cell, mass and alignment fixes.
-    version: ClassVar[str] = "1.1.0"
+    # the duplicate-id, non-numeric-cell, mass and alignment fixes. 1.2.0
+    # (2026-10-02) adds the voltage-unit plausibility warning.
+    version: ClassVar[str] = "1.2.0"
     technique: ClassVar[Technique] = Technique.THERMOELECTRIC
     supported_extensions: ClassVar[tuple[str, ...]] = (".xlsx",)
 
@@ -261,6 +290,7 @@ class IteWorkbookParser(BaseParser):
 
         deltas, volts, used, issues_from_rows = _series(sample_id, rows)
         issues.extend(issues_from_rows)
+        issues.extend(_voltage_unit_issues(sample_id, deltas, volts))
 
         if orphans:
             ids = sorted({str(r.get("sample_id")) for r in orphans})
@@ -408,6 +438,80 @@ def _series(
         used,
         issues,
     )
+
+
+def _voltage_unit_issues(
+    sample_id: str, deltas: np.ndarray, volts: np.ndarray
+) -> list[ValidationIssue]:
+    """Warn when the voltages do not look like millivolts.
+
+    `delta_V_mV` is read exactly as typed: the column header names the unit and
+    nothing converts, so a meter read in volts or microvolts is a factor of 1000
+    that no later step can detect. The slope is still a clean straight line, the
+    fit still reports a high R-squared, and the surrogate optimises a
+    coefficient three orders of magnitude from the truth.
+
+    The test is on the median implied |ΔV/ΔT| across the series rather than per
+    point, for two reasons. A unit mistake affects the whole series, so one
+    message is the right number; and the median survives a single bad point,
+    which is a different fault with its own reporting.
+
+    A warning rather than an error throughout. These thresholds are judgement
+    calls (see the constants), and refusing a genuinely weak cell would be the
+    worse mistake of the two.
+    """
+    median = _median_abs_ratio(deltas, volts)
+    if median is None:
+        return []
+
+    prefix = f"Sample {sample_id}: "
+    read_as_typed = "The column is read exactly as typed and nothing converts it."
+
+    if median == 0.0:
+        message = (
+            f"{prefix}every delta_V_mV is zero, so no coefficient can be fitted from this "
+            "series. If the cell did produce a voltage, check the column was filled from "
+            "the trace rather than left at its default."
+        )
+    elif median < _MIN_PLAUSIBLE_MV_PER_K:
+        message = (
+            f"{prefix}delta_V_mV implies |S| of about {median:.3g} mV/K, below "
+            f"{_MIN_PLAUSIBLE_MV_PER_K:g} mV/K. Ionic thermoelectric cells sit near 0.1 to "
+            f"10 mV/K, and {median * 1000:.3g} mV/K would be ordinary -- so this is what a "
+            f"meter read in VOLTS looks like typed into a millivolt column. {read_as_typed} "
+            "Confirm the unit, or that the cell really produced this little."
+        )
+    elif median > _MAX_PLAUSIBLE_MV_PER_K:
+        message = (
+            f"{prefix}delta_V_mV implies |S| of about {median:.3g} mV/K, above "
+            f"{_MAX_PLAUSIBLE_MV_PER_K:g} mV/K, which is larger than anything reported for "
+            f"this class of material. {median / 1000:.3g} mV/K would be ordinary -- so this "
+            "is what a meter read in MICROVOLTS looks like typed into a millivolt column. "
+            f"{read_as_typed}"
+        )
+    else:
+        return []
+
+    return [_issue("delta_V_mV", message, severity=Severity.WARNING)]
+
+
+def _median_abs_ratio(deltas: np.ndarray, volts: np.ndarray) -> float | None:
+    """Median |ΔV/ΔT| over the points that can carry one, or None if none can.
+
+    Points at a temperature difference below `_MIN_DELTA_T_FOR_RATIO_K` are left
+    out: their ratio is mostly their own rounding, and one of them would
+    otherwise set the median for the whole series.
+    """
+    if deltas.size == 0 or deltas.size != volts.size:
+        return None
+
+    usable = np.abs(deltas) >= _MIN_DELTA_T_FOR_RATIO_K
+    if not np.any(usable):
+        return None
+
+    ratios = np.abs(volts[usable] / deltas[usable])
+    finite = ratios[np.isfinite(ratios)]
+    return float(np.median(finite)) if finite.size else None
 
 
 _MASS_FIELDS = ("mass_IL_A_mg", "mass_IL_B_mg")

@@ -512,4 +512,89 @@ class TestADamagedFileStillDoesNotRaise:
 class TestTheVersionMovesWithTheOutput:
     def test_the_polarity_and_validation_changes_carry_a_new_version(self):
         """The parse cache is keyed on (file hash, parser version)."""
-        assert IteWorkbookParser.version == "1.1.0"
+        assert IteWorkbookParser.version == "1.2.0"
+
+
+class TestTheVoltageUnitIsSanityChecked:
+    """`delta_V_mV` is read exactly as typed. Nothing converts it.
+
+    There is no unit column and no conversion step, so a microvolt reading
+    entered in that column is a silent factor of 1000: the series is still a
+    clean straight line, R-squared is still high, and the surrogate optimises
+    a coefficient three orders of magnitude from the truth. These thresholds
+    are judgement calls, so every outcome here is a warning rather than a
+    refusal -- a genuinely weak cell must still get through.
+    """
+
+    @staticmethod
+    def _voltage_notes(path):
+        (result,) = IteWorkbookParser().parse_all(path)
+        return [i for i in result.issues if i.field == "delta_V_mV"]
+
+    def test_an_ordinary_series_says_nothing(self, tmp_path):
+        """2.4 mV/K is the middle of the reported range for this class."""
+        path = _write(tmp_path, [_sample()], _series(slope=2.4))
+        assert self._voltage_notes(path) == []
+
+    @pytest.mark.parametrize("slope", [0.1, 1.0, 10.0, 50.0])
+    def test_the_whole_plausible_range_passes(self, tmp_path, slope):
+        path = _write(tmp_path, [_sample()], _series(slope=slope))
+        assert self._voltage_notes(path) == []
+
+    def test_a_meter_read_in_microvolts_is_caught(self, tmp_path):
+        """A 2.4 mV/K cell read as 2400 uV/K and typed straight in.
+
+        The numbers are then 1000x too LARGE, so this is the upper bound.
+        """
+        path = _write(tmp_path, [_sample()], _series(slope=2.4e3))
+        (note,) = self._voltage_notes(path)
+        assert note.severity is Severity.WARNING
+        assert "MICROVOLTS" in note.message
+        # The message has to show what the figure would be if the unit were
+        # the cause, or it is just an assertion that something looks odd.
+        assert "2.4 mV/K" in note.message
+
+    def test_a_meter_read_in_volts_is_caught(self, tmp_path):
+        """A 2.4 mV/K cell read as 0.0024 V/K and typed straight in.
+
+        The numbers are then 1000x too SMALL, so this is the lower bound.
+        """
+        path = _write(tmp_path, [_sample()], _series(slope=2.4e-3))
+        (note,) = self._voltage_notes(path)
+        assert note.severity is Severity.WARNING
+        assert "VOLTS" in note.message
+        assert "2.4 mV/K" in note.message
+
+    def test_an_all_zero_series_is_named_for_what_it_is(self, tmp_path):
+        path = _write(tmp_path, [_sample()], _series(slope=0.0))
+        (note,) = self._voltage_notes(path)
+        assert "every delta_V_mV is zero" in note.message
+
+    def test_the_series_is_still_parsed(self, tmp_path):
+        """A warning, not a refusal. The numbers may well be right."""
+        path = _write(tmp_path, [_sample()], _series(slope=2.4e3))
+        (result,) = IteWorkbookParser().parse_all(path)
+        assert result.arrays["delta_t_k"].size == 3
+        assert result.arrays["delta_v_mv"].size == 3
+
+    def test_one_outlier_does_not_trigger_it(self, tmp_path):
+        """A single bad point is a different fault, reported elsewhere.
+
+        The check is on the median precisely so that it reports a unit
+        mistake, which affects the whole series, and stays quiet about a
+        mistyped individual reading.
+        """
+        rows = _series(slope=2.4)
+        rows[1]["delta_V_mV"] = 0.000001
+        path = _write(tmp_path, [_sample()], rows)
+        assert self._voltage_notes(path) == []
+
+    def test_a_tiny_delta_t_is_left_out_of_the_ratio(self, tmp_path):
+        """At delta-T below 0.1 K the ratio is mostly its own rounding."""
+        rows = [
+            _meas("IL-001", "M-1", dt=0.01, dv=2.4),
+            _meas("IL-001", "M-2", dt=5.0, dv=12.0),
+            _meas("IL-001", "M-3", dt=10.0, dv=24.0),
+        ]
+        path = _write(tmp_path, [_sample()], rows)
+        assert self._voltage_notes(path) == []
