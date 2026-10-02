@@ -135,10 +135,15 @@ def default_registry() -> AnalyzerRegistry:
       ΔV against ΔT, separating it from the electrode-polarisation intercept
       that a single-point reading silently absorbs.
 
-    Two analyzers now claim `Technique.THERMOELECTRIC`, which is what the
+    - `ThermovoltageTransientAnalyzer`: the cell's time constant from its V(t)
+      trace, and the verdict on whether the window was long enough to read a
+      steady-state value at all. This is the producer of the workbook's
+      `tau_fitted_s`, which was declared derived-from-the-trace and had none.
+
+    Three analyzers now claim `Technique.THERMOELECTRIC`, which is what the
     registry's set semantics are for: a resistivity-and-Seebeck run has no
-    ΔV-versus-ΔT series and a thermovoltage run has no κ, so each declines the
-    other's data in `analyze` and reports why.
+    ΔV-versus-ΔT series, a thermovoltage run has no κ, and a single-ΔT trace has
+    no slope, so each declines the others' data in `analyze` and reports why.
 
     - `MicroscopyLatticeAnalyzer`: fringe spacing from a calibrated TEM frame,
       by windowed FFT. Both halves of it — the info-bar pixel size and the FFT
@@ -156,6 +161,9 @@ def default_registry() -> AnalyzerRegistry:
         MicroscopyLatticeAnalyzer,
     )
     from latos.analysis.thermovoltage.slope import ThermovoltageSlopeAnalyzer  # noqa: PLC0415
+    from latos.analysis.thermovoltage.transient import (  # noqa: PLC0415
+        ThermovoltageTransientAnalyzer,
+    )
     from latos.analysis.transport.summary import TransportSummaryAnalyzer  # noqa: PLC0415
     from latos.analysis.uv_drs.tauc import UvDrsTaucAnalyzer  # noqa: PLC0415
     from latos.analysis.xps.regions import XpsRegionsAnalyzer  # noqa: PLC0415
@@ -170,6 +178,7 @@ def default_registry() -> AnalyzerRegistry:
             XpsRegionsAnalyzer(),
             TransportSummaryAnalyzer(),
             ThermovoltageSlopeAnalyzer(),
+            ThermovoltageTransientAnalyzer(),
             MicroscopyLatticeAnalyzer(),
         ],
     )

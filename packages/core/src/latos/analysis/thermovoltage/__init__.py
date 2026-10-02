@@ -7,5 +7,16 @@ cannot do.
 """
 
 from latos.analysis.thermovoltage.slope import ThermovoltageSlopeAnalyzer, fit_seebeck_slope
+from latos.analysis.thermovoltage.transient import (
+    ApproachFit,
+    ThermovoltageTransientAnalyzer,
+    fit_exponential_approach,
+)
 
-__all__ = ["ThermovoltageSlopeAnalyzer", "fit_seebeck_slope"]
+__all__ = [
+    "ApproachFit",
+    "ThermovoltageSlopeAnalyzer",
+    "ThermovoltageTransientAnalyzer",
+    "fit_exponential_approach",
+    "fit_seebeck_slope",
+]
