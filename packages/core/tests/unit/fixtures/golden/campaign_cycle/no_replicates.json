@@ -1,0 +1,300 @@
+{
+  "fixture": "no_replicates",
+  "inputs": {
+    "deltas": [
+      2.0,
+      5.0,
+      10.0
+    ],
+    "noise": 0.04,
+    "offset": 0.35,
+    "polarity": "V+ on cold electrode",
+    "samples": {
+      "IL-001": [
+        0.0,
+        1.1
+      ],
+      "IL-002": [
+        1.0,
+        1.6
+      ],
+      "IL-003": [
+        0.5,
+        2.35
+      ],
+      "IL-004": [
+        0.25,
+        1.8
+      ]
+    }
+  },
+  "outputs": {
+    "fits": [
+      {
+        "composition": 0.0,
+        "n_points": 3,
+        "notes": [],
+        "offset_mv": 0.341785480959544,
+        "polarity": "V+ on the COLD electrode",
+        "sample_id": "IL-001",
+        "seebeck_mv_k": 1.102941498673599,
+        "stderr_mv_k": 0.002549831854179487
+      },
+      {
+        "composition": 1.0,
+        "n_points": 3,
+        "notes": [],
+        "offset_mv": 0.33839618835067675,
+        "polarity": "V+ on the COLD electrode",
+        "sample_id": "IL-002",
+        "seebeck_mv_k": 1.6018849686414132,
+        "stderr_mv_k": 0.0041672723456086
+      },
+      {
+        "composition": 0.5,
+        "n_points": 3,
+        "notes": [],
+        "offset_mv": 0.4293488617686254,
+        "polarity": "V+ on the COLD electrode",
+        "sample_id": "IL-003",
+        "seebeck_mv_k": 2.3396380732701307,
+        "stderr_mv_k": 0.0022395439471282566
+      },
+      {
+        "composition": 0.25,
+        "n_points": 3,
+        "notes": [],
+        "offset_mv": 0.2890475586717294,
+        "polarity": "V+ on the COLD electrode",
+        "sample_id": "IL-004",
+        "seebeck_mv_k": 1.80640956034208,
+        "stderr_mv_k": 0.0008603228682026241
+      }
+    ],
+    "messages": [],
+    "points": [
+      {
+        "composition": 0.0,
+        "n_replicates": 1,
+        "notes": [],
+        "sample_ids": [
+          "IL-001"
+        ],
+        "sigma": 0.002549831854179487,
+        "sigma_source": "fit",
+        "value": 1.102941498673599
+      },
+      {
+        "composition": 0.25,
+        "n_replicates": 1,
+        "notes": [],
+        "sample_ids": [
+          "IL-004"
+        ],
+        "sigma": 0.0008603228682026241,
+        "sigma_source": "fit",
+        "value": 1.80640956034208
+      },
+      {
+        "composition": 0.5,
+        "n_replicates": 1,
+        "notes": [],
+        "sample_ids": [
+          "IL-003"
+        ],
+        "sigma": 0.0022395439471282566,
+        "sigma_source": "fit",
+        "value": 2.3396380732701307
+      },
+      {
+        "composition": 1.0,
+        "n_replicates": 1,
+        "notes": [],
+        "sample_ids": [
+          "IL-002"
+        ],
+        "sigma": 0.0041672723456086,
+        "sigma_source": "fit",
+        "value": 1.6018849686414132
+      }
+    ],
+    "record": {
+      "converged": false,
+      "frozen_config": {
+        "grid_size": 200,
+        "kernel": "ConstantKernel * RBF",
+        "length_scale": 1.0019633722384973,
+        "length_scale_bounds": [
+          1.0,
+          5.0
+        ],
+        "length_scale_fitted": true,
+        "n_observations": 4,
+        "noise_std": 0.0023946879006538717,
+        "point_noise_scale": [
+          1.0647867112383427,
+          0.3592630454965393,
+          0.9352132887616574,
+          1.7402152257380692
+        ],
+        "point_noise_used": true,
+        "rel_noise": 0.08,
+        "seed": 0,
+        "xi": 0.01
+      },
+      "kind": "latos.bo.prereg",
+      "latos_version": "0.1.0",
+      "objective": {
+        "aggregation": "abs_slope",
+        "direction": "maximize",
+        "input_variable": "mass_fraction_x",
+        "property": "abs_seebeck_mv_k",
+        "search_bounds": [
+          0.0,
+          1.0
+        ],
+        "y_transform": "identity"
+      },
+      "prediction_at_recommendation": {
+        "ci95_model": 0.298026619697191,
+        "ci95_predictive": 0.2980635768072406,
+        "predicted_mean": 2.247032358801315,
+        "predictive_interval_95": [
+          1.9489687819940742,
+          2.5450959356085554
+        ],
+        "predictive_sd": 0.15207325347308195,
+        "x": 0.6231155778894473
+      },
+      "prior_best": 2.3396380732701307,
+      "reliability": {
+        "fill_distance": 1.0,
+        "fill_limit": 0.2222,
+        "level": "exploratory",
+        "loo_coverage": 1.0,
+        "loo_inside": 4,
+        "loo_total": 4,
+        "n_dims": 1,
+        "n_observations": 4,
+        "note": "Exploratory: only 4 measured points. Intervals from so few points are typically over-confident — treat the recommendation as a guide, not a settled answer. Leave-one-out: 4/4 inside the 95% band."
+      },
+      "stopping_claim": {
+        "best_measured": 2.3396380732701307,
+        "delta": 0.1,
+        "epsilon": 0.0023946879006538717,
+        "met": false,
+        "n_unreliable_observations": 0,
+        "probability_within_epsilon": 0.20703125
+      },
+      "training_data": {
+        "canonical_form": "rows of x, y[, sigma] as Python float repr, tab-separated, sorted ascending, newline-joined, UTF-8, SHA-256",
+        "digest_covers_point_noise": true,
+        "n_observations": 4,
+        "point_noise_used": true,
+        "sha256": "ce84e4f1dca563e016f78e49dbb7ce3b9f11566ea82e284c087b775b0a8fc062",
+        "x": [
+          0.0,
+          0.25,
+          0.5,
+          1.0
+        ],
+        "y": [
+          1.102941498673599,
+          1.80640956034208,
+          2.3396380732701307,
+          1.6018849686414132
+        ]
+      },
+      "validation_criteria": {
+        "calibration": "measured value falls within predictive_interval_95",
+        "improvement": "measured value exceeds prior_best",
+        "stopping_claim": "the best value found over the campaign improves on the frozen best_measured by no more than epsilon"
+      }
+    },
+    "report": [
+      "Samples read from the workbook:",
+      "  IL-001       x = 0.000   S = +1.103 +/- 0.003 mV/K   offset +0.342 mV   (3 points)",
+      "  IL-002       x = 1.000   S = +1.602 +/- 0.004 mV/K   offset +0.338 mV   (3 points)",
+      "  IL-003       x = 0.500   S = +2.340 +/- 0.002 mV/K   offset +0.429 mV   (3 points)",
+      "  IL-004       x = 0.250   S = +1.806 +/- 0.001 mV/K   offset +0.289 mV   (3 points)",
+      "  (S reported for: V+ on the COLD electrode)",
+      "",
+      "",
+      "NEXT: mix at x = 0.6231",
+      "  predicted |S| = 2.247 mV/K (95% interval 1.949 to 2.545)",
+      "",
+      "  CONTINUE: Keep going. Expected improvement still exceeds the measurement noise, and the best sample so far (mass_fraction_x = 0.5) is within 0.00239 of the optimum with probability 0.21.",
+      "",
+      "Pre-registered: <RECORD>",
+      "  Written before the sample exists. Do not edit it afterwards."
+    ],
+    "result": {
+      "config": {
+        "acquisition_function": "ei",
+        "bounds": [
+          0.0,
+          1.0
+        ],
+        "direction": "maximize",
+        "grid_size": 200,
+        "input_name": "mass_fraction_x",
+        "kernel": "ConstantKernel * RBF",
+        "length_scale": 1.0019633722384973,
+        "length_scale_bounds": [
+          1.0,
+          5.0
+        ],
+        "length_scale_fitted": true,
+        "n_observations": 4,
+        "noise_std": 0.0023946879006538717,
+        "objective": "abs_seebeck_mv_k",
+        "objective_aggregation": "abs_slope",
+        "point_noise_scale": [
+          1.0647867112383427,
+          0.3592630454965393,
+          0.9352132887616574,
+          1.7402152257380692
+        ],
+        "point_noise_used": true,
+        "rel_noise": 0.08,
+        "seed": 0,
+        "x_scale": 0.25,
+        "xi": 0.01,
+        "xi_absolute": 0.004432601462903179,
+        "y_transform": "identity"
+      },
+      "converged": false,
+      "max_ei": 0.024091853730096046,
+      "noise_threshold": 0.0023946879006538717,
+      "recommendation": {
+        "ci95": 0.298026619697191,
+        "ci95_predictive": 0.2980635768072406,
+        "predicted_mean": 2.247032358801315,
+        "predictive_interval_95": [
+          1.9489687819940742,
+          2.5450959356085554
+        ],
+        "predictive_sd": 0.15207325347308195,
+        "x": 0.6231155778894473
+      },
+      "reliability": {
+        "fill_distance": 1.0,
+        "fill_limit": 0.2222,
+        "level": "exploratory",
+        "loo_coverage": 1.0,
+        "loo_inside": 4,
+        "loo_total": 4,
+        "n_observations": 4
+      },
+      "stopping": {
+        "action": "continue",
+        "data_sufficient": false,
+        "delta": 0.1,
+        "epsilon": 0.0023946879006538717,
+        "probability": 0.20703125,
+        "signal_exhausted": false
+      },
+      "training_digest": "ce84e4f1dca563e016f78e49dbb7ce3b9f11566ea82e284c087b775b0a8fc062"
+    }
+  }
+}

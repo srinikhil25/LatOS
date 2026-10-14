@@ -1,0 +1,108 @@
+{
+  "fixture": "too_few_conditions",
+  "inputs": {
+    "deltas": [
+      2.0,
+      5.0,
+      10.0
+    ],
+    "noise": 0.04,
+    "offset": 0.35,
+    "polarity": "V+ on cold electrode",
+    "samples": {
+      "IL-001": [
+        0.0,
+        1.1
+      ],
+      "IL-002": [
+        1.0,
+        1.6
+      ],
+      "IL-003": [
+        1.0,
+        1.55
+      ]
+    }
+  },
+  "outputs": {
+    "fits": [
+      {
+        "composition": 0.0,
+        "n_points": 3,
+        "notes": [],
+        "offset_mv": 0.341785480959544,
+        "polarity": "V+ on the COLD electrode",
+        "sample_id": "IL-001",
+        "seebeck_mv_k": 1.102941498673599,
+        "stderr_mv_k": 0.002549831854179487
+      },
+      {
+        "composition": 1.0,
+        "n_points": 3,
+        "notes": [],
+        "offset_mv": 0.33839618835067675,
+        "polarity": "V+ on the COLD electrode",
+        "sample_id": "IL-002",
+        "seebeck_mv_k": 1.6018849686414132,
+        "stderr_mv_k": 0.0041672723456086
+      },
+      {
+        "composition": 1.0,
+        "n_points": 3,
+        "notes": [],
+        "offset_mv": 0.42934886176862896,
+        "polarity": "V+ on the COLD electrode",
+        "sample_id": "IL-003",
+        "seebeck_mv_k": 1.5396380732701302,
+        "stderr_mv_k": 0.002239543947128068
+      }
+    ],
+    "messages": [
+      "Replicate scatter measured at 1 condition(s): pooled standard deviation 0.0440 mV/K on 1 degree(s) of freedom. This is the measurement uncertainty the surrogate was given, in place of the engine's assumed default. With only 1 degree(s) of freedom this estimate is itself uncertain by roughly a factor of two; treat it as an order of magnitude, and replicate a second condition to sharpen it.",
+      "3 sample(s) collapsed onto 2 design point(s); 1 were replicates of a condition already present.",
+      "2 design point(s) available (3 sample(s) collapsed onto 2 distinct composition(s)). A surrogate needs at least 3 DISTINCT compositions; measure both pure liquids and the midpoint first, which the campaign needs anyway as mixing-law anchors and drift controls."
+    ],
+    "points": [
+      {
+        "composition": 0.0,
+        "n_replicates": 1,
+        "notes": [],
+        "sample_ids": [
+          "IL-001"
+        ],
+        "sigma": 0.04401520182484367,
+        "sigma_source": "pooled",
+        "value": 1.102941498673599
+      },
+      {
+        "composition": 1.0,
+        "n_replicates": 2,
+        "notes": [],
+        "sample_ids": [
+          "IL-002",
+          "IL-003"
+        ],
+        "sigma": 0.03112344768564146,
+        "sigma_source": "replicates",
+        "value": 1.5707615209557717
+      }
+    ],
+    "record": null,
+    "report": [
+      "Samples read from the workbook:",
+      "  IL-001       x = 0.000   S = +1.103 +/- 0.003 mV/K   offset +0.342 mV   (3 points)",
+      "  IL-002       x = 1.000   S = +1.602 +/- 0.004 mV/K   offset +0.338 mV   (3 points)",
+      "  IL-003       x = 1.000   S = +1.540 +/- 0.002 mV/K   offset +0.429 mV   (3 points)",
+      "  (S reported for: V+ on the COLD electrode)",
+      "",
+      "Design points given to the surrogate:",
+      "  x = 0.000   |S| = 1.103 +/- 0.0440 mV/K   n = 1 (pooled)   [IL-001]",
+      "  x = 1.000   |S| = 1.571 +/- 0.0311 mV/K   n = 2 (replicates)   [IL-002, IL-003]",
+      "",
+      "Replicate scatter measured at 1 condition(s): pooled standard deviation 0.0440 mV/K on 1 degree(s) of freedom. This is the measurement uncertainty the surrogate was given, in place of the engine's assumed default. With only 1 degree(s) of freedom this estimate is itself uncertain by roughly a factor of two; treat it as an order of magnitude, and replicate a second condition to sharpen it.",
+      "3 sample(s) collapsed onto 2 design point(s); 1 were replicates of a condition already present.",
+      "2 design point(s) available (3 sample(s) collapsed onto 2 distinct composition(s)). A surrogate needs at least 3 DISTINCT compositions; measure both pure liquids and the midpoint first, which the campaign needs anyway as mixing-law anchors and drift controls."
+    ],
+    "result": null
+  }
+}
