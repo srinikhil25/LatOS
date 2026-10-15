@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
 import json
+import math
 import os
 import platform
 from collections.abc import Callable
@@ -23,6 +25,7 @@ from latos.core.enums import Severity
 from latos.core.models import ValidationIssue, utc_now
 from latos.experiments import (
     EXCLUSION_GLOSSARY,
+    FitSpace,
     Goal,
     ObjectiveDefinition,
     SourceRevision,
@@ -36,6 +39,7 @@ from latos.experiments import (
     runtime_environment,
 )
 from latos.experiments import prereg as experiments_prereg
+from latos.experiments.prepare import PREDICTION_NOISE_GLOSSARY
 from latos.experiments.prereg import (
     OBSERVATION_FORM,
     SCHEMA_VERSION,
@@ -51,11 +55,14 @@ from latos.experiments.prereg import (
     render_note,
     verify_record,
 )
+from latos.optimization import engine
 from latos.optimization import prereg as v1
 from latos.optimization.engine import OptimizationResult
 from latos.optimization.validate import list_preregistrations
 from tests.unit.experiments._examples import (
     BAKE,
+    SIDE,
+    SIGNAL,
     VARIABLES,
     X,
     make_definition,
@@ -170,7 +177,7 @@ def test_the_record_holds_exactly_the_observations_the_model_saw(
     assert block["y"] == [2.6, 2.0, 2.1, 2.2, 1.6]  # as optimized
     assert block["sigma"] == [0.40, 0.02, 0.08, 0.04, 0.03]
     assert block["sigma_sources"] == ["lower_bound_specimen"] * 5
-    assert "lower bound" in block["sigma_glossary"]["lower_bound_specimen"]
+    assert "not a complete uncertainty budget" in block["sigma_glossary"]["lower_bound_specimen"]
     assert block["n_specimens"] == [1] * 5
     assert block["sample_ids"] == [["a"], ["b"], ["c"], ["d"], ["e"]]
     assert block["sha256"] == observations_digest_nd(
@@ -197,7 +204,10 @@ def test_the_record_holds_exactly_the_observations_the_model_saw(
     assert record["prediction_noise"]["source"] == "lower_bound"
     assert record["prediction_noise"]["prepared"] == pytest.approx(0.04)
     assert record["prediction_noise"]["applied"] == pytest.approx(0.04)
-    assert "too narrow" in record["prediction_noise"]["meaning"]
+    meaning = record["prediction_noise"]["meaning"]
+    assert meaning.startswith("Estimated from measured observations")
+    assert "may understate" in meaning
+    assert record["acquisition"]["noise_threshold_from_measured_noise"] is True
 
 
 def test_every_specimen_and_every_exclusion_is_in_the_record(record: dict[str, Any]) -> None:
@@ -356,6 +366,7 @@ SEAL = "does not match its seal"
         ),
         (_set("training_data", "y", 0, value=3.0), "version 1 training block"),
         (_set("prediction_at_recommendation", "x", value=0.123), "differs from the recommended x"),
+        (_set("frozen_config", "xi", value=0.5), "frozen_config.xi is not the xi the acquisition"),
         # Nothing but the seal covers the prediction itself.
         (_set("prediction_at_recommendation", "predicted_mean", value=9.0), SEAL),
         (_set("prediction_at_recommendation", "predictive_interval_95", value=[0.0, 99.0]), SEAL),
@@ -562,6 +573,886 @@ def test_the_rule_that_chose_x_is_the_one_the_frozen_numbers_call_for(
     moved["seal"]["sha256"] = record_seal(moved)
     rule = "largest model uncertainty" if exploring else "largest expected improvement"
     assert any(f"is not the point of {rule}" in p for p in verify_record(moved))
+
+
+@pytest.mark.parametrize(
+    ("rows", "rule"),
+    [
+        (_EI_ROWS, "expected_improvement"),
+        (_FALLBACK_ROWS, "largest_model_uncertainty"),
+    ],
+    ids=["expected-improvement", "largest-uncertainty-fallback"],
+)
+def test_the_record_says_which_rule_chose_the_point_and_why(
+    rows: tuple[Any, ...], rule: str
+) -> None:
+    record = build_record_v2(*_campaign(rows=rows))
+    acquisition = record["acquisition"]
+    grid = acquisition["grid"]
+    ei = grid["expected_improvement"]
+    widths = [hi - lo for lo, hi in zip(grid["lower_95"], grid["upper_95"], strict=True)]
+    index = grid["x"].index(record["prediction_at_recommendation"]["x"])
+    exploring = rule == "largest_model_uncertainty"
+
+    selection = acquisition["selection"]
+    # The function asked for is still stated; which rule chose x is beside it.
+    assert acquisition["function"] == "ei"
+    assert selection["rule"] == rule
+    assert selection["acquisition"] == "ei"
+    assert selection["explore_policy"] == "max_std"
+    assert selection["explore_policy_source"] == "optimizer_default"
+    assert selection["fallback"] == {
+        "enabled": True,
+        "max_expected_improvement_below_noise_threshold": exploring,
+        "reliability_exploratory": True,
+        "conditions_met": exploring,
+    }
+    assert selection["candidates"] == {
+        "kind": "evenly_spaced_grid",
+        "points": 200,
+        "lower": 0.0,
+        "upper": 1.0,
+        "sha256": hashlib.sha256(
+            json.dumps(grid["x"], separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
+    }
+    assert selection["selected_index"] == index
+    assert selection["expected_improvement_argmax_index"] == ei.index(max(ei))
+    assert selection["largest_model_sd_index"] == widths.index(max(widths))
+    explanation = selection["explanation"]
+    x = record["prediction_at_recommendation"]["x"]
+    if exploring:
+        assert explanation.startswith("Chosen by the uncertainty fallback: ")
+        assert "(exploration policy max_std, the optimizer's default)" in explanation
+        by_ei = grid["x"][ei.index(max(ei))]
+        assert f"Expected improvement alone would have chosen additive_fraction = {by_ei:.6g}." in (
+            explanation
+        )
+    else:
+        assert explanation.startswith(
+            f"Chosen by expected improvement: additive_fraction = {x:.6g} has the largest"
+        )
+        assert "The uncertainty fallback did not apply: the largest expected improvement is " in (
+            explanation
+        )
+        assert "not below the noise threshold" in explanation
+    assert verify_record(record) == ()
+    assert experiments_prereg.wording_differences(record) == ()
+
+
+def _engine_with(monkeypatch: pytest.MonkeyPatch, policy: str) -> None:
+    """Run the optimizer under another exploration policy, as a caller of it could."""
+    original = engine.optimize
+    monkeypatch.setattr(engine, "optimize", functools.partial(original, explore_policy=policy))
+
+
+def test_a_policy_that_turns_the_fallback_off_is_recorded_as_such(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The fallback's conditions hold on these rows; with policy "ei" the
+    # optimizer takes the largest expected improvement all the same.
+    _engine_with(monkeypatch, "ei")
+    campaign = _campaign(rows=_FALLBACK_ROWS)
+    record = build_record_v2(*campaign, explore_policy="ei")
+    selection = record["acquisition"]["selection"]
+    assert selection["rule"] == "expected_improvement"
+    assert selection["explore_policy_source"] == "stated_at_freeze"
+    assert selection["fallback"]["enabled"] is False
+    assert selection["fallback"]["conditions_met"] is True
+    assert selection["selected_index"] == selection["expected_improvement_argmax_index"]
+    assert "but the exploration policy 'ei' turns the fallback off" in selection["explanation"]
+    assert verify_record(record) == ()
+
+    # Left unstated, the record would claim the default policy, whose fallback
+    # takes another point: the freeze refuses rather than state that.
+    with pytest.raises(ValueError, match="not the one the selection rule picks"):
+        build_record_v2(*campaign)
+
+
+def test_a_result_the_stated_policy_did_not_produce_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Run under the default policy, where the fallback took the widest band:
+    # stating "ei" afterwards would describe a choice the optimizer did not make.
+    campaign = _campaign(rows=_FALLBACK_ROWS)
+    with pytest.raises(ValueError, match="largest expected improvement"):
+        build_record_v2(*campaign, explore_policy="ei")
+    # A policy whose choice the frozen numbers cannot show is not stated at all.
+    with pytest.raises(ValueError, match="cannot be shown from the frozen numbers"):
+        build_record_v2(*campaign, explore_policy="ucb")
+    # Nor is a result the optimizer made under it presented as the default's.
+    _engine_with(monkeypatch, "ucb")
+    under_ucb = _campaign(rows=_FALLBACK_ROWS)
+    record_widest = build_record_v2(*campaign)
+    widest = record_widest["acquisition"]["selection"]["largest_model_sd_index"]
+    assert under_ucb[3].recommendation.x != record_widest["acquisition"]["grid"]["x"][widest]
+    with pytest.raises(ValueError, match="largest model uncertainty"):
+        build_record_v2(*under_ucb)
+
+
+def _selection_set(*path: Any, value: Any) -> Callable[[dict[str, Any]], None]:
+    return _set("acquisition", "selection", *path, value=value)
+
+
+@pytest.mark.parametrize(
+    ("change", "finding"),
+    [
+        (_selection_set("rule", value="expected_improvement"), "selection.rule"),
+        (_selection_set("selected_index", value=3), "selection.selected_index"),
+        (
+            _selection_set("expected_improvement_argmax_index", value=0),
+            "selection.expected_improvement_argmax_index",
+        ),
+        (_selection_set("largest_model_sd_index", value=1), "selection.largest_model_sd_index"),
+        (_selection_set("fallback", "conditions_met", value=False), "selection.fallback"),
+        (
+            _selection_set(
+                "fallback", "max_expected_improvement_below_noise_threshold", value=False
+            ),
+            "selection.fallback",
+        ),
+        (_selection_set("fallback", "reliability_exploratory", value=False), "selection.fallback"),
+        (_selection_set("fallback", "enabled", value=False), "selection.fallback"),
+        (_selection_set("candidates", "sha256", value="0" * 64), "selection.candidates"),
+        (_selection_set("candidates", "points", value=100), "selection.candidates"),
+        (_selection_set("acquisition", value="ucb"), "selection.acquisition"),
+        (_selection_set("explore_policy", value="ucb"), "which no freeze writes"),
+        (_selection_set("explore_policy_source", value="invented"), "which no freeze writes"),
+        (_selection_set("explanation", value=""), "does not explain why"),
+        (lambda r: r["acquisition"]["selection"].update(extra=1), "exactly the fields"),
+        (lambda r: r["acquisition"].pop("selection"), "acquisition.selection is missing"),
+        # The decision criteria the rule is derived from, moved together.
+        (_set("acquisition", "noise_threshold", value=1e9), "noise threshold"),
+        (_set("reliability", "level", value="indicative"), "above what"),
+    ],
+)
+def test_selection_metadata_that_the_frozen_numbers_do_not_give_is_caught(
+    change: Callable[[dict[str, Any]], None], finding: str
+) -> None:
+    record = build_record_v2(*_campaign(rows=_FALLBACK_ROWS))
+    changed = copy.deepcopy(record)
+    change(changed)
+    changed["seal"]["sha256"] = record_seal(changed)
+    problems = verify_record(changed)
+    assert any(finding in problem for problem in problems), problems
+
+
+def test_moving_the_point_and_its_selection_together_is_still_caught() -> None:
+    record = build_record_v2(*_campaign(rows=_FALLBACK_ROWS))
+    selection = record["acquisition"]["selection"]
+    other = selection["expected_improvement_argmax_index"]
+    # Rewritten as if expected improvement had chosen, consistently.
+    _grid_point(record, other)
+    selection.update(rule="expected_improvement", selected_index=other)
+    fallback = selection["fallback"]
+    fallback.update(conditions_met=False, max_expected_improvement_below_noise_threshold=False)
+    record["seal"]["sha256"] = record_seal(record)
+    problems = verify_record(record)
+    assert any("selection.rule is not what the frozen numbers give" in p for p in problems)
+    assert any("selection.fallback is not what the frozen numbers give" in p for p in problems)
+    assert any("is not the point of largest model uncertainty" in p for p in problems)
+
+
+def test_an_edited_explanation_is_a_wording_difference(record: dict[str, Any]) -> None:
+    edited = copy.deepcopy(record)
+    edited["acquisition"]["selection"]["explanation"] = "Chosen by the operator's intuition."
+    edited["prediction_noise"]["meaning"] = "A complete uncertainty budget."
+    edited["observations"]["sigma_glossary"]["lower_bound_specimen"] = "Everything."
+    edited["validation_criteria"]["unit_check"] = "already applied"
+    edited["seal"]["sha256"] = record_seal(edited)
+    # Words are not numbers: the record still agrees with itself...
+    assert verify_record(edited) == ()
+    # ...and every word that is not the code's own is named.
+    differences = experiments_prereg.wording_differences(edited)
+    assert len(differences) == 4
+    for field in (
+        "acquisition.selection.explanation",
+        "prediction_noise.meaning",
+        "observations.sigma_glossary['lower_bound_specimen']",
+        "validation_criteria.unit_check",
+    ):
+        assert any(d.startswith(field) for d in differences), differences
+    assert experiments_prereg.wording_differences(record) == ()
+
+
+def test_a_damaged_record_gives_a_wording_finding_not_a_crash(record: dict[str, Any]) -> None:
+    del record["prediction_noise"]
+    (finding,) = experiments_prereg.wording_differences(record)
+    assert finding.startswith("the record's wording could not be compared: KeyError")
+
+
+def _at_grid_point(record: dict[str, Any], index: int) -> None:
+    """Move the recommendation to a grid point with that point's own numbers, and reseal.
+
+    A careful rewrite: the prediction, the model band and the account of the
+    choice all follow the point, so only the rule can show it was moved.
+    """
+    grid = record["acquisition"]["grid"]
+    _grid_point(record, index)
+    lower, upper = grid["lower_95"][index], grid["upper_95"][index]
+    record["prediction_at_recommendation"].update(
+        predicted_mean=grid["mean"][index],
+        ci95_model=(upper - lower) / 2.0,
+        predictive_interval_95=[lower, upper],
+        ci95_predictive=(upper - lower) / 2.0,
+    )
+    stated = record["acquisition"]["selection"]
+    record["acquisition"]["selection"] = experiments_prereg._selection(
+        record, stated["explore_policy"], stated["explore_policy_source"]
+    )
+    record["seal"]["sha256"] = record_seal(record)
+
+
+def _log_campaign() -> Campaign:
+    objective = ObjectiveDefinition(
+        response="signal", goal=Goal.MAXIMIZE, magnitude=True, fit_space=FitSpace.LOG
+    )
+    return _campaign(make_definition(objective=objective), _FALLBACK_ROWS)
+
+
+def test_the_fallback_on_a_log_fit_is_checked_from_its_band() -> None:
+    record = build_record_v2(*_log_campaign())
+    selection = record["acquisition"]["selection"]
+    assert record["projection"]["is_transformed"] is True
+    assert selection["rule"] == "largest_model_uncertainty"
+    # The log band gives the model's standard deviation back from the ratio of its ends.
+    grid = record["acquisition"]["grid"]
+    sd = [math.log(hi / lo) for lo, hi in zip(grid["lower_95"], grid["upper_95"], strict=True)]
+    assert selection["largest_model_sd_index"] == selection["selected_index"] == sd.index(max(sd))
+    assert verify_record(record) == ()
+    assert experiments_prereg.wording_differences(record) == ()
+
+    moved = copy.deepcopy(record)
+    _at_grid_point(moved, sd.index(min(sd)))
+    assert any("is not the point of largest model uncertainty" in p for p in verify_record(moved))
+
+
+def _ranged_record(low: float) -> dict[str, Any]:
+    ranged = (replace(SIGNAL, valid_range=(low, None)), SIDE)
+    objective = ObjectiveDefinition(response="signal", goal=Goal.MAXIMIZE)
+    return build_record_v2(
+        *_campaign(make_definition(responses=ranged, objective=objective), _FALLBACK_ROWS)
+    )
+
+
+def test_a_fallback_on_a_clipped_band_says_the_record_cannot_show_it() -> None:
+    record = _ranged_record(0.9)
+    selection = record["acquisition"]["selection"]
+    assert record["projection"]["y_min"] == 0.9
+    # The band reaches below the valid range and is clipped to it.
+    assert 0.9 in record["acquisition"]["grid"]["lower_95"]
+    assert selection["rule"] == "largest_model_uncertainty"
+    assert selection["largest_model_sd_index"] is None
+    assert (
+        "this record cannot show that this point is the least certain one"
+        in (selection["explanation"])
+    )
+    assert verify_record(record) == ()
+
+
+def test_a_declared_range_the_band_never_reaches_still_checks_the_fallback() -> None:
+    record = _ranged_record(0.0)
+    selection = record["acquisition"]["selection"]
+    assert record["projection"]["y_min"] == 0.0
+    assert 0.0 not in record["acquisition"]["grid"]["lower_95"]
+    assert selection["rule"] == "largest_model_uncertainty"
+    assert selection["largest_model_sd_index"] == selection["selected_index"]
+    assert verify_record(record) == ()
+
+    moved = copy.deepcopy(record)
+    _at_grid_point(moved, 0)
+    assert any("is not the point of largest model uncertainty" in p for p in verify_record(moved))
+
+
+def test_points_the_band_cannot_tell_apart_are_named_as_the_optimizer_names_them() -> None:
+    largest = experiments_prereg._largest_sd_index
+    tied = [0.1, 0.1 * (1 + 1e-15), 0.05]
+    assert largest(tied, None) == 0  # the first of equal maxima, as an argmax takes it
+    assert largest(tied, 1) == 1  # the point chosen, when it is one of them
+    assert largest(tied, 2) == 0
+    assert largest([0.1, 0.2, 0.05], 0) == 1
+    assert largest([0.1, math.nan], None) is None
+    assert largest(None, 0) is None
+
+
+def test_a_band_that_is_not_finite_picks_no_point() -> None:
+    record = build_record_v2(*_campaign(rows=_FALLBACK_ROWS))
+    index = record["acquisition"]["selection"]["selected_index"]
+    record["acquisition"]["grid"]["upper_95"][0 if index else 1] = math.nan
+    record["seal"]["sha256"] = record_seal(record)
+    assert any("model band is not one a model gives" in p for p in verify_record(record))
+
+
+def test_a_log_band_with_an_end_below_zero_picks_no_point() -> None:
+    record = build_record_v2(*_log_campaign())
+    index = record["acquisition"]["selection"]["selected_index"]
+    record["acquisition"]["grid"]["lower_95"][0 if index else 1] = -1.0
+    record["seal"]["sha256"] = record_seal(record)
+    assert any("model band is not one a model gives" in p for p in verify_record(record))
+
+
+def test_a_log_fit_the_optimizer_could_not_make_is_recorded_as_made() -> None:
+    # A value that is not positive cannot be fitted in log space; the optimizer
+    # fits the values as they are, and the record says so and verifies.
+    objective = ObjectiveDefinition(response="signal", goal=Goal.MAXIMIZE, fit_space=FitSpace.LOG)
+    rows = (
+        make_row("a", 0.0, 1.0, 0.1),
+        make_row("b", 0.3, -1.0, 0.1),
+        make_row("c", 0.6, 2.0, 0.1),
+        make_row("d", 1.0, 1.5, 0.1),
+    )
+    record = build_record_v2(*_campaign(make_definition(objective=objective), rows))
+    assert record["projection"]["fit_space_declared"] == "log"
+    assert record["objective"]["y_transform"] == "identity"
+    assert record["projection"]["is_transformed"] is False
+    assert verify_record(record) == ()
+
+    relabelled = copy.deepcopy(record)
+    relabelled["objective"]["y_transform"] = "log"
+    relabelled["seal"]["sha256"] = record_seal(relabelled)
+    assert any("objective.y_transform" in p for p in verify_record(relabelled))
+
+
+def test_the_noise_the_model_was_given_is_the_prepared_noise(record: dict[str, Any]) -> None:
+    # Every number that follows from the noise moved with it: only the
+    # prepared noise, which the observations give, can show the change.
+    changed = copy.deepcopy(record)
+    for path in (("prediction_noise", "applied"), ("frozen_config", "noise_std")):
+        changed[path[0]][path[1]] = 0.197
+    changed["acquisition"]["noise_threshold"] = 0.197
+    changed["seal"]["sha256"] = record_seal(changed)
+    assert any(
+        "is not the prepared noise the observations give" in p for p in verify_record(changed)
+    )
+
+
+_PARTLY_KNOWN = (
+    make_row("a", 0.0, 1.0, 0.1),
+    make_row("b", 0.4, 2.0),
+    make_row("c", 0.7, 3.0, 0.3),
+    make_row("d", 1.0, 2.5, 0.2),
+)
+_NONE_KNOWN = tuple(make_row(f"n{i}", x, y) for i, (x, y) in enumerate([(0, 1), (0.4, 2), (1, 3)]))
+
+
+@pytest.mark.parametrize(
+    ("rows", "source"),
+    [(_PARTLY_KNOWN, "lower_bound_partly_assumed"), (_NONE_KNOWN, "undetermined")],
+    ids=["partly-assumed", "assumed"],
+)
+def test_a_noise_assumed_in_whole_or_in_part_is_not_called_measured(
+    rows: tuple[Any, ...], source: str
+) -> None:
+    record = build_record_v2(*_campaign(rows=rows))
+    assert record["prediction_noise"]["source"] == source
+    assert record["acquisition"]["noise_threshold_from_measured_noise"] is False
+    assert verify_record(record) == ()
+    assert experiments_prereg.wording_differences(record) == ()
+
+    # Called measured over the same numbers, the words and the flag moved together.
+    relabelled = copy.deepcopy(record)
+    relabelled["prediction_noise"].update(
+        source="lower_bound", meaning=PREDICTION_NOISE_GLOSSARY["lower_bound"]
+    )
+    relabelled["acquisition"]["noise_threshold_from_measured_noise"] = True
+    relabelled["seal"]["sha256"] = record_seal(relabelled)
+    assert any("prediction noise source" in p for p in verify_record(relabelled))
+
+
+def test_a_partly_assumed_noise_is_said_so_in_the_note() -> None:
+    note = render_note(build_record_v2(*_campaign(rows=_PARTLY_KNOWN)))
+    assert "Its noise is partly assumed" in note
+    assert "Partly assumed: the median of the per-condition uncertainties" in note
+
+
+def test_a_measured_noise_not_called_measured_is_caught(record: dict[str, Any]) -> None:
+    assert record["prediction_noise"]["source"] == "lower_bound"
+    assert record["acquisition"]["noise_threshold_from_measured_noise"] is True
+    record["acquisition"]["noise_threshold_from_measured_noise"] = False
+    record["seal"]["sha256"] = record_seal(record)
+    assert any("is a measurement the optimizer was given" in p for p in verify_record(record))
+
+
+# ─── What the uncertainties rest on ─────────────────────────────────
+def _relabel(index: int, label: str) -> Callable[[dict[str, Any]], None]:
+    return _set("observations", "sigma_sources", index, value=label)
+
+
+def _rescope(index: int, scope: str | None) -> Callable[[dict[str, Any]], None]:
+    return _set("specimens", index, "responses", "signal", "uncertainty_scope", value=scope)
+
+
+def _label_finding(condition: int, said: str, given: str) -> str:
+    return f"the sigma label of condition {condition} is {said!r}, and its specimens give {given!r}"
+
+
+@pytest.mark.parametrize(
+    ("change", "finding"),
+    [
+        # Called declared, though its specimen states a within-specimen uncertainty.
+        (
+            _relabel(0, "declared_condition"),
+            _label_finding(1, "declared_condition", "lower_bound_specimen"),
+        ),
+        # Called within-specimen, though its specimen states a condition-scope one.
+        (
+            _rescope(0, "condition"),
+            _label_finding(1, "lower_bound_specimen", "declared_condition"),
+        ),
+        # Called assumed, though its specimen states an uncertainty.
+        (_relabel(2, "undetermined"), _label_finding(3, "undetermined", "lower_bound_specimen")),
+        # Called between-specimen, though no condition was made twice.
+        (
+            _relabel(1, "empirical_condition"),
+            _label_finding(2, "empirical_condition", "lower_bound_specimen"),
+        ),
+    ],
+    ids=["declared", "condition-scope", "assumed", "between-specimen"],
+)
+def test_an_uncertainty_label_its_specimens_do_not_give_is_caught(
+    record: dict[str, Any], change: Callable[[dict[str, Any]], None], finding: str
+) -> None:
+    assert verify_record(record) == ()
+    changed = copy.deepcopy(record)
+    change(changed)
+    changed["seal"]["sha256"] = record_seal(changed)
+    problems = verify_record(changed)
+    assert finding in problems, problems
+
+
+def test_a_within_specimen_sigma_must_be_its_specimens_own(record: dict[str, Any]) -> None:
+    changed = copy.deepcopy(record)
+    changed["observations"]["sigma"][2] = 0.001
+    assert experiments_prereg._verify_sigma_labels(changed) == [
+        "the sigma of condition 3 is not the uncertainty its specimen states"
+    ]
+
+
+def test_the_substitute_for_a_missing_uncertainty_is_the_largest_known() -> None:
+    record = build_record_v2(*_campaign(rows=_PARTLY_KNOWN))
+    labels = record["observations"]["sigma_sources"]
+    index = labels.index("undetermined")
+    assert labels.count("undetermined") == 1
+    assert record["observations"]["sigma"][index] == pytest.approx(0.3)
+    assert verify_record(record) == ()
+    changed = copy.deepcopy(record)
+    changed["observations"]["sigma"][index] = 0.1  # the smallest: unknown taken as excellent
+    assert experiments_prereg._verify_sigma_labels(changed) == [
+        f"the sigma of condition {index + 1} is not the one its label 'undetermined' gives"
+    ]
+
+
+_REPLICATED = (
+    make_row("a1", 0.1, 1.0, 0.01),
+    make_row("a2", 0.1, 1.2, 0.01),
+    make_row("b", 0.4, 2.0, 0.01),
+    make_row("c", 0.7, 3.0, 0.01),
+)
+
+
+@pytest.mark.parametrize(
+    ("rows", "counts", "between"),
+    [
+        (ROWS, {"within_specimen_only": 5}, False),
+        (_PARTLY_KNOWN, {"within_specimen_only": 3, "assumed": 1}, False),
+        (_NONE_KNOWN, {"assumed": 3}, False),
+        (_REPLICATED, {"between_specimen_estimated": 3}, True),
+    ],
+    ids=["within", "partly-assumed", "assumed", "replicated"],
+)
+def test_the_record_says_what_its_uncertainties_rest_on(
+    rows: tuple[Any, ...], counts: dict[str, int], between: bool
+) -> None:
+    record = build_record_v2(*_campaign(rows=rows))
+    block = record["uncertainty_provenance"]
+    kinds = ("between_specimen_estimated", "within_specimen_only", "declared", "assumed")
+    assert block["counts"] == {kind: counts.get(kind, 0) for kind in kinds}
+    assert block["between_specimen_variability_estimated"] is between
+    assert (block["pooled_df"] is not None) is between
+    # Never more than the evidence: no complete budget, no established coverage.
+    assert block["complete_budget"] is False
+    assert block["interval_coverage"] == "not established"
+    unreplicated = "no condition was made more than once, so it was not estimated"
+    assert any(unreplicated in said for said in block["not_quantified"]) is not between
+    assert any("errors shared by every specimen" in said for said in block["not_quantified"])
+    assert set(block["glossary"]) == {kind for kind in kinds if counts.get(kind)}
+    assert verify_record(record) == ()
+    assert experiments_prereg.wording_differences(record) == ()
+    note = render_note(record)
+    assert "## What the uncertainties rest on" in note
+    assert (
+        "A complete uncertainty budget is not claimed, and the coverage of the intervals above "
+        "is not established." in note
+    )
+
+
+def test_identical_replicates_are_not_said_to_be_unreplicated() -> None:
+    # Invented values: two identical replicates, whose spread the reducer discards.
+    rows = (
+        make_row("a1", 0.1, 1.0, 0.01),
+        make_row("a2", 0.1, 1.0, 0.01),
+        make_row("b", 0.4, 2.0, 0.01),
+        make_row("c", 0.7, 3.0, 0.02),
+    )
+    record = build_record_v2(*_campaign(rows=rows))
+    block = record["uncertainty_provenance"]
+    assert block["between_specimen_variability_estimated"] is False
+    said = " ".join(block["not_quantified"])
+    assert "the replicates gave identical values, so the spread was discarded" in said
+    assert "no condition was made more than once" not in said
+    assert verify_record(record) == ()
+
+
+def test_the_between_specimen_kind_says_where_a_pooled_spread_was_measured() -> None:
+    record = build_record_v2(*_campaign(rows=_REPLICATED))
+    meaning = record["uncertainty_provenance"]["glossary"]["between_specimen_estimated"]
+    assert "At a condition made once, that spread was measured at other conditions" in meaning
+
+
+def test_the_provenance_changes_no_number_the_model_was_given(record: dict[str, Any]) -> None:
+    # The block is derived from the labels; the sigma handed over is each specimen's own.
+    assert record["observations"]["sigma"] == [0.40, 0.02, 0.08, 0.04, 0.03]
+    assert record["prediction_noise"]["prepared"] == pytest.approx(0.04)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("complete_budget", True),
+        ("interval_coverage", "established"),
+        ("between_specimen_variability_estimated", True),
+        ("by_condition", ["between_specimen_estimated"] * 5),
+        ("counts", {"within_specimen_only": 5}),
+    ],
+)
+def test_a_provenance_the_labels_do_not_give_is_caught(
+    record: dict[str, Any], key: str, value: Any
+) -> None:
+    changed = copy.deepcopy(record)
+    changed["uncertainty_provenance"][key] = value
+    changed["seal"]["sha256"] = record_seal(changed)
+    assert f"uncertainty_provenance.{key} is not what the sigma labels give" in verify_record(
+        changed
+    )
+
+
+def test_a_record_without_its_provenance_is_caught(record: dict[str, Any]) -> None:
+    del record["uncertainty_provenance"]
+    record["seal"]["sha256"] = record_seal(record)
+    assert "the record states no uncertainty provenance" in verify_record(record)
+
+
+def test_the_provenance_words_are_compared_as_words(record: dict[str, Any]) -> None:
+    record["uncertainty_provenance"]["not_quantified"] = []
+    record["seal"]["sha256"] = record_seal(record)
+    assert verify_record(record) == ()
+    assert experiments_prereg.wording_differences(record) == (
+        "uncertainty_provenance.not_quantified is not the wording this version of Latos writes",
+    )
+
+
+def test_the_criteria_say_they_are_stated_and_not_yet_applied(record: dict[str, Any]) -> None:
+    status = record["validation_criteria"]["status"]
+    assert "no outcome of this recommendation has been scored" in status
+    assert "no code applies calibration, improvement, stopping_claim" in status
+    edited = copy.deepcopy(record)
+    edited["validation_criteria"]["status"] = "applied and passed"
+    assert experiments_prereg.wording_differences(edited) == (
+        "validation_criteria.status is not the wording this version of Latos writes",
+    )
+    del edited["validation_criteria"]["status"]
+    assert "validation_criteria.status is missing" in verify_record(edited)
+
+
+def test_the_note_does_not_call_the_noise_a_measurement_whatever_it_rests_on(
+    record: dict[str, Any],
+) -> None:
+    note = render_note(record)
+    assert "what the optimizer calls the measurement noise" in note
+    assert "whatever its source says it rests on" in note
+    assert "In the verdict, the measurement noise and" not in note
+
+
+# Two specimens at each of three conditions, so their spread is pooled.
+_POOLED_ROWS = (
+    make_row("a1", 0.0, 1.0, 0.1),
+    make_row("a2", 0.0, 1.2, 0.1),
+    make_row("b1", 0.5, 2.0, 0.1),
+    make_row("b2", 0.5, 2.3, 0.1),
+    make_row("c1", 1.0, 1.5, 0.1),
+    make_row("c2", 1.0, 1.4, 0.1),
+)
+
+
+def test_a_result_made_without_the_prepared_noise_is_refused() -> None:
+    definition = make_definition()
+    observation_set = reduced_set(definition, *_POOLED_ROWS)
+    prepared = prepare_optimization(definition, observation_set)
+    record = build_record_v2(definition, observation_set, prepared, run_optimization(prepared))
+    assert record["prediction_noise"]["source"] == "pooled_condition"
+    assert verify_record(record) == ()
+    # The optimizer's own median of the per-condition uncertainties is not the pooled noise.
+    median = run_optimization(prepared, noise_level="engine_median")
+    with pytest.raises(ValueError, match="was not given the prepared prediction noise"):
+        build_record_v2(definition, observation_set, prepared, median)
+
+
+def _spread_apart(record: dict[str, Any]) -> None:
+    """Move two replicates apart around the same mean: only the pooled spread changes."""
+    values = {row["sample_id"]: row["responses"]["signal"] for row in record["specimens"]}
+    values["a1"]["value"], values["a2"]["value"] = 0.8, 1.4
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        _spread_apart,
+        _set("observations", "pooled_df", value=4),
+        lambda r: r["observations"].update(pooled_sd=r["observations"]["pooled_sd"] * 2),
+    ],
+    ids=["specimens", "degrees-of-freedom", "spread"],
+)
+def test_a_pooled_spread_the_replicates_do_not_give_is_caught(
+    change: Callable[[dict[str, Any]], None],
+) -> None:
+    record = build_record_v2(*_campaign(rows=_POOLED_ROWS))
+    assert record["observations"]["pooled_df"] == 3
+    change(record)
+    record["seal"]["sha256"] = record_seal(record)
+    assert any(
+        "the pooled spread is not the one the replicated specimens give" in p
+        for p in verify_record(record)
+    )
+
+
+def test_with_nothing_prepared_the_noise_applied_is_the_optimizers_own() -> None:
+    rows = tuple(make_row(i, x, y, 0.0) for i, x, y in [("a", 0, 1), ("b", 0.5, 2), ("c", 1, 1.5)])
+    record = build_record_v2(*_campaign(rows=rows))
+    noise = record["prediction_noise"]
+    assert noise["source"] == "not_passed_degenerate"
+    assert noise["prepared"] is None
+    magnitude = float(np.mean(np.abs(record["observations"]["y"])))
+    assert noise["applied"] == pytest.approx(record["frozen_config"]["rel_noise"] * magnitude)
+    assert verify_record(record) == ()
+
+    changed = copy.deepcopy(record)
+    for path in (("prediction_noise", "applied"), ("frozen_config", "noise_std")):
+        changed[path[0]][path[1]] = 0.5
+    changed["acquisition"]["noise_threshold"] = 0.5
+    changed["seal"]["sha256"] = record_seal(changed)
+    assert any(
+        "is not the prepared noise the observations give" in p for p in verify_record(changed)
+    )
+    # Without the relative noise it was derived from, the noise cannot be checked.
+    del record["frozen_config"]["rel_noise"]
+    record["seal"]["sha256"] = record_seal(record)
+    assert any(
+        "the prediction noise the model was given cannot be checked" in p
+        for p in verify_record(record)
+    )
+
+
+def test_a_fitted_specimen_with_a_control_its_definition_rejects_is_caught(
+    record: dict[str, Any],
+) -> None:
+    # "late" was rejected for this bake time when the rows were built.
+    row = record["specimens"][0]
+    row["inputs"]["bake_time_min"] = 70.0
+    record["seal"]["sha256"] = record_seal(record)
+    finding = f"{row['sample_id']!r} is in the fit with a control its definition rejects"
+    assert any(finding in p for p in verify_record(record)), verify_record(record)
+
+
+def test_on_a_log_fit_the_best_is_the_first_of_values_with_one_logarithm() -> None:
+    near = float(np.nextafter(1000.0, np.inf))
+    assert np.log(near) == np.log(1000.0)
+
+    def best(space: str) -> int | None:
+        return experiments_prereg._fitted_best(
+            {
+                "observations": {"y": [3.0, 1000.0, near]},
+                "objective": {"direction": "maximize"},
+                "projection": {"fit_space_declared": space},
+            }
+        )
+
+    assert best("log") == 1  # as the optimizer takes it, in the space it fits in
+    assert best("identity") == 2
+
+
+def _plain_band(upper: list[float]) -> dict[str, Any]:
+    return {
+        "projection": {"y_min": None, "y_max": None, "is_transformed": False},
+        "acquisition": {"grid": {"lower_95": [0.0] * len(upper), "upper_95": upper}},
+    }
+
+
+def test_a_band_that_ties_its_widest_points_says_so() -> None:
+    caveat = experiments_prereg._band_caveat
+    said = caveat(_plain_band([1.0, 1.0, 0.9]), {"largest_model_sd_index": 0})
+    assert "within 1e-09 of the largest, relatively, at 2 grid points" in said
+    assert caveat(_plain_band([1.0, 0.95, 0.9]), {"largest_model_sd_index": 0}) == ""
+    # A band no model gives is not called clipped.
+    broken = caveat(_plain_band([1.0, math.nan, 0.9]), {"largest_model_sd_index": None})
+    assert "is not one a model gives" in broken
+    assert "clipped" not in broken
+
+
+@pytest.mark.parametrize(
+    ("gap", "accepted"),
+    [(1e-13, True), (5e-10, True), (2e-9, False), (1e-6, False)],
+)
+def test_a_point_the_band_cannot_tell_from_the_widest_is_accepted(
+    gap: float, accepted: bool
+) -> None:
+    # The tolerance is a relative 1e-9 of the largest standard deviation, plus 1e-12.
+    check = experiments_prereg._sd_choice_problems
+    band = _plain_band([1.0, 1.0 - gap, 0.9])
+    assert check(band, 0) == []
+    assert (check(band, 1) == []) is accepted
+    (problem,) = check(band, 2)
+    assert "is not the point of largest model uncertainty" in problem
+
+
+def test_another_acquisition_that_agrees_with_expected_improvement_says_so() -> None:
+    other = experiments_prereg._other_acquisition
+    block = {"acquisition": "ucb", "selected_index": 3, "expected_improvement_argmax_index": 3}
+    assert "cannot tell which of the two chose it" in other(block, "the grid", "x = 0.3")
+    block["expected_improvement_argmax_index"] = 4
+    assert "which of the two" not in other(block, "the grid", "x = 0.3")
+
+
+def test_an_expected_improvement_that_is_not_finite_picks_no_point() -> None:
+    record = build_record_v2(*_campaign(rows=_EI_ROWS))
+    stated = record["acquisition"]["selection"]
+    assert stated["rule"] == "expected_improvement"
+    index = stated["selected_index"]
+    record["acquisition"]["grid"]["expected_improvement"][0 if index else 1] = math.nan
+    # Recomputed, it is not the model's; it sets no tolerance to compare within.
+    assert experiments_prereg._verify_expected_improvement(record) == [
+        "the frozen expected improvement is not what the frozen model gives"
+    ]
+    again = experiments_prereg._selection(
+        record, stated["explore_policy"], stated["explore_policy_source"]
+    )
+    assert again["expected_improvement_argmax_index"] is None
+    record["seal"]["sha256"] = record_seal(record)
+    problems = verify_record(record)
+    assert any(
+        "the frozen expected improvement is not finite, so it picks no point" in p for p in problems
+    ), problems
+
+
+# Ten conditions, so the count allows "indicative", on a flat response: the
+# expected improvement is exhausted, and only the grade keeps the fallback off.
+_INDICATIVE_ROWS = tuple(
+    make_row(f"s{i}", i / 9, 2.0 + (0.001 if i % 2 else -0.001), 0.3) for i in range(10)
+)
+
+
+def test_a_grade_past_exploratory_turns_the_fallback_off() -> None:
+    record = build_record_v2(*_campaign(rows=_INDICATIVE_ROWS))
+    selection = record["acquisition"]["selection"]
+    assert record["reliability"]["level"] == "indicative"
+    assert selection["fallback"]["max_expected_improvement_below_noise_threshold"] is True
+    assert selection["fallback"]["conditions_met"] is False
+    assert selection["rule"] == "expected_improvement"
+    assert "the reliability grade is indicative, not exploratory" in selection["explanation"]
+    assert verify_record(record) == ()
+
+    # Graded exploratory by a rewrite: the fallback would then have chosen.
+    lowered = copy.deepcopy(record)
+    lowered["reliability"]["level"] = "exploratory"
+    lowered["seal"]["sha256"] = record_seal(lowered)
+    problems = verify_record(lowered)
+    assert any("selection.rule is not what the frozen numbers give" in p for p in problems)
+    assert any("selection.fallback is not what the frozen numbers give" in p for p in problems)
+
+
+@pytest.mark.parametrize(
+    ("change", "finding"),
+    [
+        (
+            {"loo_inside": 2, "loo_coverage": 0.2},
+            "above what its leave-one-out coverage of 2/10 allows",
+        ),
+        ({"loo_inside": 9}, "loo_coverage is not loo_inside / loo_total"),
+        ({"loo_total": 3}, "leave-one-out counts are not whole numbers of the conditions"),
+        ({"loo_inside": 11, "loo_coverage": 1.1}, "leave-one-out counts are not whole numbers"),
+        ({"loo_inside": -1, "loo_coverage": -0.1}, "leave-one-out counts are not whole numbers"),
+        ({"loo_total": 0, "loo_inside": 0}, "leave-one-out counts are not whole numbers"),
+        ({"loo_total": 11}, "leave-one-out counts are not whole numbers"),
+        ({"loo_inside": 5.0}, "leave-one-out counts are not whole numbers"),
+        ({"loo_inside": True}, "leave-one-out counts are not whole numbers"),
+    ],
+)
+def test_leave_one_out_counts_must_allow_the_grade(change: dict[str, Any], finding: str) -> None:
+    record = build_record_v2(*_campaign(rows=_INDICATIVE_ROWS))
+    assert record["reliability"]["loo_inside"] >= 5
+    record["reliability"].update(change)
+    record["seal"]["sha256"] = record_seal(record)
+    assert any(finding in p for p in verify_record(record)), verify_record(record)
+
+
+def test_the_verdict_sentence_is_the_one_its_numbers_give(record: dict[str, Any]) -> None:
+    verdict = record["stopping_verdict"]
+    assert experiments_prereg.wording_differences(record) == ()
+    edited = copy.deepcopy(record)
+    probability = f"{verdict['probability']:.2f}"
+    edited["stopping_verdict"]["reason"] = verdict["reason"].replace(probability, "0.99")
+    assert edited["stopping_verdict"]["reason"] != verdict["reason"]
+    edited["seal"]["sha256"] = record_seal(edited)
+    # The opening still fits the action, so the numbers agree...
+    assert verify_record(edited) == ()
+    # ...and the sentence is not the one its numbers give.
+    assert experiments_prereg.wording_differences(edited) == (
+        "stopping_verdict.reason is not the wording this version of Latos writes for its frozen "
+        "numbers",
+    )
+
+
+def test_the_note_says_what_the_best_sample_so_far_is(record: dict[str, Any]) -> None:
+    lines = render_note(record).splitlines()
+    verdict = next(i for i, line in enumerate(lines) if line.startswith("- **continue**"))
+    assert lines[verdict + 1] == f"- {experiments_prereg.VERDICT_BEST_SAMPLE}"
+
+
+def test_the_prior_best_says_what_it_is() -> None:
+    campaign = _campaign(rows=_EI_ROWS)
+    record = build_record_v2(*campaign)
+    assert record["prior_best_basis"] == "best observed among fitted conditions"
+    assert record["prior_best"] == max(record["observations"]["y"])
+
+    given = build_record_v2(*campaign, prior_best=1.5)
+    assert given["prior_best_basis"] == "baseline given when the record was frozen"
+    assert verify_record(given) == ()
+    assert "Prior best: 1.5 a.u.: the baseline given when the record was frozen." in (
+        render_note(given)
+    )
+
+    for value in ("baseline given when the record was frozen", None):
+        relabelled = copy.deepcopy(record)
+        relabelled["prior_best_basis"] = value
+        relabelled["seal"]["sha256"] = record_seal(relabelled)
+        assert any("prior best" in p for p in verify_record(relabelled))
+
+
+@pytest.mark.parametrize(
+    ("rows", "measured"),
+    [
+        (_EI_ROWS, True),  # within-specimen uncertainties: estimated from measurements
+        (tuple(replace(row, values={**row.values, "signal_u": None}) for row in _EI_ROWS), False),
+    ],
+    ids=["estimated", "assumed"],
+)
+def test_the_noise_threshold_is_called_measured_only_when_it_was_estimated(
+    rows: tuple[Any, ...], measured: bool
+) -> None:
+    record = build_record_v2(*_campaign(rows=rows))
+    assert record["acquisition"]["noise_threshold_from_measured_noise"] is measured
+    expected_source = "lower_bound" if measured else "undetermined"
+    assert record["prediction_noise"]["source"] == expected_source
+    assert verify_record(record) == ()
 
 
 def test_a_minimized_objective_has_its_expected_improvement_recomputed_too() -> None:
@@ -820,13 +1711,22 @@ def test_the_note_says_what_a_reader_needs(tmp_path: Path, campaign: Campaign) -
     assert "| 0 | -2.6 | 2.6 | 0.4 | lower_bound_specimen | a |" in note  # signed and optimized
     assert "`lower_bound_specimen`:" in note
     assert "source: `lower_bound`" in note
-    # Every number carries its unit, and a lower-bound noise says the band is too narrow.
+    # Every number carries its unit, and a noise from within-specimen variation
+    # says the band may understate the scatter, without claiming it must.
     prediction = record["prediction_at_recommendation"]
     assert f"= **{prediction['predicted_mean']:.4g} a.u.**" in note
-    assert "Its noise is a lower bound here, so the band is too narrow" in note
+    assert "Its noise is estimated from within-specimen variation only" in note
+    assert "the band may understate how far a new specimen falls" in note
+    assert "too narrow" not in note
+    assert "lower bound here" not in note
     assert f"95% model interval: ± {prediction['ci95_model']:.4g} a.u.: the model's" in note
     assert "not predictive intervals" in note
-    assert f"Prior best: {record['prior_best']:.4g} a.u.: the best value among the fitted" in note
+    assert (
+        f"Prior best: {record['prior_best']:.4g} a.u.: the best observed among fitted conditions"
+    ) in note
+    assert "at the condition holding the best observed among fitted conditions" in note
+    selection = record["acquisition"]["selection"]
+    assert f"- How it was chosen ({selection['rule']}): {selection['explanation']}" in note
     assert "**late**: control bake_time_min: recorded 70 min, expected 60 ± 2" in note
     assert "`bake_time_min`: expected 60.0 ± 2 min; checked against the value recorded" in note
     assert "`glovebox`: expected 'yes'; declared, not checked" in note  # no unit of "1"
@@ -875,6 +1775,42 @@ def test_a_two_variable_record_round_trips(tmp_path: Path) -> None:
     assert "x" not in prediction
     assert list(prediction["condition"]) == ["x0", "x1"]
     assert list(prediction["condition"].values()) == list(result.recommendation.x)
+    # The several-variable optimizer has the same fallback and no policy to set;
+    # its candidates are not frozen, so the choice is stated without indices.
+    selection = record["acquisition"]["selection"]
+    assert selection["explore_policy"] == "max_std"
+    assert selection["explore_policy_source"] == "fixed_in_optimizer"
+    assert selection["acquisition"] == "ei"
+    assert selection["candidates"] == {
+        "kind": "candidates_then_refined",
+        "points": result.config.n_candidates,
+        "search": result.config.acquisition,
+    }
+    assert selection["selected_index"] is None
+    assert selection["expected_improvement_argmax_index"] is None
+    assert selection["largest_model_sd_index"] is None
+    exploring = selection["fallback"]["conditions_met"]
+    assert selection["rule"] == (
+        "largest_model_uncertainty" if exploring else "expected_improvement"
+    )
+    assert "the candidates are not frozen" in selection["explanation"]
+    # Refined off the candidates: the point is none of them, and the largest
+    # expected improvement among them is not said to be the point's own.
+    assert result.config.acquisition == "sobol+lbfgsb"
+    assert tuple(result.recommendation.x) not in {tuple(c) for c in result.candidates}
+    quantity = "the model's standard deviation" if exploring else "expected improvement"
+    assert (
+        "refined the leading candidates off the candidate points by L-BFGS-B, "
+        f"on {quantity}:" in selection["explanation"]
+    )
+    assert "has the largest expected improvement" not in selection["explanation"]
+    unrefined = copy.deepcopy(record)
+    unrefined["acquisition"]["maximised_by"] = "sobol"
+    said = experiments_prereg._selection(unrefined, "max_std", "fixed_in_optimizer")["explanation"]
+    assert "refined" not in said
+    assert experiments_prereg.wording_differences(record) == ()
+    with pytest.raises(ValueError, match="only for one design variable"):
+        build_record_v2(definition, observation_set, prepared, result, explore_policy="max_std")
     assert len(record["observations"]["x"][0]) == 2
     assert record["acquisition"]["maximised_by"] == result.config.acquisition
     assert "created_at" not in record["frozen_config"]
@@ -1075,10 +2011,14 @@ def test_a_specimen_outside_the_bounds_is_frozen_whole_and_is_not_fitted(tmp_pat
     assert record["exclusion_glossary"] == dict(EXCLUSION_GLOSSARY)
 
     note = path.with_suffix(".md").read_text(encoding="utf-8")
-    assert "## Specimens kept outside the design bounds (not in the model)" in note
+    assert (
+        "## Specimens kept outside the design bounds (evidence; not in the model, and not in "
+        "the best observed among fitted conditions)"
+    ) in note
     assert (
         "- **a**: additive_fraction = 0 is outside its bounds [0.2, 1]. signal = -2.6 a.u., "
-        "uncertainty 0.4 a.u. (specimen scope; a lower bound)"
+        "uncertainty 0.4 a.u. (specimen scope: within-specimen variation only, not a complete "
+        "uncertainty)"
     ) in note
     assert "Its only reason to be left out of the fit is that its design value" in note
     assert "## Left out of the model" in note
@@ -1111,7 +2051,7 @@ def test_when_nothing_is_rejected_the_note_says_so() -> None:
     record = build_record_v2(*_campaign(narrow, ROWS[:5]))
     assert [row["category"] for row in record["excluded"]] == ["outside_design_bounds"]
     note = render_note(record)
-    assert "## Specimens kept outside the design bounds (not in the model)" in note
+    assert "## Specimens kept outside the design bounds (evidence; not in the model" in note
     assert "- Nothing was rejected." in note
 
 

@@ -1,9 +1,10 @@
-"""Freeze a recommendation, with everything needed to check it later.
+"""Freeze a recommendation, with what is needed to check its consistency later.
 
 A recommendation is prospective only if the data, the declared experiment, the
 model and the prediction are committed **before** the recommended specimen
 exists. `freeze_v2` writes that commitment as one JSON record and a readable
-note beside it. `verify_record` recomputes what the record says about itself.
+note beside it. `verify_record` recomputes what the record's own numbers imply
+about each other; it does not fit the model again.
 
 What a version 2 record holds
 -----------------------------
@@ -15,6 +16,11 @@ What a version 2 record holds
   the uncertainty and a label saying what that uncertainty is. A digest covers
   all of them. `y_raw` is in the digest because under a magnitude objective
   flipping its sign leaves `y` unchanged, and nothing else would notice.
+* **What the uncertainties rest on** (`uncertainty_provenance`), derived from
+  the labels: how many conditions carry between-specimen variability estimated
+  from replicates, within-specimen variability only, a declared uncertainty or
+  an assumed one; what none of them quantifies; and, always, that the budget is
+  not claimed complete and that interval coverage is not established.
 * **Every specimen behind those rows**, and every row that was left out, with
   the reasons. Each carries its producer's own detail and a digest of it. This
   module stores that detail and never reads inside it. A row left out is
@@ -24,12 +30,24 @@ What a version 2 record holds
 * **The model and the prediction**: the optimizer's frozen configuration, the
   recommended condition, the predicted value and both intervals, what the
   acquisition saw, the stopping verdict and the reliability grade.
+* **Which rule chose the point** (`acquisition.selection`): expected
+  improvement, or the optimizer's fallback to the point of largest model
+  uncertainty, with the exploration policy and where it came from, whether
+  each of the fallback's conditions held, the candidate grid and its digest,
+  the chosen index beside the index each rule would pick, and a sentence
+  saying why. The rule is derived from the frozen numbers, and a freeze is
+  refused when the recommended point is not the one that rule picks.
+* **The prior best and what it is** (`prior_best_basis`): by default the best
+  observed among fitted conditions, so a specimen kept outside the design
+  bounds is never the baseline.
 * **The source revision**: the Git commit of the code that computed all of
   this, and whether the working tree was exactly that commit. With the software
-  version, the definition hash and the producer contract, it says what would
-  have to be checked out to compute the record again. A record frozen from a
-  tree that was not clean says so; it is not refused here, because whether that
-  is acceptable is the caller's decision.
+  version, the definition hash and the producer contract, it names the code a
+  recomputation would start from. It is not a demonstration that the record
+  can be computed again: the library versions are recorded, not pinned, and no
+  part of this package re-runs the fit to compare. A record frozen from a tree
+  that was not clean says so; it is not refused here, because whether that is
+  acceptable is the caller's decision.
 * **A seal** over the whole record.
 
 One-variable records are built by calling the version 1 writer and adding to
@@ -39,14 +57,34 @@ from the multi-variable result.
 
 What verification can and cannot show
 -------------------------------------
-`verify_record` recomputes the observation digest, the definition hash, `y`
-from `y_raw` and the objective the inline definition declares, each
-condition's value and design point from its specimens, each producer-detail
-digest, and the seal. For a one-variable record it also takes the prediction,
-both intervals, the expected improvement at every grid point, the choice of
-the recommended point and the stopping verdict back from the frozen model, and
-it checks that the source revision is stated and coherent. An edit to any
-part of the file changes at least one of them.
+`verify_record` checks internal consistency. It recomputes the observation
+digest, the definition hash, `y` from `y_raw` and the objective the inline
+definition declares, each condition's value and design point from its
+specimens, each condition's uncertainty label and sigma from the uncertainty
+and scope its specimens state, the uncertainty provenance from those labels,
+each producer-detail digest, and the seal. For a one-variable record it also
+checks the prediction, both intervals, the choice of the recommended point
+and the rule that chose it, and the stopping verdict against the frozen grid
+the record itself holds, and recomputes the expected improvement at every
+grid point where the band is plain (an untransformed fit with no declared
+bound; a log or clipped band does not give the model's own numbers back, and
+only the seal holds the expected improvement there). It also checks that the
+source revision is stated and coherent. An edit to any part of the file
+changes at least one of them, or the seal.
+
+What it does not do: it does not fit the model again. The grid's mean and
+bands, the fitted length-scale, the stopping probability, the leave-one-out
+counts, the reliability note, the optimizer's messages and the environment
+versions are checked for coherence with each other where a rule ties them,
+and are otherwise held only by the seal, as written. Nothing here reads the
+recordings a producer reduced. A record that verifies is consistent with
+itself; it is not a reproduction of the computation, and nothing in it is a
+validation of the prediction, which needs the outcome measured and scored.
+
+Words are compared separately, by `wording_differences`: the explanations a
+freeze writes are fixed by the code, so a difference means an edit or another
+revision of the code, and only a caller that knows which revision is running
+can say which.
 
 It cannot, by itself, show that a file was not rewritten wholesale: whoever
 rewrites a record can reseal it. That needs the seal to exist somewhere the
@@ -82,12 +120,14 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import numpy as np
 
 from latos import __version__
 from latos.experiments._canonical import canonical_json, sha256_hex
+from latos.experiments.build import _blank, _control_violation
 from latos.experiments.definition import ExperimentDefinition, Goal, VariableRole
 from latos.experiments.identity import (
     CANONICAL_FORM,
@@ -103,16 +143,29 @@ from latos.experiments.observations import (
     ObservationSet,
 )
 from latos.experiments.prepare import (
+    PREDICTION_NOISE_DECLARED,
     PREDICTION_NOISE_GLOSSARY,
     PREDICTION_NOISE_LOWER_BOUND,
     PREDICTION_NOISE_NOT_PASSED,
+    PREDICTION_NOISE_PARTLY_ASSUMED,
     PREDICTION_NOISE_POOLED,
     PREDICTION_NOISE_UNDETERMINED,
     PreparedOptimization,
+    noise_source_from_sigma,
     project,
 )
 from latos.experiments.records import producer_detail_sha256
-from latos.experiments.reduce import MIN_POOLED_DF, SIGMA_GLOSSARY, SIGMA_LOWER_BOUND
+from latos.experiments.reduce import (
+    _MIN_REPLICATES,
+    MIN_POOLED_DF,
+    SIGMA_DECLARED,
+    SIGMA_EMPIRICAL,
+    SIGMA_GLOSSARY,
+    SIGMA_LOWER_BOUND,
+    SIGMA_POOLED,
+    SIGMA_UNDETERMINED,
+    _pool,
+)
 from latos.experiments.revision import (
     _MAX_LISTED_PATHS as _LISTED,
 )
@@ -132,17 +185,28 @@ from latos.optimization.acquisitions import expected_improvement
 from latos.optimization.engine import (
     _CI95,
     _DEFAULT_EXPLORE_POLICY,
+    _LOO_FORCE_EXPLORATORY,
     _RELIABILITY_CALIBRATED_N,
     _RELIABILITY_INDICATIVE_N,
     OptimizationResult,
     OptimizationResultND,
+    _stopping_verdict,
 )
 
 __all__ = [
     "OBSERVATION_FORM",
     "PARTIAL_SUFFIX",
+    "POLICY_FIXED",
+    "POLICY_OPTIMIZER_DEFAULT",
+    "POLICY_STATED_AT_FREEZE",
+    "PRIOR_BEST_FITTED",
+    "PRIOR_BEST_GIVEN",
     "SCHEMA_VERSION",
     "SEAL_FORM",
+    "SELECTION_ACQUISITION_MAXIMUM",
+    "SELECTION_EXPECTED_IMPROVEMENT",
+    "SELECTION_LARGEST_UNCERTAINTY",
+    "VERDICT_BEST_SAMPLE",
     "RecordError",
     "VersionCollision",
     "build_record_v2",
@@ -153,6 +217,7 @@ __all__ = [
     "record_seal",
     "render_note",
     "verify_record",
+    "wording_differences",
 ]
 
 SCHEMA_VERSION = 2
@@ -198,6 +263,40 @@ _ACQUISITION_EI = "ei"
 _EXPLORATORY = "exploratory"
 _FALLBACK_LARGEST_SD = "max_std"
 
+# Which rule chose the recommended point, as `acquisition.selection.rule` says.
+SELECTION_EXPECTED_IMPROVEMENT = "expected_improvement"
+SELECTION_LARGEST_UNCERTAINTY = "largest_model_uncertainty"
+SELECTION_ACQUISITION_MAXIMUM = "acquisition_maximum"
+# The optimizer's exploration policy that turns its fallback off.
+_NO_FALLBACK = "ei"
+# The policies whose choice a record can show from its own frozen numbers.
+_STATABLE_POLICIES = (_FALLBACK_LARGEST_SD, _NO_FALLBACK)
+# Where the policy a record states came from.
+POLICY_OPTIMIZER_DEFAULT = "optimizer_default"
+POLICY_STATED_AT_FREEZE = "stated_at_freeze"
+POLICY_FIXED = "fixed_in_optimizer"
+# The candidate points the rule chose among.
+_CANDIDATES_GRID = "evenly_spaced_grid"
+_CANDIDATES_ND = "candidates_then_refined"
+# How the several-variable optimizer reports a point refined off its candidates.
+_SEARCH_REFINED = "sobol+lbfgsb"
+_SELECTION_KEYS = frozenset(
+    {
+        "rule",
+        "acquisition",
+        "explore_policy",
+        "explore_policy_source",
+        "fallback",
+        "candidates",
+        "selected_index",
+        "expected_improvement_argmax_index",
+        "largest_model_sd_index",
+        "explanation",
+    }
+)
+PRIOR_BEST_FITTED = "best observed among fitted conditions"
+PRIOR_BEST_GIVEN = "baseline given when the record was frozen"
+
 # How the optimizer's verdict sentence opens for each action.
 _VERDICT_OPENINGS = {
     "stop": "Stop.",
@@ -211,9 +310,22 @@ _VERDICT_OPENINGS = {
 _EI_REL = 1e-6
 _EI_ABS = 1e-9
 
-# Prediction noise taken from measurements: a pooled spread, or the median of
-# within-specimen uncertainties (a lower bound, but measured).
+# Prediction noise estimated from measured observations: a pooled spread, or
+# the median of within-specimen uncertainties all estimated from measurements
+# (though only a part of the total uncertainty). A noise assumed in whole or in
+# part is neither.
 _MEASURED_NOISE_SOURCES = frozenset({PREDICTION_NOISE_POOLED, PREDICTION_NOISE_LOWER_BOUND})
+
+# The fit spaces the optimizer knows, and its rule for a log fit given a value
+# that is not positive: it fits the values as they are.
+_FIT_IDENTITY = "identity"
+_FIT_LOG = "log"
+
+# What "the best sample so far" in the optimizer's verdict sentence is.
+VERDICT_BEST_SAMPLE = (
+    "In this sentence, the best sample so far is the best observed among fitted conditions. "
+    "Specimens kept outside the search bounds are evidence and are not among them."
+)
 
 
 class RecordError(ValueError):
@@ -419,18 +531,23 @@ def _nd_base_record(result: OptimizationResultND, prior_best: float) -> dict[str
             "best_measured": result.best_y,
             "n_unreliable_observations": result.n_unreliable,
         },
-        "validation_criteria": {
-            "calibration": "measured value falls within predictive_interval_95",
-            "improvement": "measured value exceeds prior_best",
-            "stopping_claim": (
-                "the best value found over the campaign improves on the frozen "
-                "best_measured by no more than epsilon"
-            ),
-        },
+        "validation_criteria": dict(_BASE_CRITERIA),
     }
     if result.reliability is not None:
         record["reliability"] = asdict(result.reliability)
     return record
+
+
+# The criteria the version 1 writer states, in its words; a multi-variable
+# record states the same.
+_BASE_CRITERIA = {
+    "calibration": "measured value falls within predictive_interval_95",
+    "improvement": "measured value exceeds prior_best",
+    "stopping_claim": (
+        "the best value found over the campaign improves on the frozen best_measured by no "
+        "more than epsilon"
+    ),
+}
 
 
 def _check_same_data(
@@ -460,6 +577,7 @@ def build_record_v2(
     *,
     prior_best: float | None = None,
     source: SourceRevision | None = None,
+    explore_policy: str | None = None,
 ) -> dict[str, Any]:
     """Assemble a version 2 record as plain JSON data, sealed.
 
@@ -470,14 +588,25 @@ def build_record_v2(
         result: What `run_optimization` returned for `prepared`.
         prior_best: The baseline an outcome must beat, in the optimized
             quantity. Defaults to the optimizer's own `best_y`: the best value
-            among the fitted conditions, which leaves out specimens kept
-            outside the search bounds.
+            observed among the fitted conditions, which leaves out specimens
+            kept outside the search bounds.
         source: The revision of the source that computed `result`. Asked of
             Git now when not given; give it when it was already read, so the
             record states the revision that was checked and not a later one.
+        explore_policy: The one-variable optimizer's exploration policy the
+            result was computed under, when the caller set one. None means it
+            was left at the optimizer's default, as `run_optimization` leaves
+            it. Only "max_std" and "ei" can be stated: the choice the others
+            make cannot be shown from the frozen numbers. The result does not
+            say which policy it was computed under, so this is the caller's
+            statement. A freeze is refused when the frozen numbers contradict
+            it; where two policies would pick the same point, they cannot.
 
     Raises:
-        ValueError: If the four arguments do not belong together.
+        ValueError: If the four arguments do not belong together, the
+            optimizer was not given the prepared prediction noise, or the
+            recommended point is not the one the stated selection rule picks
+            from the frozen numbers.
     """
     if observation_set.definition_hash != definition_sha256(definition):
         raise ValueError("The observation set was built under a different definition.")
@@ -485,9 +614,17 @@ def build_record_v2(
     if prepared.y_raw.tolist() != reduced_raw:
         raise ValueError("The prepared arrays were not made from this observation set.")
     _check_same_data(prepared, result)
+    one_variable = isinstance(result, OptimizationResult)
+    if explore_policy is not None and (
+        not one_variable or explore_policy not in _STATABLE_POLICIES
+    ):
+        raise ValueError(
+            "A record can state the exploration policy only for one design variable, and only "
+            f"when it is one of {_STATABLE_POLICIES}; got {explore_policy!r}. The choice any "
+            "other policy makes cannot be shown from the frozen numbers."
+        )
 
     best = result.best_y if prior_best is None else prior_best
-    one_variable = isinstance(result, OptimizationResult)
     if isinstance(result, OptimizationResult):
         record = _v1.build_record(result, prior_best=best)
     else:
@@ -530,6 +667,7 @@ def build_record_v2(
         "meaning": PREDICTION_NOISE_GLOSSARY[prepared.prediction_noise_source],
         "specimens_per_condition": definition.specimens_per_condition,
     }
+    record["uncertainty_provenance"] = _uncertainty_provenance(record["observations"])
     record["prediction_at_recommendation"]["condition"] = dict(
         zip(prepared.input_names, point, strict=True)
     )
@@ -540,23 +678,81 @@ def build_record_v2(
     if isinstance(result, OptimizationResultND):
         messages += result.axis_warnings
     record["messages"] = messages
-    # Rules for scoring the outcome later. Nothing scores a version 2 record
-    # yet, and the criteria say so rather than describe a check as made.
-    record["validation_criteria"]["unit_check"] = (
-        f"when an outcome is scored, the signed {response.name} in {response.unit} is "
-        "projected as the frozen objective declares before it is compared with the "
-        "prediction; no code applies this rule yet"
-    )
-    record["validation_criteria"]["condition_check"] = (
-        "when an outcome is scored, the specimen made counts as the recommended condition "
-        "only when every design variable is within its declared precision of the recommended "
-        "value, or equal to it where no precision is declared; no code applies this rule yet"
+    record["validation_criteria"].update(_scoring_rules(response.name, response.unit))
+
+    record["prior_best_basis"] = (
+        PRIOR_BEST_FITTED if prior_best is None or prior_best == result.best_y else PRIOR_BEST_GIVEN
     )
 
     # Through JSON once, so what is sealed is exactly what will be read back.
     plain: dict[str, Any] = json.loads(json.dumps(record, ensure_ascii=False))
+    if _verify_applied_noise(plain):
+        # As `run_optimization(noise_level="engine_median")` gives when the
+        # optimizer's own median differs: the record could not say what noise
+        # the model was given.
+        raise ValueError(
+            "The optimizer was not given the prepared prediction noise, so the record cannot "
+            f"state the noise its model used (prepared {prepared.prediction_noise!r}, applied "
+            f"{config.noise_std!r}). Run it with the declared noise."
+        )
+    _add_selection(plain, explore_policy, one_variable=one_variable)
     plain["seal"] = {"canonical_form": SEAL_FORM, "sha256": record_seal(plain)}
     return plain
+
+
+def _add_selection(
+    plain: dict[str, Any], explore_policy: str | None, *, one_variable: bool
+) -> None:
+    """Add which rule chose the point, or refuse the record.
+
+    The rule is derived from the frozen numbers exactly as `verify_record`
+    derives it again, and the record is refused if the point is not the one
+    that rule picks: a record does not state a choice it cannot show.
+    """
+    if explore_policy is None:
+        policy_source = POLICY_OPTIMIZER_DEFAULT if one_variable else POLICY_FIXED
+        policy = _DEFAULT_EXPLORE_POLICY if one_variable else _FALLBACK_LARGEST_SD
+    else:
+        policy_source, policy = POLICY_STATED_AT_FREEZE, explore_policy
+    selection = _selection(plain, policy, policy_source)
+    plain["acquisition"]["selection"] = selection
+    wrong = _choice_problems(plain, selection)
+    if one_variable and selection["selected_index"] is None:
+        wrong.append("the recommended x is not a point of the optimizer's grid")
+    if wrong:
+        raise ValueError(
+            "The recommended point is not the one the selection rule picks from the frozen "
+            f"numbers ({'; '.join(wrong)}), so the record cannot say which rule chose it."
+        )
+
+
+def _scoring_rules(response: str, unit: str) -> dict[str, str]:
+    """Rules for scoring the outcome later, in the words a freeze writes.
+
+    Nothing scores a version 2 record yet, and the criteria say so rather
+    than describe a check as made. The three criteria the version 1 writer
+    states keep its words; `status` says of them, and of these, that they
+    are stated in advance and not yet applied.
+    """
+    return {
+        "status": (
+            "stated before any outcome exists, to be applied when one is measured; no outcome "
+            "of this recommendation has been scored, and no code applies calibration, "
+            "improvement, stopping_claim, unit_check or condition_check to a version 2 record "
+            "yet"
+        ),
+        "unit_check": (
+            f"when an outcome is scored, the signed {response} in {unit} is projected as the "
+            "frozen objective declares before it is compared with the prediction; no code "
+            "applies this rule yet"
+        ),
+        "condition_check": (
+            "when an outcome is scored, the specimen made counts as the recommended condition "
+            "only when every design variable is within its declared precision of the "
+            "recommended value, or equal to it where no precision is declared; no code applies "
+            "this rule yet"
+        ),
+    }
 
 
 def _acquisition_block(
@@ -589,6 +785,432 @@ def _acquisition_block(
         block["maximised_by"] = result.config.acquisition
         block["n_candidates"] = result.config.n_candidates
     return block
+
+
+# ─── What the uncertainties rest on ─────────────────────────────────
+# The four kinds of uncertainty a condition's sigma can be, by its label.
+PROVENANCE_BETWEEN = "between_specimen_estimated"
+PROVENANCE_WITHIN = "within_specimen_only"
+PROVENANCE_DECLARED = "declared"
+PROVENANCE_ASSUMED = "assumed"
+_PROVENANCE_OF = {
+    SIGMA_EMPIRICAL: PROVENANCE_BETWEEN,
+    SIGMA_POOLED: PROVENANCE_BETWEEN,
+    SIGMA_LOWER_BOUND: PROVENANCE_WITHIN,
+    SIGMA_DECLARED: PROVENANCE_DECLARED,
+    SIGMA_UNDETERMINED: PROVENANCE_ASSUMED,
+}
+PROVENANCE_GLOSSARY: Mapping[str, str] = {
+    PROVENANCE_BETWEEN: (
+        "Between-specimen variability, estimated here, independently, as the spread between "
+        "specimens replicated at a condition, pooled over the replicated conditions. At a "
+        "condition made once, that spread was measured at other conditions and is assumed to "
+        "apply."
+    ),
+    PROVENANCE_WITHIN: (
+        "Within-specimen variability only, estimated from repeated or fitted measurements on "
+        "the one specimen at the condition; variability between specimens is not in it."
+    ),
+    PROVENANCE_DECLARED: (
+        "Declared by the producer, not estimated here; what it covers rests on the "
+        "producer's statement."
+    ),
+    PROVENANCE_ASSUMED: (
+        "Assumed: the condition had no uncertainty, and a substitute was given so that the "
+        "model could be fitted."
+    ),
+}
+# What no record of this layer quantifies, whatever its labels.
+_NOT_QUANTIFIED_ALWAYS = (
+    "errors shared by every specimen, which no spread between specimens can show, such as a "
+    "common calibration error",
+    "variation between sessions, mountings, operators or instruments beyond what the "
+    "observations themselves vary over",
+)
+
+
+def _uncertainty_provenance(observations: Mapping[str, Any]) -> dict[str, Any]:
+    """What each condition's uncertainty rests on, and what none of them covers.
+
+    Derived from the sigma labels and the pooled spread alone, so that
+    `verify_record` can derive it again. It claims neither a complete
+    uncertainty budget nor an established interval coverage.
+    """
+    kinds = [_PROVENANCE_OF[label] for label in observations["sigma_sources"]]
+    between = observations["pooled_sd"] is not None
+    replicated = any(len(ids) >= _MIN_REPLICATES for ids in observations["sample_ids"])
+    not_quantified: list[str] = []
+    if not between and replicated:
+        # The reducer discards a spread of exactly zero: identical replicates.
+        not_quantified.append(
+            "variation between specimens made at one condition: the replicates gave identical "
+            "values, so the spread was discarded and not estimated"
+        )
+    elif not between:
+        not_quantified.append(
+            "variation between specimens made at one condition: no condition was made more "
+            "than once, so it was not estimated"
+        )
+    elif PROVENANCE_BETWEEN in kinds:
+        not_quantified.append(
+            "whether the pooled spread between specimens applies equally at every condition"
+        )
+    if PROVENANCE_DECLARED in kinds:
+        not_quantified.append("what each declared uncertainty covers")
+    if PROVENANCE_ASSUMED in kinds:
+        not_quantified.append("the uncertainty of each condition given a substitute")
+    not_quantified += _NOT_QUANTIFIED_ALWAYS
+    return {
+        "by_condition": kinds,
+        "counts": {kind: kinds.count(kind) for kind in PROVENANCE_GLOSSARY},
+        "between_specimen_variability_estimated": between,
+        "pooled_df": observations.get("pooled_df") if between else None,
+        "not_quantified": not_quantified,
+        "complete_budget": False,
+        "interval_coverage": "not established",
+        "glossary": {kind: PROVENANCE_GLOSSARY[kind] for kind in sorted(set(kinds))},
+    }
+
+
+# ─── Which rule chose the recommendation ────────────────────────────
+def _selection(record: Mapping[str, Any], policy: str, policy_source: str) -> dict[str, Any]:
+    """Which rule chose the recommended point, as the record's own numbers give it.
+
+    The one-variable optimizer recommends the point of largest expected
+    improvement, or of its acquisition if another was asked for, unless its
+    fallback fires: the largest expected improvement is below the noise
+    threshold, the reliability grade is exploratory, and the exploration
+    policy is not "ei". Then it takes the point its policy names, which for
+    "max_std" is the point of largest model standard deviation. The record
+    freezes every number this turns on, so the rule is derived from them here,
+    at freeze time and again at verification, and never taken on trust.
+
+    The multi-variable optimizer has the same fallback with no policy to set;
+    its candidate points are not frozen, so no index can be given for it.
+    """
+    acquisition = record["acquisition"]
+    reliability = record.get("reliability")
+    level = reliability.get("level") if isinstance(reliability, Mapping) else None
+    below = bool(acquisition["max_expected_improvement"] < acquisition["noise_threshold"])
+    exploratory = level == _EXPLORATORY
+    enabled = policy != _NO_FALLBACK
+    met = below and exploratory
+    one_variable = record.get("backend") == BACKEND_1D
+    # The several-variable optimizer always maximizes expected improvement;
+    # what it records as its "acquisition" is how it searched for the maximum.
+    function = acquisition.get("function") if one_variable else _ACQUISITION_EI
+    if met and enabled:
+        rule = SELECTION_LARGEST_UNCERTAINTY
+    elif function == _ACQUISITION_EI:
+        rule = SELECTION_EXPECTED_IMPROVEMENT
+    else:
+        rule = SELECTION_ACQUISITION_MAXIMUM
+
+    selected = argmax_ei = largest_sd = None
+    if one_variable:
+        grid = acquisition["grid"]
+        xs = grid["x"]
+        low, high = record["objective"]["search_bounds"]
+        candidates: dict[str, Any] = {
+            "kind": _CANDIDATES_GRID,
+            "points": len(xs),
+            "lower": low,
+            "upper": high,
+            "sha256": sha256_hex(canonical_json(xs)),
+        }
+        x = record["prediction_at_recommendation"]["x"]
+        selected = xs.index(x) if x in xs else None
+        ei = grid["expected_improvement"]
+        # The first of equal maxima, as the optimizer's argmax takes it.
+        if ei and all(math.isfinite(value) for value in ei):
+            argmax_ei = ei.index(max(ei))
+        largest_sd = _largest_sd_index(_band_sd(record), selected)
+    else:
+        candidates = {
+            "kind": _CANDIDATES_ND,
+            "points": acquisition.get("n_candidates"),
+            "search": acquisition.get("maximised_by"),
+        }
+
+    block: dict[str, Any] = {
+        "rule": rule,
+        "acquisition": function,
+        "explore_policy": policy,
+        "explore_policy_source": policy_source,
+        "fallback": {
+            "enabled": enabled,
+            "max_expected_improvement_below_noise_threshold": below,
+            "reliability_exploratory": exploratory,
+            "conditions_met": met,
+        },
+        "candidates": candidates,
+        "selected_index": selected,
+        "expected_improvement_argmax_index": argmax_ei,
+        "largest_model_sd_index": largest_sd,
+    }
+    block["explanation"] = _selection_explanation(record, block, level)
+    return block
+
+
+def _selection_explanation(
+    record: Mapping[str, Any], block: Mapping[str, Any], level: str | None
+) -> str:
+    """Why the recommended point was chosen, in one paragraph, from the block's own fields."""
+    acquisition = record["acquisition"]
+    projection = record["projection"]
+    # Expected improvement and the noise threshold are in the fit space's units.
+    unit = "(in fit-space units)" if projection["is_transformed"] else projection["response_unit"]
+    best_ei = f"{acquisition['max_expected_improvement']:.4g} {unit}"
+    threshold = f"{acquisition['noise_threshold']:.4g} {unit}"
+    chosen = ", ".join(
+        f"{name} = {value:.6g}"
+        for name, value in record["prediction_at_recommendation"]["condition"].items()
+    )
+    by_ei: str | None = None
+    # A point the several-variable optimizer refined off its candidates is
+    # none of them, and its own expected improvement or spread is not frozen.
+    refined = ""
+    if record.get("backend") == BACKEND_1D:
+        over = f"the {block['candidates']['points']}-point grid"
+        index = block["expected_improvement_argmax_index"]
+        if index is not None:
+            name = record["observations"]["input_names"][0]
+            by_ei = f"{name} = {acquisition['grid']['x'][index]:.6g}"
+    else:
+        candidates = block["candidates"]
+        over = (
+            f"{candidates['points']} candidate points (search: {candidates['search']}; the "
+            "candidates are not frozen)"
+        )
+        if candidates["search"] == _SEARCH_REFINED:
+            quantity = (
+                "the model's standard deviation"
+                if block["rule"] == SELECTION_LARGEST_UNCERTAINTY
+                else "expected improvement"
+            )
+            refined = (
+                " The optimizer then refined the leading candidates off the candidate points by "
+                f"L-BFGS-B, on {quantity}: the point above is the best of those refinements, "
+                "and its value there, larger than at the best candidate, is not frozen."
+            )
+
+    if block["rule"] == SELECTION_LARGEST_UNCERTAINTY:
+        default = (
+            ", the optimizer's default"
+            if block["explore_policy_source"] == POLICY_OPTIMIZER_DEFAULT
+            else ""
+        )
+        where = f" at {by_ei}" if by_ei else ""
+        text = (
+            f"Chosen by the uncertainty fallback: the largest expected improvement over {over}, "
+            f"{best_ei}{where}, is below the noise threshold of {threshold}, and the reliability "
+            "grade is exploratory, so the optimizer takes the point where the model is least "
+            f"certain (exploration policy {block['explore_policy']}{default}): {chosen}."
+        )
+        if by_ei:
+            text += f" Expected improvement alone would have chosen {by_ei}."
+        if record.get("backend") == BACKEND_1D:
+            text += _band_caveat(record, block)
+        return text + refined
+
+    if block["rule"] == SELECTION_EXPECTED_IMPROVEMENT and refined:
+        text = (
+            f"Chosen by expected improvement: the largest expected improvement among {over} is "
+            f"{best_ei}, and the recommended point is {chosen}.{refined}"
+        )
+    elif block["rule"] == SELECTION_EXPECTED_IMPROVEMENT:
+        text = _sentence(
+            f"Chosen by expected improvement: {chosen} has the largest expected improvement over "
+            f"{over}, {best_ei}"
+        )
+    else:
+        text = _other_acquisition(block, over, chosen)
+    why = _why_no_fallback(block, threshold, level)
+    return _sentence(f"{text} The uncertainty fallback did not apply: {why}")
+
+
+def _band_caveat(record: Mapping[str, Any], block: Mapping[str, Any]) -> str:
+    """What the frozen band cannot show about the fallback's choice, if anything."""
+    sds = _band_sd(record)
+    if block["largest_model_sd_index"] is None:
+        if sds and not all(math.isfinite(sd) for sd in sds):
+            return (
+                " The frozen model band is not one a model gives (an end is not finite, or a "
+                "log band has an end below zero or above the other), so this record cannot show "
+                "that this point is the least certain one."
+            )
+        return (
+            " The model's uncertainty at each point cannot be read back from the frozen band "
+            "(it is clipped to the response's valid range, or an end of it is not positive "
+            "on a log fit), so this record cannot show that this point is the least certain "
+            "one."
+        )
+    tied = len(_near_largest(sds)) if sds else 0
+    if tied > 1:
+        return (
+            f" The frozen band gives model uncertainties within {_DERIVED_REL:g} of the "
+            f"largest, relatively, at {tied} grid points, so this record cannot show which of "
+            "them is the least certain one."
+        )
+    return ""
+
+
+def _other_acquisition(block: Mapping[str, Any], over: str, chosen: str) -> str:
+    """The choice of an acquisition other than expected improvement, whose values are not frozen."""
+    text = (
+        f"Chosen as the maximum of the {block['acquisition']!r} acquisition over {over}: "
+        f"{chosen}. Its values are not frozen, so this record cannot show that choice."
+    )
+    if block["selected_index"] is not None and (
+        block["selected_index"] == block["expected_improvement_argmax_index"]
+    ):
+        text += (
+            " The point is also the one of largest expected improvement, which the optimizer "
+            "takes when the acquisition is the same everywhere, so this record cannot tell "
+            "which of the two chose it."
+        )
+    return text
+
+
+def _why_no_fallback(block: Mapping[str, Any], threshold: str, level: str | None) -> str:
+    """Which of the fallback's conditions did not hold, or that the policy turned it off."""
+    fallback = block["fallback"]
+    if not fallback["max_expected_improvement_below_noise_threshold"]:
+        return f"the largest expected improvement is not below the noise threshold of {threshold}"
+    if not fallback["reliability_exploratory"]:
+        grade = (
+            "no reliability grade was assessed"
+            if level is None
+            else f"the reliability grade is {level}, not exploratory"
+        )
+        return (
+            f"the largest expected improvement is below the noise threshold of {threshold}, "
+            f"but {grade}"
+        )
+    return (
+        f"the largest expected improvement is below the noise threshold of {threshold} and "
+        "the reliability grade is exploratory, but the exploration policy "
+        f"{block['explore_policy']!r} turns the fallback off"
+    )
+
+
+def _sentence(text: str) -> str:
+    """End `text` with one full stop, also when it ends in a unit such as "a.u."."""
+    return text if text.endswith(".") else f"{text}."
+
+
+def _band_sd(record: Mapping[str, Any]) -> list[float] | None:
+    """The model's standard deviation at each grid point, as the frozen band gives it back.
+
+    The band is the fit-space mean +/- 1.96 standard deviations, carried back
+    to the response's units. Unclipped, an untransformed band gives the
+    standard deviation back from its width, and a log band from the log of
+    the ratio of its ends; either may differ from the model's own number in
+    the last bits. A band with an end clipped to the response's valid range
+    does not give it back (None), nor does a log band with an end that
+    underflowed to zero. A band no model gives, with an end that is not
+    finite or, on a log fit, an end below zero or above the other, gives NaN.
+    A band edited to touch a declared bound is taken for a clipped one; only
+    the seal holds that.
+    """
+    projection = record["projection"]
+    grid = record["acquisition"]["grid"]
+    pairs = list(zip(grid["lower_95"], grid["upper_95"], strict=True))
+    if not all(math.isfinite(lo) and math.isfinite(hi) for lo, hi in pairs):
+        return [math.nan] * len(pairs)
+    bounds = {bound for bound in (projection["y_min"], projection["y_max"]) if bound is not None}
+    if any(lo in bounds or hi in bounds for lo, hi in pairs):
+        return None
+    if not projection["is_transformed"]:
+        return [(hi - lo) / (2.0 * _CI95) for lo, hi in pairs]
+    if not all(0.0 <= lo <= hi for lo, hi in pairs):
+        return [math.nan] * len(pairs)
+    if not all(lo > 0 for lo, _ in pairs):
+        return None
+    return [(math.log(hi) - math.log(lo)) / (2.0 * _CI95) for lo, hi in pairs]
+
+
+def _near_largest(sds: Sequence[float]) -> list[int]:
+    """The points whose standard deviation is within the derived tolerance of the largest.
+
+    The window is `_DERIVED_REL` of the largest plus `_DERIVED_ABS`: wider than
+    the error of reading a standard deviation back from the frozen band, so a
+    point the optimizer chose by its own unrounded numbers is never refused,
+    and narrow enough that a point with a visibly smaller one is.
+    """
+    widest = max(sds)
+    return [i for i, sd in enumerate(sds) if sd >= widest - (_DERIVED_REL * widest + _DERIVED_ABS)]
+
+
+def _largest_sd_index(sds: Sequence[float] | None, selected: int | None) -> int | None:
+    """The point of largest model standard deviation, or None when the band does not show it.
+
+    Points whose recovered standard deviations are within the tolerance of
+    `_near_largest` are not told apart. Among them the recommended point is
+    named when it is one, since the optimizer chose it by its own unrounded
+    numbers; otherwise the first, as the optimizer's argmax takes the first of
+    equal maxima.
+    """
+    if not sds or not all(math.isfinite(sd) for sd in sds):
+        return None
+    near = _near_largest(sds)
+    return selected if selected in near else near[0]
+
+
+def _choice_problems(record: Mapping[str, Any], block: Mapping[str, Any]) -> list[str]:
+    """Whether the recommended grid point is the one the block's rule picks.
+
+    The fallback's choice is checked for "max_std" wherever the frozen band
+    gives the model's standard deviation back (`_band_sd`): not on a band
+    clipped to the response's valid range, where the explanation says so. A
+    choice among another acquisition's values cannot be checked, because they
+    are not frozen. Numbers that are not finite pick no point, and are refused.
+    """
+    index = block["selected_index"]
+    if record.get("backend") != BACKEND_1D or index is None:
+        return []
+    if block["rule"] == SELECTION_EXPECTED_IMPROVEMENT:
+        return _ei_choice_problems(record, block, index)
+    if (
+        block["rule"] == SELECTION_LARGEST_UNCERTAINTY
+        and block["explore_policy"] == _FALLBACK_LARGEST_SD
+    ):
+        return _sd_choice_problems(record, index)
+    return []
+
+
+def _ei_choice_problems(
+    record: Mapping[str, Any], block: Mapping[str, Any], index: int
+) -> list[str]:
+    """Whether the recommended grid point is the one of largest frozen expected improvement."""
+    ei = record["acquisition"]["grid"]["expected_improvement"]
+    if not all(math.isfinite(v) for v in ei):
+        return ["the frozen expected improvement is not finite, so it picks no point"]
+    if index == block["expected_improvement_argmax_index"]:
+        return []
+    return [
+        "the recommended x is not the point of largest expected improvement, which the "
+        "frozen numbers call for"
+    ]
+
+
+def _sd_choice_problems(record: Mapping[str, Any], index: int) -> list[str]:
+    """Whether the recommended point is one of largest model uncertainty, as the band shows it."""
+    sds = _band_sd(record)
+    if sds is None:
+        return []
+    if not all(math.isfinite(sd) for sd in sds):
+        return [
+            "the frozen model band is not one a model gives (an end is not finite, or a log band "
+            "has an end below zero or above the other), so it picks no point of largest "
+            "uncertainty"
+        ]
+    if index in _near_largest(sds):
+        return []
+    return [
+        "the recommended x is not the point of largest model uncertainty, which the frozen "
+        "numbers call for"
+    ]
 
 
 # ─── Writing ────────────────────────────────────────────────────────
@@ -758,6 +1380,7 @@ def freeze_v2(
     *,
     prior_best: float | None = None,
     source: SourceRevision | None = None,
+    explore_policy: str | None = None,
 ) -> Path:
     """Freeze a recommendation into `directory` and return the JSON path.
 
@@ -769,9 +1392,11 @@ def freeze_v2(
     The record states the source revision that computed it, clean or not. This
     function does not refuse a tree that is not clean: a caller for whom that
     matters reads the revision first, decides, and passes it as `source`.
+    `prior_best`, `source` and `explore_policy` are as for `build_record_v2`.
 
     Raises:
-        ValueError: If the arguments do not belong together.
+        ValueError: If the arguments do not belong together, or the
+            recommended point is not the one the selection rule picks.
         VersionCollision: If this experiment name and version were frozen in
             `directory` before under a different definition.
         FileExistsError: Only if every candidate file name was taken.
@@ -781,7 +1406,13 @@ def freeze_v2(
     """
     directory = Path(directory)
     record = build_record_v2(
-        definition, observation_set, prepared, result, prior_best=prior_best, source=source
+        definition,
+        observation_set,
+        prepared,
+        result,
+        prior_best=prior_best,
+        source=source,
+        explore_policy=explore_policy,
     )
     _check_collision(directory, record)
     stamp = result.config.created_at.strftime("%Y%m%dT%H%M%SZ")
@@ -909,6 +1540,7 @@ def _verify_specimens(record: Mapping[str, Any]) -> list[str]:
             label = row.get("sample_id") or row.get("record_id")
             problems.append(f"the rejected row {label!r} gives no reason")
     problems += _verify_condition_inputs(record)
+    problems += _verify_controls(record)
 
     response = record["projection"]["response"]
     values = {row["sample_id"]: row["responses"][response]["value"] for row in record["specimens"]}
@@ -928,6 +1560,32 @@ def _verify_specimens(record: Mapping[str, Any]) -> list[str]:
     prediction = record["prediction_at_recommendation"]
     if "x" in prediction and list(prediction["condition"].values()) != [prediction["x"]]:
         problems.append("the recommended condition differs from the recommended x")
+    return problems
+
+
+def _verify_controls(record: Mapping[str, Any]) -> list[str]:
+    """Whether every fitted specimen's recorded controls are ones the inline definition allows.
+
+    A specimen with a control out of tolerance is rejected when the rows are
+    built, so none can be in the fit; a control left blank is kept, and is not
+    judged here either.
+    """
+    definition = definition_from_dict(record["experiment"]["definition"])
+    controls = [
+        variable
+        for variable in definition.variables
+        if variable.role is VariableRole.CONTROL and variable.column is not None
+    ]
+    problems = []
+    for row in record["specimens"]:
+        for variable in controls:
+            raw = row["inputs"].get(variable.name)
+            reason = None if _blank(raw) else _control_violation(variable, raw)
+            if reason is not None:
+                problems.append(
+                    f"{row['sample_id']!r} is in the fit with a control its definition rejects "
+                    f"({reason})"
+                )
     return problems
 
 
@@ -1011,6 +1669,7 @@ def _verify_identity(record: Mapping[str, Any]) -> list[str]:
     # minimize, and only an unprojected objective keeps the response's range.
     unprojected = objective.goal is not Goal.TARGET and not objective.magnitude
     low, high = response.valid_range if unprojected else (None, None)
+    fitted = _fit_space_used(objective.fit_space.value, record["observations"]["y"])
     declared = {
         "response": objective.response,
         "goal": objective.goal.value,
@@ -1018,7 +1677,7 @@ def _verify_identity(record: Mapping[str, Any]) -> list[str]:
         "target": objective.target,
         "fit_space_declared": objective.fit_space.value,
         "response_unit": response.unit,
-        "is_transformed": objective.fit_space.value != "identity",
+        "is_transformed": fitted != _FIT_IDENTITY,
         "y_min": low,
         "y_max": high,
     }
@@ -1030,8 +1689,17 @@ def _verify_identity(record: Mapping[str, Any]) -> list[str]:
     direction = Goal.MINIMIZE.value if objective.goal is Goal.TARGET else objective.goal.value
     if record["objective"].get("direction") != direction:
         problems.append("objective.direction is not what the inline definition's goal gives")
-    if record["objective"].get("y_transform") != objective.fit_space.value:
-        problems.append("objective.y_transform is not the fit space the definition declares")
+    if record["objective"].get("y_transform") != fitted:
+        problems.append(
+            "objective.y_transform is not the fit space the optimizer uses for the declared one "
+            "and these values"
+        )
+    return problems + _verify_config(record, definition)
+
+
+def _verify_config(record: Mapping[str, Any], definition: ExperimentDefinition) -> list[str]:
+    """Whether the frozen settings that repeat each other say the same."""
+    problems = []
     noise = record["prediction_noise"]
     if noise.get("specimens_per_condition") != definition.specimens_per_condition:
         problems.append(
@@ -1040,7 +1708,20 @@ def _verify_identity(record: Mapping[str, Any]) -> list[str]:
     count = len(record["observations"]["y"])
     if record["frozen_config"].get("n_observations") != count:
         problems.append("frozen_config.n_observations is not the number of conditions fitted")
+    if record["frozen_config"].get("xi") != record["acquisition"].get("xi"):
+        problems.append("frozen_config.xi is not the xi the acquisition states")
     return problems
+
+
+def _fit_space_used(declared: str, y: Sequence[float]) -> str:
+    """The fit space the optimizer fits in.
+
+    A declared log fit of values that are not all positive is fitted as the
+    values are, as the optimizer does.
+    """
+    if declared == _FIT_LOG and any(float(value) <= 0 for value in y):
+        return _FIT_IDENTITY
+    return declared
 
 
 def _close(a: float, b: float) -> bool:
@@ -1087,7 +1768,7 @@ def _verify_prediction(record: Mapping[str, Any]) -> list[str]:
     if record["prediction_noise"]["applied"] != noise:
         problems.append("the prediction noise applied is not the noise the model was given")
     problems += _verify_intervals(record, mean, lower, upper, noise)
-    problems += _verify_selection(record, index)
+    problems += _verify_selection(record)
     return problems
 
 
@@ -1120,50 +1801,212 @@ def _verify_intervals(
     return problems
 
 
-def _verify_selection(record: Mapping[str, Any], index: int) -> list[str]:
+def _verify_selection(record: Mapping[str, Any]) -> list[str]:
     """Whether the recommended point is the one the frozen selection rule picks.
 
-    The campaign path asks for expected improvement (EI) and leaves the
-    optimizer's fallback as it is shipped: when the largest EI is below the
-    noise threshold and the reliability grade is exploratory, the point of
-    largest model uncertainty is taken instead. Which of the two applied
-    follows from the frozen numbers. A record made with another acquisition
-    is not checked here, because its acquisition values are not frozen.
+    The rule is derived from the frozen numbers (see `_selection`) under the
+    exploration policy the record states, or the optimizer's default where it
+    states none it could hold; whether the record's own account of the rule
+    agrees is `_verify_selection_block`'s question. Expected improvement is
+    recomputed only when it is the acquisition.
     """
     acquisition = record["acquisition"]
-    grid = acquisition["grid"]
-    ei = grid["expected_improvement"]
+    ei = acquisition["grid"]["expected_improvement"]
     problems = []
     if acquisition["max_expected_improvement"] != max(ei):
         problems.append("max_expected_improvement is not the largest expected improvement frozen")
     if acquisition["noise_threshold"] != record["frozen_config"]["noise_std"]:
         problems.append("the noise threshold is not the noise the model was given")
-    if acquisition.get("function") != _ACQUISITION_EI:
-        return problems
-    problems += _verify_expected_improvement(record)
-    reliability = record.get("reliability") or {}
-    exhausted = acquisition["max_expected_improvement"] < acquisition["noise_threshold"]
-    exploring = exhausted and reliability.get("level") == _EXPLORATORY
-    if not exploring:
-        if index != ei.index(max(ei)):
-            problems.append(
-                "the recommended x is not the point of largest expected improvement, which "
-                "the frozen numbers call for"
-            )
-        return problems
-    if _DEFAULT_EXPLORE_POLICY != _FALLBACK_LARGEST_SD or not _band_is_plain(record):
-        return problems  # a fallback, or a band, this check cannot recompute
-    # The fallback takes the largest model standard deviation, which on an
-    # untransformed and unclamped band is the widest band. Widths taken back
-    # from the frozen band differ from the model's own in the last bits.
-    widths = [hi - lo for lo, hi in zip(grid["lower_95"], grid["upper_95"], strict=True)]
-    widest = max(widths)
-    if widths[index] < widest - (_DERIVED_REL * widest + _DERIVED_ABS):
-        problems.append(
-            "the recommended x is not the point of largest model uncertainty, which the "
-            "frozen numbers call for"
-        )
+    if acquisition.get("function") == _ACQUISITION_EI:
+        problems += _verify_expected_improvement(record)
+    stated = acquisition.get("selection")
+    stated = stated if isinstance(stated, Mapping) else {}
+    if stated.get("explore_policy") in _STATABLE_POLICIES:
+        policy, source = stated["explore_policy"], str(stated.get("explore_policy_source"))
+    else:
+        policy, source = _DEFAULT_EXPLORE_POLICY, POLICY_OPTIMIZER_DEFAULT
+    return problems + _choice_problems(record, _selection(record, policy, source))
+
+
+def _verify_selection_block(record: Mapping[str, Any]) -> list[str]:
+    """Whether the record's account of which rule chose the point is the frozen numbers' own.
+
+    Every field of `acquisition.selection` but one is derived again from the
+    record: the rule, the fallback's conditions, the candidate grid and its
+    digest, and the three indices. The policy is the one stated, and it must
+    be one a record can hold, from a source a freeze writes. The explanation
+    is words, compared by `wording_differences`.
+    """
+    block = record["acquisition"].get("selection")
+    if not isinstance(block, Mapping):
+        return [
+            "the record does not say which rule chose the recommended point "
+            "(acquisition.selection is missing)"
+        ]
+    problems = []
+    if set(block) != _SELECTION_KEYS:
+        problems.append("acquisition.selection does not hold exactly the fields a freeze writes")
+    policy, source = block.get("explore_policy"), block.get("explore_policy_source")
+    if record.get("backend") == BACKEND_1D:
+        allowed = {(_DEFAULT_EXPLORE_POLICY, POLICY_OPTIMIZER_DEFAULT)} | {
+            (stated, POLICY_STATED_AT_FREEZE) for stated in _STATABLE_POLICIES
+        }
+    else:
+        allowed = {(_FALLBACK_LARGEST_SD, POLICY_FIXED)}
+    if (policy, source) not in allowed:
+        return [
+            *problems,
+            f"acquisition.selection states the exploration policy {policy!r} from {source!r}, "
+            "which no freeze writes",
+        ]
+    expected = _selection(record, str(policy), str(source))
+    problems += [
+        f"acquisition.selection.{key} is not what the frozen numbers give"
+        for key, value in expected.items()
+        if key != "explanation" and block.get(key) != value
+    ]
+    explanation = block.get("explanation")
+    if not (isinstance(explanation, str) and explanation.strip()):
+        problems.append("acquisition.selection does not explain why the point was chosen")
     return problems
+
+
+def wording_differences(record: Mapping[str, Any]) -> tuple[str, ...]:
+    """Where the record's words are not the words this version of Latos writes for it.
+
+    The explanations a freeze writes into a record are fixed by the code: the
+    meaning of each uncertainty label, exclusion category and noise source,
+    the scoring criteria, the explanation of why the point was chosen, and
+    the optimizer's verdict sentence; the last two are derived from the
+    record's own numbers. Each is written again here and compared.
+
+    A difference means the record was edited after it was written, or that it
+    was written by another revision of the code, whose words were different.
+    Only a caller that knows which revision is running can tell the two apart;
+    `verify_record` does not compare words for that reason. Nothing is written.
+
+    Returns:
+        One sentence per field whose words differ, or that could not be compared.
+    """
+    try:
+        return tuple(_wording(record))
+    except Exception as exc:
+        return (f"the record's wording could not be compared: {type(exc).__name__}: {exc}",)
+
+
+def _wording(record: Mapping[str, Any]) -> list[str]:
+    differ = " is not the wording this version of Latos writes"
+    found = []
+    glossaries = (
+        ("observations.sigma_glossary", record["observations"]["sigma_glossary"], SIGMA_GLOSSARY),
+        ("exclusion_glossary", record["exclusion_glossary"], EXCLUSION_GLOSSARY),
+    )
+    for name, stated, known in glossaries:
+        found += [
+            f"{name}[{label!r}]{differ}"
+            for label, text in sorted(stated.items())
+            if known.get(label) != text
+        ]
+    noise = record["prediction_noise"]
+    if noise.get("meaning") != PREDICTION_NOISE_GLOSSARY.get(noise["source"]):
+        found.append(f"prediction_noise.meaning{differ} for {noise['source']!r}")
+    provenance = record.get("uncertainty_provenance")
+    if isinstance(provenance, Mapping):
+        again = _uncertainty_provenance(record["observations"])
+        found += [
+            f"uncertainty_provenance.{key}{differ}"
+            for key in ("not_quantified", "glossary")
+            if provenance.get(key) != again[key]
+        ]
+    projection = record["projection"]
+    criteria = {
+        **_BASE_CRITERIA,
+        **_scoring_rules(projection["response"], projection["response_unit"]),
+    }
+    stated_criteria = record["validation_criteria"]
+    found += [
+        f"validation_criteria.{key}{differ}"
+        for key, text in criteria.items()
+        if stated_criteria.get(key) != text
+    ]
+    block = record["acquisition"].get("selection")
+    if isinstance(block, Mapping):
+        again = _selection(
+            record, str(block.get("explore_policy")), str(block.get("explore_policy_source"))
+        )
+        if block.get("explanation") != again["explanation"]:
+            found.append(f"acquisition.selection.explanation{differ} for its frozen numbers")
+    verdict = record.get("stopping_verdict")
+    if isinstance(verdict, Mapping) and verdict.get("reason") != _verdict_sentence(record, verdict):
+        found.append(f"stopping_verdict.reason{differ} for its frozen numbers")
+    return found
+
+
+def _verdict_sentence(record: Mapping[str, Any], verdict: Mapping[str, Any]) -> str:
+    """The optimizer's verdict sentence, written again from the record's own numbers.
+
+    The sentence names the best sample so far as the optimizer names it: the
+    fitted condition `_fitted_best` gives, its design values to four
+    significant figures.
+    """
+    block = record["observations"]
+    best = _fitted_best(record)
+    if best is None:
+        return ""
+    label = ", ".join(
+        f"{name} = {float(value):.4g}"
+        for name, value in zip(block["input_names"], block["x"][best], strict=True)
+    )
+    reliability = record.get("reliability")
+    graded = (
+        cast(Any, SimpleNamespace(level=reliability["level"]))
+        if isinstance(reliability, Mapping)
+        else None
+    )
+    return _stopping_verdict(
+        probability=float(verdict["probability"]),
+        epsilon=float(verdict["epsilon"]),
+        delta=float(verdict["delta"]),
+        signal_exhausted=bool(verdict["signal_exhausted"]),
+        reliability=graded,
+        best_label=label,
+    ).reason
+
+
+def _verify_prior_best(record: Mapping[str, Any]) -> list[str]:
+    """Whether the prior best is labelled for what it is."""
+    basis = record.get("prior_best_basis")
+    if basis not in (PRIOR_BEST_FITTED, PRIOR_BEST_GIVEN):
+        return ["the record does not say what its prior best is (prior_best_basis)"]
+    index = _fitted_best(record)
+    if index is None:
+        return []
+    best = record["observations"]["y"][index]
+    if (basis == PRIOR_BEST_FITTED) != (record["prior_best"] == best):
+        return [
+            f"the prior best is labelled {basis!r}, and it is "
+            f"{'not ' if record['prior_best'] != best else ''}the best value among the fitted "
+            "conditions"
+        ]
+    return []
+
+
+def _fitted_best(record: Mapping[str, Any]) -> int | None:
+    """The fitted condition the optimizer takes as the best observed, or None.
+
+    The optimizer takes the first condition holding the best value in the space
+    it fits in. On a log fit two values a last bit apart can have the same
+    logarithm, and then the first of them is the best, whichever is larger.
+    """
+    y = [float(value) for value in record["observations"]["y"]]
+    direction = record["objective"].get("direction")
+    if not y or direction not in ("maximize", "minimize"):
+        return None
+    work = np.asarray(y, dtype=float)
+    if _fit_space_used(record["projection"]["fit_space_declared"], y) == _FIT_LOG:
+        work = np.log(work)
+    sign = 1.0 if direction == "maximize" else -1.0
+    return int(np.argmax(sign * work))
 
 
 def _band_is_plain(record: Mapping[str, Any]) -> bool:
@@ -1210,6 +2053,10 @@ def _verify_expected_improvement(record: Mapping[str, Any]) -> list[str]:
     sd = (upper - lower) / (2.0 * _CI95)
     again = expected_improvement(sign * mean, sd, sign * float(best), float(xi))
     frozen = np.asarray(grid["expected_improvement"], dtype=float)
+    if not (np.isfinite(frozen).all() and np.isfinite(again).all()):
+        # Numbers no model gives; they set no tolerance to compare within.
+        problems.append("the frozen expected improvement is not what the frozen model gives")
+        return problems
     scale = max(float(np.max(np.abs(frozen))), float(np.max(sd)))
     if not np.allclose(frozen, again, rtol=_EI_REL, atol=_EI_ABS * scale):
         problems.append("the frozen expected improvement is not what the frozen model gives")
@@ -1260,46 +2107,117 @@ def _verify_stopping(record: Mapping[str, Any]) -> list[str]:
     exploratory = reliability is not None and reliability["level"] == _EXPLORATORY
     if record["converged"] != (exhausted and not exploratory):
         problems.append("converged does not follow from the frozen numbers")
-    fitted = record["observations"]["y"]
-    direction = record["objective"].get("direction")
-    if fitted and direction in ("maximize", "minimize"):
-        best = max(fitted) if direction == "maximize" else min(fitted)
-        if claim["best_measured"] != best:
-            problems.append(
-                "stopping_claim.best_measured is not the best value among the fitted conditions"
-            )
+    index = _fitted_best(record)
+    if index is not None and claim["best_measured"] != record["observations"]["y"][index]:
+        problems.append(
+            "stopping_claim.best_measured is not the best value among the fitted conditions"
+        )
     return problems
 
 
-def _verify_specimen_sigma(record: Mapping[str, Any]) -> list[str]:
-    """Whether a condition's within-specimen sigma is its one specimen's own uncertainty."""
+def _sigma_rule(
+    count: int, pooled_sd: float | None, uncertainty: Any, scope: Any
+) -> tuple[float | None, str]:
+    """A condition's sigma and its label, as the reducer gives them, from what the record holds.
+
+    Written again here rather than imported, so that the label a record
+    states is checked against the rule and not against the code that wrote
+    it: the pooled spread when one exists (divided by the square root of the
+    specimens when the condition was replicated); else, for a condition made
+    once, its specimen's own uncertainty, declared when its scope is the
+    condition and within-specimen otherwise; else none.
+    """
+    if pooled_sd is not None:
+        if count >= _MIN_REPLICATES:
+            return pooled_sd / math.sqrt(count), SIGMA_EMPIRICAL
+        return pooled_sd, SIGMA_POOLED
+    if count == 1 and _is_number(uncertainty):
+        if scope == UncertaintyScope.CONDITION.value:
+            return float(uncertainty), SIGMA_DECLARED
+        return float(uncertainty), SIGMA_LOWER_BOUND
+    return None, SIGMA_UNDETERMINED
+
+
+def _verify_sigma_labels(record: Mapping[str, Any]) -> list[str]:
+    """Whether each condition's sigma and its label follow from its specimens.
+
+    Each label is derived again from how many specimens the condition holds,
+    the pooled spread, and the uncertainty and uncertainty scope each
+    specimen states; each sigma from the same, with the substitute the
+    optimizer is handed for a condition that has none (the largest known
+    sigma, else the spread of the values, else one).
+    """
     block = record["observations"]
-    if block["sigma"] is None:
-        return []
     response = record["projection"]["response"]
-    stated = {
-        row["sample_id"]: row["responses"][response]["uncertainty"] for row in record["specimens"]
-    }
-    problems = []
-    for index, (source, ids) in enumerate(
-        zip(block["sigma_sources"], block["sample_ids"], strict=True)
-    ):
-        if source != SIGMA_LOWER_BOUND or len(ids) != 1:
+    stated = {row["sample_id"]: row["responses"].get(response) or {} for row in record["specimens"]}
+    pooled = block["pooled_sd"]
+    pooled_sd = float(pooled) if _is_number(pooled) else None
+    expected: list[tuple[float | None, str]] = []
+    for ids in block["sample_ids"]:
+        own = stated.get(ids[0], {}) if len(ids) == 1 else {}
+        expected.append(
+            _sigma_rule(len(ids), pooled_sd, own.get("uncertainty"), own.get("uncertainty_scope"))
+        )
+    problems = [
+        f"the sigma label of condition {index + 1} is {said!r}, and its specimens give {label!r}"
+        for index, (said, (_, label)) in enumerate(
+            zip(block["sigma_sources"], expected, strict=True)
+        )
+        if said != label
+    ]
+    sigma = block["sigma"]
+    if sigma is None or problems:
+        return problems
+    known = [value for value, _ in expected if value is not None]
+    y = np.asarray(block["y"], dtype=float)
+    fallback = max(known) if known else float(np.std(y)) or 1.0
+    for index, (value, label) in enumerate(expected):
+        if _close(float(sigma[index]), fallback if value is None else value):
             continue
-        own: Any = stated.get(ids[0])
-        if not (_is_number(own) and _close(float(own), float(block["sigma"][index]))):
+        if label == SIGMA_LOWER_BOUND:
             problems.append(
                 f"the sigma of condition {index + 1} is not the uncertainty its specimen states"
             )
+        else:
+            problems.append(
+                f"the sigma of condition {index + 1} is not the one its label {label!r} gives"
+            )
     return problems
 
 
+def _verify_provenance(record: Mapping[str, Any]) -> list[str]:
+    """Whether the uncertainty provenance is the one the sigma labels give.
+
+    Its numbers and flags are compared here; its words are
+    `wording_differences`'s to compare.
+    """
+    stated = record.get("uncertainty_provenance")
+    if not isinstance(stated, Mapping):
+        return ["the record states no uncertainty provenance"]
+    again = _uncertainty_provenance(record["observations"])
+    return [
+        f"uncertainty_provenance.{key} is not what the sigma labels give"
+        for key in (
+            "by_condition",
+            "counts",
+            "between_specimen_variability_estimated",
+            "pooled_df",
+            "complete_budget",
+            "interval_coverage",
+        )
+        if stated.get(key) != again[key]
+    ]
+
+
 def _verify_grade(record: Mapping[str, Any]) -> list[str]:
-    """Whether the reliability grade is one its own count of conditions allows.
+    """Whether the reliability grade is one its own count and leave-one-out numbers allow.
 
     The grade starts from the count of conditions and can only be lowered by
-    the later tests, so no grade above the count's own can be genuine. The
-    leave-one-out numbers need a refit and are the seal's to hold.
+    the later tests, so no grade above the count's own can be genuine. One of
+    those tests needs only the stored leave-one-out counts: below half of the
+    held-out points inside their band, the grade is exploratory. Whether those
+    counts are what a refit gives is the seal's to hold; that they agree with
+    each other, with the count of conditions and with the grade is checked here.
     """
     reliability = record.get("reliability")
     if reliability is None:
@@ -1308,6 +2226,7 @@ def _verify_grade(record: Mapping[str, Any]) -> list[str]:
     problems = []
     if reliability["n_observations"] != count:
         problems.append("reliability.n_observations is not the number of conditions fitted")
+    problems += _verify_leave_one_out(reliability, count)
     allowed = (
         {_EXPLORATORY}
         if count < _RELIABILITY_INDICATIVE_N
@@ -1319,6 +2238,32 @@ def _verify_grade(record: Mapping[str, Any]) -> list[str]:
         problems.append(
             f"the reliability grade {reliability['level']!r} is above what {count} "
             "condition(s) allow"
+        )
+    return problems
+
+
+def _verify_leave_one_out(reliability: Mapping[str, Any], count: int) -> list[str]:
+    """Whether the stored leave-one-out counts agree with each other, the count and the grade."""
+    inside, total = reliability.get("loo_inside"), reliability.get("loo_total")
+    if not (
+        isinstance(inside, int)
+        and isinstance(total, int)
+        and not isinstance(inside, bool)
+        and total == count
+        and 0 <= inside <= total
+    ):
+        return [
+            "the leave-one-out counts are not whole numbers of the conditions fitted, at most "
+            "all of them"
+        ]
+    problems = []
+    coverage = inside / total if total else 0.0
+    if reliability.get("loo_coverage") != round(coverage, 3):
+        problems.append("reliability.loo_coverage is not loo_inside / loo_total")
+    if coverage < _LOO_FORCE_EXPLORATORY and reliability["level"] != _EXPLORATORY:
+        problems.append(
+            f"the reliability grade {reliability['level']!r} is above what its leave-one-out "
+            f"coverage of {inside}/{total} allows"
         )
     return problems
 
@@ -1335,9 +2280,9 @@ def _explained(glossary: Any, labels: set[str]) -> bool:
 def _verify_notes(record: Mapping[str, Any]) -> list[str]:
     """Whether the record explains every label it uses, and its noise follows from its data.
 
-    The wording of each explanation is the seal's to hold; what is checked is
-    that none is missing or left over, and that the prediction noise is what
-    its stated source gives from the observations.
+    What is checked here is that no explanation is missing or left over, and
+    that the prediction noise is what its stated source gives from the
+    observations. The words themselves are `wording_differences`'s to compare.
     """
     problems = []
     block = record["observations"]
@@ -1355,11 +2300,17 @@ def _verify_notes(record: Mapping[str, Any]) -> list[str]:
     categories = {row["category"] for row in record["excluded"]}
     if not _explained(record["exclusion_glossary"], categories):
         problems.append("the exclusion glossary does not explain exactly the categories used")
-    for key in ("calibration", "unit_check", "condition_check"):
+    for key in ("calibration", "status", "unit_check", "condition_check"):
         text = record["validation_criteria"].get(key)
         if not (isinstance(text, str) and text.strip()):
             problems.append(f"validation_criteria.{key} is missing")
+    return problems + _verify_noise(record)
 
+
+def _verify_noise(record: Mapping[str, Any]) -> list[str]:
+    """Whether the prediction noise, its source and the noise applied follow from the data."""
+    problems = []
+    block = record["observations"]
     noise = record["prediction_noise"]
     meaning = noise.get("meaning")
     if not (isinstance(meaning, str) and meaning.strip()):
@@ -1367,29 +2318,111 @@ def _verify_notes(record: Mapping[str, Any]) -> list[str]:
     sigma = block["sigma"]
     root_m = math.sqrt(noise["specimens_per_condition"])
     if sigma is None:
-        expected, sources = None, {PREDICTION_NOISE_NOT_PASSED}
+        expected, source = None, PREDICTION_NOISE_NOT_PASSED
     elif block["pooled_sd"] is not None:
-        expected, sources = block["pooled_sd"] / root_m, {PREDICTION_NOISE_POOLED}
+        expected, source = block["pooled_sd"] / root_m, PREDICTION_NOISE_POOLED
     else:
+        # Measured, declared, partly assumed or assumed, as the conditions' own labels say.
         expected = float(np.median(sigma)) / root_m
-        sources = {PREDICTION_NOISE_LOWER_BOUND, PREDICTION_NOISE_UNDETERMINED}
-    if noise["source"] not in sources:
+        source = noise_source_from_sigma(block["sigma_sources"])
+    if noise["source"] != source:
         problems.append(
             f"the prediction noise source {noise['source']!r} is not what the observations give"
         )
-    problems += _verify_specimen_sigma(record)
+    problems += _verify_sigma_labels(record)
+    problems += _verify_provenance(record)
+    problems += _verify_pooled(record)
+    stated = noise["prepared"]
     measured = record["acquisition"].get("noise_threshold_from_measured_noise")
-    if measured and noise["source"] not in _MEASURED_NOISE_SOURCES:
+    from_measurement = noise["source"] in _MEASURED_NOISE_SOURCES
+    if measured and not from_measurement:
         problems.append(
             "the noise threshold is said to come from measured noise, and its source "
             f"{noise['source']!r} is not a measurement"
         )
-    stated = noise["prepared"]
+    elif not measured and from_measurement and _is_number(stated) and float(stated) > 0:
+        problems.append(
+            "the noise threshold is not said to come from measured noise, and its source "
+            f"{noise['source']!r} is a measurement the optimizer was given"
+        )
     if (stated is None) != (expected is None) or (
         stated is not None and expected is not None and not _close(stated, expected)
     ):
         problems.append("the prediction noise is not what its stated source gives")
+    else:
+        problems += _verify_applied_noise(record)
     return problems
+
+
+def _noise_applied(record: Mapping[str, Any]) -> float | None:
+    """The noise the optimizer applies, given the record's prepared noise, or None if unknown.
+
+    As the optimizer computes it: a prepared noise above zero is carried into
+    the fit space (as it is for a linear fit, as a fraction of the mean
+    magnitude of the values for a log fit). Without one, the optimizer
+    assumes its relative noise: as it is for a log fit, times the mean
+    magnitude of the values for a linear fit.
+    """
+    y = [float(value) for value in record["observations"]["y"]]
+    log = _fit_space_used(record["projection"]["fit_space_declared"], y) == _FIT_LOG
+    scale = float(np.mean(np.abs(y))) if y else 0.0
+    prepared = record["prediction_noise"].get("prepared")
+    if _is_number(prepared) and float(prepared) > 0:
+        if not log:
+            return float(prepared)
+        if scale > 0:
+            return float(prepared) / scale
+    relative = record["frozen_config"].get("rel_noise")
+    if not _is_number(relative):
+        return None
+    return float(relative) if log else float(relative) * scale
+
+
+def _verify_applied_noise(record: Mapping[str, Any]) -> list[str]:
+    """Whether the noise the model was given is the noise its prepared noise gives."""
+    expected = _noise_applied(record)
+    applied = record["prediction_noise"].get("applied")
+    if expected is None:
+        # Every optimizer configuration states its relative noise.
+        return [
+            "the prediction noise the model was given cannot be checked: no noise was prepared "
+            "and frozen_config.rel_noise is not a number"
+        ]
+    if _is_number(applied) and _close(float(applied), expected):
+        return []
+    return [
+        "the prediction noise the model was given is not the prepared noise the observations "
+        "give, carried into the fit space as the optimizer carries it, or its own assumed "
+        "noise when none was prepared"
+    ]
+
+
+def _verify_pooled(record: Mapping[str, Any]) -> list[str]:
+    """Whether the pooled spread is the one the replicated specimens give.
+
+    Recomputed as the reducer computes it, from the signed value of every
+    specimen behind each condition the record groups them into.
+    """
+    block = record["observations"]
+    response = record["projection"]["response"]
+    stated = {
+        row["sample_id"]: (row["responses"].get(response) or {}).get("value")
+        for row in record["specimens"]
+    }
+    groups: list[list[Any]] = [
+        [stated.get(sample) for sample in ids] for ids in block["sample_ids"]
+    ]
+    if not all(_is_number(v) for group in groups for v in group):
+        return []  # a specimen without its value is `_verify_specimens`'s to report
+    pooled, dof, _ = _pool([[float(v) for v in group] for group in groups], "")
+    same = (
+        pooled is None
+        if block["pooled_sd"] is None
+        else pooled is not None and _close(float(block["pooled_sd"]), pooled)
+    )
+    if same and block.get("pooled_df") == dof:
+        return []
+    return ["the pooled spread is not the one the replicated specimens give"]
 
 
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -1440,20 +2473,23 @@ def _verify_source(record: Mapping[str, Any]) -> list[str]:
 def verify_record(
     record: Mapping[str, Any], *, expected_seal: str | None = None
 ) -> tuple[str, ...]:
-    """Recompute what a record claims about itself and return every discrepancy.
+    """Check a record's internal consistency and return every discrepancy.
 
     Args:
         record: A record as `read_record` returns it.
         expected_seal: The seal noted elsewhere when the record was frozen. If
             given, the record's seal must be that one.
 
-    Nothing is written, and nothing outside `record` is read.
+    Nothing is written, and nothing outside `record` is read. The model is
+    not fitted again (see the module's "What verification can and cannot
+    show").
 
     Returns:
         One sentence per discrepancy. Empty means the record is internally
         consistent and, if `expected_seal` was given, its body is the body
-        that was frozen. The seal covers everything but the seal block, whose
-        two entries are checked against what a freeze writes.
+        that was frozen. It does not mean the computation was reproduced or
+        the prediction validated. The seal covers everything but the seal
+        block, whose two entries are checked against what a freeze writes.
     """
     problems: list[str] = []
     checks = (
@@ -1463,6 +2499,8 @@ def verify_record(
         ("observations", _verify_observations),
         ("specimens", _verify_specimens),
         ("prediction", _verify_prediction),
+        ("selection", _verify_selection_block),
+        ("prior best", _verify_prior_best),
         ("stopping verdict", _verify_stopping),
         ("notes and limitations", _verify_notes),
         ("source revision", _verify_source),
@@ -1516,7 +2554,8 @@ def _note_exclusions(record: Mapping[str, Any]) -> list[str]:
     if outside:
         lines += [
             "",
-            "## Specimens kept outside the design bounds (not in the model)",
+            "## Specimens kept outside the design bounds (evidence; not in the model, and not "
+            "in the best observed among fitted conditions)",
             f"- {EXCLUSION_GLOSSARY[EXCLUDED_OUTSIDE_BOUNDS]}",
         ]
         response = record["projection"]["response"]
@@ -1527,7 +2566,7 @@ def _note_exclusions(record: Mapping[str, Any]) -> list[str]:
             said = (
                 "no scope stated"
                 if scope is None
-                else f"{scope} scope; a lower bound"
+                else f"{scope} scope: within-specimen variation only, not a complete uncertainty"
                 if scope == UncertaintyScope.SPECIMEN
                 else f"{scope} scope"
             )
@@ -1642,6 +2681,7 @@ def render_note(record: Mapping[str, Any]) -> str:
         "",
         "## Prediction at the recommended condition (as frozen)",
         f"- Recommended: {condition}",
+        *_note_selection(record),
         f"- Predicted {objective['property']} = **{prediction['predicted_mean']:.4g} {unit}**",
         f"- 95% predictive interval: **[{low:.4g}, {high:.4g}] {unit}**: the model band below "
         "widened by the prediction noise, and the band a new measurement is to be compared "
@@ -1656,6 +2696,7 @@ def render_note(record: Mapping[str, Any]) -> str:
         f"- {_number(noise['applied'])} {noise_unit} applied by the optimizer "
         f"(prepared: {_number(noise['prepared'])}); source: `{noise['source']}`",
         f"- {noise['meaning']}",
+        *_note_provenance(record),
         "",
         *_note_observations(record),
         *_note_exclusions(record),
@@ -1686,26 +2727,68 @@ def render_note(record: Mapping[str, Any]) -> str:
 # What the predictive interval's width rests on, by the source of its noise.
 _PREDICTIVE_CAVEAT = {
     PREDICTION_NOISE_LOWER_BOUND: (
-        "Its noise is a lower bound here, so the band is too narrow (see Prediction noise)."
+        "Its noise is estimated from within-specimen variation only; variation between "
+        "specimens and other sources are not quantified in it, so the band may understate "
+        "how far a new specimen falls from the prediction (see Prediction noise)."
+    ),
+    PREDICTION_NOISE_PARTLY_ASSUMED: (
+        "Its noise is partly assumed: at least one condition had no uncertainty and was given "
+        "a substitute, and variation between specimens is not quantified in it (see Prediction "
+        "noise)."
+    ),
+    PREDICTION_NOISE_DECLARED: (
+        "Its noise rests on uncertainties the producer declared for each condition, not on "
+        "an estimate made here (see Prediction noise)."
     ),
     PREDICTION_NOISE_UNDETERMINED: (
-        "Its noise is an assumption here, not a measurement (see Prediction noise)."
+        "Its noise is assumed here, not estimated from measurements (see Prediction noise)."
     ),
     PREDICTION_NOISE_NOT_PASSED: (
-        "No measured noise was passed; the optimizer's own assumption widened it."
+        "No noise estimated from measurements was passed; the optimizer's own assumed noise "
+        "widened it."
     ),
 }
 
 
+def _note_provenance(record: Mapping[str, Any]) -> list[str]:
+    """What the conditions' uncertainties rest on, as the record states it."""
+    block = record.get("uncertainty_provenance")
+    if not isinstance(block, Mapping):
+        return []
+    counts = ", ".join(f"{n} {kind}" for kind, n in block["counts"].items() if n)
+    between = (
+        f"estimated from replicated specimens ({block['pooled_df']} degrees of freedom)"
+        if block["between_specimen_variability_estimated"]
+        else "not estimated"
+    )
+    return [
+        "",
+        "## What the uncertainties rest on",
+        f"- Conditions by kind of uncertainty: {counts or 'none'}",
+        *[f"  - `{kind}`: {meaning}" for kind, meaning in block["glossary"].items()],
+        f"- Between-specimen variability: {between}",
+        "- Not quantified: " + "; ".join(block["not_quantified"]) + ".",
+        "- A complete uncertainty budget is not claimed, and the coverage of the intervals "
+        f"above is {block['interval_coverage']}.",
+    ]
+
+
+def _note_selection(record: Mapping[str, Any]) -> list[str]:
+    """How the recommended point was chosen, as the record states it."""
+    selection = record["acquisition"].get("selection")
+    if not isinstance(selection, Mapping):
+        return []
+    return [f"- How it was chosen ({selection['rule']}): {selection['explanation']}"]
+
+
 def _prior_best_basis(record: Mapping[str, Any]) -> str:
-    """What the prior best is, said only when the record shows it."""
-    claim = record.get("stopping_claim") or {}
-    if claim.get("best_measured") == record["prior_best"]:
+    """What the prior best is, as the record labels it."""
+    if record.get("prior_best_basis") == PRIOR_BEST_FITTED:
         return (
-            ": the best value among the fitted conditions. Specimens kept outside the search "
-            "bounds are not among them."
+            f": the {PRIOR_BEST_FITTED}. Specimens kept outside the search bounds are recorded "
+            "separately as evidence and are not among them."
         )
-    return ": the baseline given when the record was frozen."
+    return f": the {PRIOR_BEST_GIVEN}."
 
 
 def _note_stopping(record: Mapping[str, Any], unit: str, noise_unit: str) -> list[str]:
@@ -1720,20 +2803,21 @@ def _note_stopping(record: Mapping[str, Any], unit: str, noise_unit: str) -> lis
     lines: list[str] = []
     if verdict is not None:
         lines.append(f"- **{verdict['action']}**: {verdict['reason']}")
+        lines.append(f"- {VERDICT_BEST_SAMPLE}")
     if claim is not None and claim.get("probability_within_epsilon") is not None:
         bar = 1.0 - claim["delta"]
         grid = record["frozen_config"].get("grid_size")
         over = f"a {grid}-point grid across the search range" if grid else "the search range"
         lines.append(
-            "- Stopping claim (frozen): at the best measured condition (best value "
-            f"{claim['best_measured']:.4g} {unit}, among the conditions the model was fitted "
-            f"to), the model's value is within epsilon = {claim['epsilon']:.4g} {noise_unit} "
+            "- Stopping claim (frozen): at the condition holding the best observed among "
+            f"fitted conditions ({claim['best_measured']:.4g} {unit}), the model's value is "
+            f"within epsilon = {claim['epsilon']:.4g} {noise_unit} "
             f"of the best value the model draws over {over}, with probability "
             f"{claim['probability_within_epsilon']:.2f} under the frozen model "
             f"({'meets' if claim['met'] else 'below'} the {bar:.0%} bar). "
-            "In the verdict, the measurement noise and the noise threshold are the applied "
-            "prediction noise above, and improvement is the model's expected improvement "
-            "over that grid."
+            "In the verdict, what the optimizer calls the measurement noise, and the noise "
+            "threshold, are the applied prediction noise above, whatever its source says it "
+            "rests on; improvement is the model's expected improvement over that grid."
         )
     if reliability is None:
         return lines

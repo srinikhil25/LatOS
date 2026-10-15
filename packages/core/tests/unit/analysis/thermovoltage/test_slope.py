@@ -118,11 +118,12 @@ class TestFitKernel:
         its median is 0.455 of its mean. So the reported standard error lands
         *below* the truth more often than not.
 
-        This matters downstream. The per-point variance the optimizer will
-        consume comes from exactly this number, so a three-ΔT campaign hands the
-        surrogate an over-confident noise estimate — on precisely the sparse
-        campaigns where over-confidence is most costly. Four or more ΔT values
-        is the cheap fix.
+        This matters downstream wherever the optimizer is given this number as
+        a per-point variance (the ite-trace/1 contract never does): a three-ΔT
+        campaign then hands the surrogate an over-confident noise estimate — on
+        precisely the sparse campaigns where over-confidence is most costly. A
+        fourth ΔT value narrows the shortfall without removing it. Only the
+        direction is pinned here, not the size.
         """
         dt = np.array([2.0, 6.0, 10.0])
         s_xx = float(np.sum((dt - dt.mean()) ** 2))

@@ -16,13 +16,17 @@ file format, so the same functions serve any logger.
 The measurand
 -------------
 The response of a cycle is the **apparent cycle Seebeck coefficient**: the
-ordinary least-squares slope of the signed recorded voltage against the
-temperature difference, over every sample of the whole cycle, heating and
-cooling together::
+ordinary least-squares slope of the oriented voltage against the temperature
+difference, over every sample of the whole cycle, heating and cooling
+together::
 
     V(t) = S_cycle · ΔT(t) + b,        t in [t_on, t_next_on)
 
-with a free intercept `b`, no time term and no correction for the lag between
+where `V` is the recorded voltage times the wiring sign (+1 with the positive
+lead on the cold electrode, -1 with it on the hot electrode), so that `V` is
+the cold electrode's potential minus the hot one's, given the logger reads the
+positive lead minus the negative lead. The fit has a free intercept `b`, no
+time term and no correction for the lag between
 the thermocouples and the cell. It is an operational, dynamic quantity. It is
 **not** a steady-state Seebeck coefficient: the cell is never at rest during a
 cycle, so the slope mixes the thermovoltage with whatever part of the ionic
@@ -41,9 +45,9 @@ A run is described by its switching times, in order::
     on_1, off_1, on_2, off_2, …, on_n, off_n, end
 
 Cycle `k` is the half-open window ``[on_k, on_{k+1})``, and the last cycle is
-``[on_n, end)``. Half-open so that a sample on a boundary belongs to exactly
-one cycle. Its heating branch is ``[on_k, off_k)`` and its cooling branch
-``[off_k, on_{k+1})``.
+``[on_n, end)``. Half-open so that a sample at a switch belongs to exactly one
+cycle; a sample at `end` belongs to none. Its heating branch is
+``[on_k, off_k)`` and its cooling branch ``[off_k, on_{k+1})``.
 
 Where the switching times come from decides how far they can be trusted, and
 the three sources are ranked:
@@ -73,11 +77,13 @@ switch-off). That point is the estimate.
 
 The estimate runs late, by about a second on the traces it was checked against,
 and it scatters by about a second around the operator's own marks. Two things
-it cannot do at all: it cannot see the end of the last cycle, because nothing
-happens to the temperature when a run is simply stopped, so it uses the end of
-the recording; and it cannot tell a test cycle from a real one. Every result it
-gives must therefore travel with a warning, and a declaration or a set of marks
-replaces it as soon as either exists.
+it cannot do at all. It cannot see the end of the last cycle, because nothing
+happens to the temperature when a run is simply stopped: with an even number of
+switches it closes the last cycle at the end of the recording, and with an odd
+number the last switch-on closes the cycle before it, and the unfinished cycle
+after that switch-on is left out. And it cannot tell a test cycle from a real
+one. Every result it gives must therefore travel with a warning, and a
+declaration or a set of marks replaces it as soon as either exists.
 
 Reducing the cycles of one specimen
 -----------------------------------
@@ -95,17 +101,26 @@ disagreement.
 What the SEM is, and is not. It is a Type A estimate of how well the cycles of
 one mounting, in one session, pin down that mounting's mean. It says nothing
 about the next mounting of the same mixture: dosing, contact and the cloth
-itself all change, and none of that varies between cycles. It is therefore a
-**lower bound** on the specimen's uncertainty, and it is labelled as one
-wherever it travels. It also assumes the cycles are independent and
-exchangeable, which has **not** been shown for consecutive cycles on one cell;
-a drift from cycle to cycle makes it too small or too large in ways three
-values cannot reveal.
+itself all change, and none of that varies between cycles. It is therefore
+**one component** of the specimen's uncertainty, not a complete uncertainty
+budget: variation between mountings and sessions, and the instrument, are not
+quantified in it. It travels labelled as within-specimen only. The label's
+identifier keeps the name `lower_bound_specimen` for compatibility, but the
+SEM is not a rigorously established lower bound on the total experimental
+uncertainty. It is itself an estimate: from few cycles, such as only three
+(two degrees of freedom), it may underestimate the underlying standard error it
+estimates. For independent, normally distributed cycles from one distribution
+(one mean and one spread) it does so more than half the time for any number of
+cycles, and about 63% of the time with three (1 - 1/e). The SEM also assumes
+the cycles are independent and exchangeable, which has **not** been shown for
+consecutive cycles on one cell; a drift from cycle to cycle makes it too small
+or too large in ways three values cannot reveal.
 
 The standard error of a single cycle's slope is reported as a diagnostic and is
-**never** used as a measurement uncertainty. It comes from thousands of samples
-a fraction of a second apart, which are nowhere near independent, so it is
-smaller than any honest uncertainty by a wide margin.
+**never** used as a measurement uncertainty. Its samples are a fraction of a
+second apart and are unlikely to be independent, so the least-squares formula,
+which assumes independent residuals, may understate the scatter of the slope.
+By how much is not quantified here.
 """
 
 from __future__ import annotations
@@ -264,7 +279,9 @@ class CycleReduction:
         mean: Their signed mean.
         sd: Their sample standard deviation, or None with fewer than two.
         sem: `sd / sqrt(k)`, or None with fewer than two. A within-specimen,
-            within-session lower bound; see the module docstring.
+            within-session Type A estimate of how well the cycles pin down
+            their mean, one component of the uncertainty; see the module
+            docstring.
         dof: Degrees of freedom behind `sd`: `k - 1`.
     """
 

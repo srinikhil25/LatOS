@@ -128,6 +128,19 @@ def test_elapsed_time_survives_midnight(tmp_path: Path) -> None:
     assert trace.time_s.tolist() == [0.0, 0.5, 1.0, 1.5]
 
 
+def test_a_changed_date_is_read_as_the_documented_limitation_says(tmp_path: Path) -> None:
+    # As the ite-trace/1 PROTOCOL states it: a changed date adds nothing while
+    # the time of day advances, and exactly one day when it goes back, however
+    # many days apart the dates are. Rows days apart are read as closer.
+    rows = _rows(
+        ["1/2/2026 09:00:00.0s", 25.0, 25.5, 0.001, 0],
+        ["1/3/2026 09:00:00.5s", 25.0, 25.5, 0.001, 0],  # a day and 0.5 s later
+        ["1/9/2026 08:00:00.0s", 25.0, 25.5, 0.001, 0],  # six days later, clock behind
+    )
+    trace = read_hioki_xlsx(_raw(tmp_path / "run.xlsx", rows))
+    assert trace.time_s.tolist() == [0.0, 0.5, 0.5 + 86400 - 3600.5]
+
+
 def test_a_workbook_with_several_sheets_needs_one_named(tmp_path: Path) -> None:
     path = _raw(tmp_path / "run.xlsx", GOOD, sheets=("V1_H1", "V2_H1"))
     with pytest.raises(

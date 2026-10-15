@@ -170,9 +170,16 @@ flowchart LR
   They should be re-checked against real replicate scatter before being trusted.
 - **A three-point standard error is biased low.** With one degree of freedom the
   residual variance follows a chi-squared whose median is 0.455 of its mean, so
-  `σ_S` understates the truth more often than not — by roughly 2.4× at the
-  median. A three-ΔT campaign hands the surrogate an over-confident noise
-  estimate. Four ΔT values is the cheap fix; the behaviour is pinned by a test.
+  `σ_S` lands below the true standard error about 68% of the time, and at the
+  median it is about 0.67 of it: the standard error is short by a factor of
+  about 1.5, the variance by about 2.2. A three-ΔT campaign hands the surrogate
+  an over-confident noise estimate. A fourth ΔT value narrows the shortfall but
+  does not remove it: on two degrees of freedom the median is still about 0.83
+  of the truth, and it lands below the truth about 63% of the time. A test pins
+  the direction of the three-point case, not its size. (Corrected 15 Oct 2026:
+  this bullet first said "roughly 2.4× at the median" and called four ΔT values
+  the fix. The later ite-trace/1 contract never uses a single fit's standard
+  error as an uncertainty.)
 - **`converged` and the recommended `x` are unchanged.** The stopping verdict is
   additive, because frozen pre-registrations must keep replaying to the same
   numbers. So the engine can still recommend an exploration point while the

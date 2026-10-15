@@ -52,11 +52,16 @@ Two further things fall out of the fit, and both matter downstream:
   One caveat travels with it. At three ΔT values the residual variance has a
   single degree of freedom, and a chi-squared on one degree of freedom is
   heavily right-skewed — its median is 0.455 of its mean. The reported
-  standard error therefore lands below the truth more often than not, by
-  roughly a factor of two at the median. A three-point campaign hands the
-  surrogate an over-confident noise estimate on exactly the sparse data where
-  over-confidence costs most. Four ΔT values is the cheap fix, and the
-  behaviour is pinned by a test so it cannot be forgotten.
+  standard error therefore lands below the truth about 68% of the time, and
+  at the median it is about 0.67 of the truth: the variance is short by a
+  factor of about 2.2, the standard error by about 1.5. A three-point campaign
+  hands the surrogate an over-confident noise estimate on exactly the sparse
+  data where over-confidence costs most. A fourth ΔT value helps but does not
+  remove it: on two degrees of freedom the median is still about 0.83 of the
+  truth. A test pins the direction of the three-point case (below the truth
+  more often than not), not its size. Whether the standard error reaches the
+  optimizer depends on the path: the ite-trace/1 contract never uses a single
+  fit's standard error as an uncertainty.
 * **The intercept as a fraction of signal.** Reporting `ΔV_electrode` in
   millivolts is honest but hard to act on. Reporting it as a share of the
   voltage at the largest ΔT answers the question a reviewer actually asks:

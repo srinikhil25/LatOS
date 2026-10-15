@@ -260,10 +260,11 @@ _GUIDE = (
         "how much of the signal was electrode polarisation rather than thermoelectric. A "
         "single delta-T point cannot separate them. Three can, but only just: the residual "
         "variance then has one degree of freedom, and the standard error it reports lands "
-        "below the truth about half the time, by roughly a factor of two at the median. "
-        "That error is what the optimizer uses as this point's weight, so three points hand "
-        "it an over-confident number on exactly the sparse data where over-confidence costs "
-        "most. The fourth reading is the cheapest fix in the whole protocol.",
+        "below the truth about two times in three, at the median about two-thirds of it. "
+        "Where that error is used as this point's weight, three points hand the optimizer "
+        "an over-confident number on exactly the sparse data where over-confidence costs "
+        "most. A fourth reading is the cheapest improvement in the whole protocol; it "
+        "narrows the shortfall without removing it.",
         False,
     ),
     (

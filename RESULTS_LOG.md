@@ -1749,3 +1749,139 @@ docstrings), `optimization/rehearsal.py` (`shipped_configuration`), `__main__.py
 
 Every number here is a synthetic response shape with a known optimum, not
 evidence about the real system. `rehearsal.CAVEAT` applies.
+
+## 2026-10-15 — `campaign_trace verify`: the accepted exit-status proposal, its gaps, and the work left
+
+A development note. **Nothing in it is implemented yet.** `verify` still exits
+as its module docstring says: 0 when no check found a problem, with NOTEs
+printed and counted as unsettled; 1 for a problem; 2 for an unreadable record.
+No version 2 record of the ionic-liquid campaign has been frozen yet, so no real
+record has been judged by either set of rules.
+
+### The accepted proposal
+
+These statuses are for `verify` only; `check` (0, 1, 2) and `next` (0 to 3) keep
+theirs. The precedence is 2, then 1, then 4, then 0.
+
+| Status | Headline | When |
+|---|---|---|
+| 0 | NO PROBLEM FOUND (required checks complete) | Every required check was made and none differed: `--seal` given and equal to the record's seal; the record in its campaign's record folder; every named recording present and byte-identical; every re-read completed and agreed; every frozen manifest row compared and unchanged (added specimens allowed); the commit known to this clone; the note equal to its rendering; no meaning-bearing word different. Under another revision, prose-layout differences may appear, as informational only. Never headlined "VERIFIED". It is not a reproduction of the computation, and not a validation of the prediction. |
+| 4 | INCOMPLETE: *what is missing* | No problem was found, but a required check was not made or cannot be settled: no `--seal`; record outside its campaign folder; manifest changed since the freeze; note or manifest missing; Git cannot answer for the commit; word or note differences read from another revision or a dirty tree; meaning-bearing protocol or glossary words that differ even under a matched seal, until the researcher accepts the new wording. |
+| 1 | PROBLEM FOUND | A check that was made found a contradiction: the seal and the body disagree, or `--seal` differs; an internal consistency check fails; a main recording is missing or its bytes changed; re-read numbers differ; a frozen manifest row changed or a specimen was dropped; words or the note were edited, as read by a clean checkout of the writing commit; the record states a dirty tree or a malformed commit; a reversed-lead file changed. |
+| 2 | UNREADABLE | Missing, not JSON, not version 2, one of the four blocks `read_record` requires absent, or not this kind of record. Nothing was compared. argparse errors already exit 2. |
+
+Status 3 stays `next`'s. The verify statuses get their own `VERIFY_*` names.
+
+### Results that change from today's
+
+Besides the choices below:
+
+- Requiring `--seal` for 0 is a new contract; today `verify` exits 0 without it.
+- These exit 0 with a NOTE today and become 4: a record outside its campaign
+  folder (a note missing beside it included); a manifest missing from, or
+  changed in, the campaign folder; a commit Git cannot answer for; a word or
+  note difference read from a dirty tree, or from another revision unless it
+  is prose layout only; a meaning-bearing glossary or protocol word that
+  differs under a matched seal.
+- A missing note beside a record in its folder exits 1 today and becomes 4.
+- A record of another producer exits 1 today and becomes 2.
+
+### Gaps in the current code
+
+1. When the manifest's digest differs from the frozen one, `_manifest_rows`
+   compares no row, and the re-read uses the frozen row. A frozen specimen
+   changed in the manifest passes with a NOTE and exit 0, even with `--seal`,
+   and the report still lists the row check among the checks made.
+2. An uncaught exception exits 1 with a traceback: the status of a problem
+   found.
+3. Unless the running code is a clean checkout of the commit that wrote the
+   record, a word difference cannot be told from an edit: it is a NOTE, and
+   `verify` exits 0. In that case only `--seal` catches a record word that was
+   edited and then re-sealed. No seal covers the note beside the record, so
+   `--seal` never catches an edited note.
+4. A re-read compares composition, value and uncertainty only. Boundaries,
+   durations, cycle slopes and the reversed-lead analysis are recomputed, but
+   none of them is compared with what the record states.
+5. A reversed-lead file that was already missing at the freeze leaves no source
+   in the record, so `verify` compares nothing for it and says nothing (exit 0).
+   One that was there at the freeze and has gone since exits 1.
+6. There is no route for an authorised re-save of a recording after a freeze,
+   and `next` refuses to freeze identical observations again. (The five forward
+   workbooks were re-saved, with authorisation, on 13 Oct 2026, before any
+   freeze; after a freeze the same re-save would make the record fail.)
+7. A record frozen before a wording correction, such as the 15 Oct 2026
+   uncertainty correction recorded in the `ite_trace` docstring, keeps the
+   earlier words. Where `verify` compares them (the protocol and the sigma
+   glossary), later code shows word differences: NOTEs with exit 0 today, 4
+   under the proposal until the researcher accepts the new wording. The basis
+   written beside each uncertainty value is not compared at all.
+
+### Choices to settle when implementing (recommendation first)
+
+- D1. A byte-only re-save of a main recording with agreeing numbers: 1, or 4.
+- D2. A missing reversed-lead file (gap 5): 4, since no value the model fits
+  depends on it (its diagnostic numbers stay in the record); or 1. Today a file
+  gone since the freeze exits 1, and one already missing at the freeze exits 0.
+- D3. A commit not in this clone: 4, or 1 as now.
+- D4. A check that raises: 4, or 1 as now ("a block damaged past recomputing is
+  itself the finding"). The wording comparison is the exception today: its
+  failure becomes a word difference, a NOTE with exit 0 except under the
+  writing commit.
+- D5. An archived copy of a record outside its campaign folder: 4, or a
+  `--campaign DIR` option.
+- D6. Added specimens. Status 0 allows them, but adding one changes the
+  manifest, which status 4 names. Recommended: a changed manifest is 4 only
+  until each frozen row can be compared (gap 1); after that, a manifest changed
+  only by added specimens can reach 0.
+- D7. A frozen manifest row that differs from an unchanged manifest, read from
+  another revision: 1 (a changed frozen row), or 4 (a word difference from
+  another revision, the reading its test gives).
+- D8. A record lacking a block that `read_record` does not require (the seal,
+  the source revision): 2, or 1 as now.
+
+### Work required
+
+- The four statuses, their headlines and a top-level guard (gap 2) in
+  `campaign_trace._verify`.
+- A comparison of each frozen manifest row with the current manifest, so that
+  added specimens are informational and changed or dropped ones are problems
+  (gap 1, D6).
+- For gaps 4 and 5: compare what the record states, or say in the report that
+  it is not compared.
+- A classification of word differences as meaning-bearing (sign, units,
+  uncertainty, protocol rules) or layout only, a record of who accepted a
+  change of meaning, and a rule for a differing note, which no seal covers
+  (gaps 3 and 7).
+- A recorded route for authorised re-saves, before the first freeze (gap 6).
+- The module docstring's exit table, and the tests in `test_campaign_trace.py`:
+  eight of the nine assertions that expect 0 without `--seal` become 4, and
+  the ninth follows D7; the assertion that expects 0 with a matched seal over a
+  changed glossary entry becomes 4.
+
+None of it is meant to change a value, an observation or an optimizer input;
+the re-save route must be designed so that it does not.
+
+## 2026-10-15 — Correction: how far a three-point slope's standard error falls short
+
+Two earlier entries misstate it. They stay as written, since this log is
+append-only; the figures below replace theirs.
+
+- 2026-08-21, "Stage 6 Complete", under *Findings worth keeping*: "by roughly
+  2.4× at the median" and "four ΔT values is the cheap fix".
+- 2026-09-05, "The sign of S was never actually specified", under *Four
+  delta-T points, not three*: "lands below the truth about half the time, by
+  roughly a factor of two at the median".
+
+For a least-squares slope fitted to three ΔT points, the residual variance has
+one degree of freedom. The reported standard error lands below the true one
+about 68% of the time (P(χ²₁ < 1) = 0.683), and at the median it is about 0.67
+of it (√0.455): short by a factor of about 1.5, the variance by about 2.2. A
+fourth ΔT point narrows the shortfall but does not remove it: on two degrees of
+freedom the standard error lands below the truth about 63% of the time, at a
+median of about 0.83. A Monte Carlo of `fit_seebeck_slope` itself, 200,000 fits
+each, agrees: 0.681 and 0.675 for three points, 0.634 and 0.831 for four.
+
+`slope.py` already gives these figures, and `docs/stages/stage6_closed_loop.md`
+now matches it. The move to four ΔT points (2026-09-05) stands, but it narrows
+the bias rather than fixing it. The ite-trace/1 contract never uses a single
+fit's standard error as an uncertainty.

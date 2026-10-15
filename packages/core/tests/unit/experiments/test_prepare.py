@@ -20,13 +20,17 @@ from latos.experiments.prepare import (
     AGGREGATION_IDENTITY,
     AGGREGATION_MAGNITUDE,
     AGGREGATION_TARGET,
+    PREDICTION_NOISE_DECLARED,
     PREDICTION_NOISE_GLOSSARY,
     PREDICTION_NOISE_LOWER_BOUND,
     PREDICTION_NOISE_NOT_PASSED,
+    PREDICTION_NOISE_PARTLY_ASSUMED,
     PREDICTION_NOISE_POOLED,
     PREDICTION_NOISE_UNDETERMINED,
+    noise_source_from_sigma,
     project,
 )
+from latos.experiments.reduce import SIGMA_DECLARED, SIGMA_LOWER_BOUND, SIGMA_UNDETERMINED
 from tests.unit.experiments._examples import (
     SIDE,
     SIGNAL,
@@ -151,7 +155,12 @@ def test_an_unknown_sigma_gets_the_largest_known_one() -> None:
         "lower_bound_specimen",
     )
     assert prepared.prediction_noise == pytest.approx(0.3)  # the median handed over
-    assert prepared.prediction_noise_source == PREDICTION_NOISE_LOWER_BOUND
+    # The substitute is assumed, and it is in the median: the noise is not
+    # called estimated from measurements.
+    assert prepared.prediction_noise_source == PREDICTION_NOISE_PARTLY_ASSUMED
+    meaning = PREDICTION_NOISE_GLOSSARY[PREDICTION_NOISE_PARTLY_ASSUMED]
+    assert meaning.startswith("Partly assumed")
+    assert "an assumption, not a measurement" in meaning
 
 
 def test_with_no_sigma_anywhere_every_condition_gets_the_spread_of_y() -> None:
@@ -209,7 +218,41 @@ def test_a_lower_bound_prediction_noise_scales_with_specimens_per_condition() ->
     prepared = prepare_optimization(definition, reduced_set(definition, *MIXED))
     assert prepared.prediction_noise == pytest.approx(0.08 / 2)
     assert prepared.prediction_noise_source == PREDICTION_NOISE_LOWER_BOUND
-    assert "too narrow" in PREDICTION_NOISE_GLOSSARY[PREDICTION_NOISE_LOWER_BOUND]
+    meaning = PREDICTION_NOISE_GLOSSARY[PREDICTION_NOISE_LOWER_BOUND]
+    # Measured, but only a part of the budget; the interval may be too narrow,
+    # which is not said to be certain.
+    assert meaning.startswith("Estimated from measured observations")
+    assert "not a complete uncertainty budget" in meaning
+    assert "may understate" in meaning
+    assert "too narrow" not in meaning
+
+
+def test_each_prediction_noise_says_whether_it_was_estimated_or_assumed() -> None:
+    glossary = PREDICTION_NOISE_GLOSSARY
+    assert glossary[PREDICTION_NOISE_POOLED].startswith("Estimated from measured observations")
+    assert glossary[PREDICTION_NOISE_UNDETERMINED].startswith("Assumed, not estimated")
+    assert glossary[PREDICTION_NOISE_PARTLY_ASSUMED].startswith("Partly assumed")
+    assert glossary[PREDICTION_NOISE_NOT_PASSED].startswith("None passed")
+
+
+@pytest.mark.parametrize(
+    ("labels", "source"),
+    [
+        ([SIGMA_LOWER_BOUND, SIGMA_LOWER_BOUND], PREDICTION_NOISE_LOWER_BOUND),
+        ([SIGMA_LOWER_BOUND, SIGMA_UNDETERMINED], PREDICTION_NOISE_PARTLY_ASSUMED),
+        ([SIGMA_DECLARED, SIGMA_UNDETERMINED], PREDICTION_NOISE_PARTLY_ASSUMED),
+        ([SIGMA_LOWER_BOUND, SIGMA_DECLARED], PREDICTION_NOISE_DECLARED),
+        ([SIGMA_DECLARED, SIGMA_DECLARED], PREDICTION_NOISE_DECLARED),
+        ([SIGMA_UNDETERMINED, SIGMA_UNDETERMINED], PREDICTION_NOISE_UNDETERMINED),
+        ([], PREDICTION_NOISE_UNDETERMINED),
+    ],
+)
+def test_an_unpooled_noise_is_measured_only_when_every_condition_had_one(
+    labels: list[str], source: str
+) -> None:
+    # Measured only when every condition's spread was estimated from its
+    # specimens; a declared spread is known but was not measured here.
+    assert noise_source_from_sigma(labels) == source
 
 
 def test_only_an_unprojected_objective_inherits_the_valid_range() -> None:

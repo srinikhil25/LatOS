@@ -25,7 +25,7 @@ class UncertaintyScope(StrEnum):
     SPECIMEN is a within-specimen component: how well this one specimen's value
     is determined by the repeated or fitted measurements made on it in one
     session. It leaves out specimen-to-specimen variation, so as a statement
-    about the condition it is always a lower bound.
+    about the condition it is one component of the uncertainty, never all of it.
 
     CONDITION is the uncertainty of the value as an estimate of the response at
     its condition, specimen-to-specimen variation included.

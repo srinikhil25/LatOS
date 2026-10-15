@@ -14,7 +14,10 @@ no model and writes nothing, so it can be run as often as wanted.
 ``next`` does the same, then asks the existing one-variable optimizer for the
 next composition and **freezes** the recommendation as a version 2 record. The
 recommendation is shown only after the record has been written, read back and
-verified. Until then nothing printed describes one, except the preview of a
+checked for internal consistency (the internal consistency checks of
+``verify``, below; the model is not fitted a second time, and the campaign's
+checks against the recordings and manifest are left to ``verify``). Until then
+nothing printed describes one, except the preview of a
 ``--dry-run``, which says that it is a preview. Before any model is fitted it
 refuses when:
 
@@ -34,8 +37,10 @@ refuses when:
 * ``--out`` names any folder but the campaign's own record folder;
 * there are too few distinct conditions for a model;
 * the source tree is not exactly a Git commit: a prospective recommendation has
-  to be reproducible from a precise revision, and one that has been seen cannot
-  be unseen.
+  to name the precise revision that computed it, and one that has been seen
+  cannot be unseen. Naming the revision is what makes a recomputation possible
+  to attempt; no command here attempts it, and library versions are recorded,
+  not pinned.
 
 An earlier record of this campaign is one frozen for this experiment name under
 any version, one frozen for this definition under any name, or one that holds
@@ -73,7 +78,9 @@ its manifest, and that is the only place they are looked for. A record written
 anywhere else could not stop a later run, which is why ``--out`` is refused
 unless it names that folder. A record that is moved, renamed or deleted by
 hand, or a campaign folder copied without its records, is beyond what this
-command can see. The seal noted in the lab notebook is what shows that.
+command can see. Only the seal noted in the lab notebook at the freeze can show
+that a record found later is the one frozen; nothing here can show that no
+other record was made and removed.
 
 ``--dry-run`` makes every check above except the last, computes a preview and
 freezes nothing: it writes no record and no note, and changes neither the
@@ -81,26 +88,61 @@ manifest nor any recording. Nothing records that a preview was shown: a later
 ``next`` on the same data can freeze the same recommendation, and its record
 will not say that it was seen first.
 
-``verify`` recomputes what a frozen record claims about itself, and compares
-its seal with one noted at freeze time if that is given.
+``verify`` checks a frozen record and reports, separately, what each kind of
+check covered:
+
+* **external seal integrity**: the record matches its own seal, and, only when
+  ``--seal`` gives the seal noted at the freeze, that seal. Without it the
+  record is shown to be self-consistent, not to be the one frozen;
+* **internal record consistency**: what the record's own numbers imply about
+  each other (`prereg.verify_record`), including each condition's uncertainty
+  label and sigma from what its specimens state;
+* **campaign checks**, made for any record of this producer: every row's
+  producer detail, the inline definition against this campaign's, the
+  optimizer settings ``next`` uses, each fitted specimen's mean and standard
+  error recomputed from the cycle slopes its producer detail lists (the slopes
+  are not fitted again), the commit, and the words a freeze writes;
+* **checks against the record's sources**, made only when the record is in its
+  campaign's record folder: the recordings' bytes, each specimen read again
+  from its recording (composition, value and uncertainty only), and the
+  manifest rows;
+* **what is not recomputed**: the fitted model (its mean and bands over the
+  grid, its length-scale, the stopping probability and the leave-one-out
+  counts), the reliability note, the optimizer's messages, the environment,
+  and from the recordings the on-durations, boundaries, the cycle fits and
+  the reversed-lead analyses (reading a specimen again computes them, but
+  only its composition, value and uncertainty are compared). The seal holds
+  those as written; nothing shows they would come out the same if computed
+  again;
+* **prospective validation**: none. No outcome of a version 2 record has been
+  measured and scored, and no code scores one yet.
+
+A NOTE is a check that could not be settled. It is never counted as passed:
+the summary line says how many there are, and counts the comparison with the
+noted seal as unsettled when ``--seal`` is not given.
 
 Exit status
 -----------
 ====  ======================================================================
 0     ``check``: ready; no reason ``next`` would refuse applies to this data,
-      this record folder and this source tree. ``next``: frozen and
-      verified, or with ``--dry-run`` a preview was computed. ``verify``: the
-      record verifies.
+      this record folder and this source tree. ``next``: frozen, and the
+      record read back passed the internal consistency checks, or with
+      ``--dry-run`` a preview was computed. ``verify``: no check it makes
+      found a problem; NOTEs, if any, are printed and remain unsettled.
+      Status 0 does not mean the
+      computation was reproduced, that the record is the one frozen unless
+      ``--seal`` was given, or that any prediction was validated.
 1     ``check``: NOT READY, with every reason printed: whatever would make
       ``next`` refuse, including a source tree that is not exactly a commit
       and an earlier record that is waiting for its outcome. ``next``:
       refused, with every reason printed; nothing was fitted and no record
-      was written. ``verify``: the record does not verify.
+      was written. ``verify``: a check found a problem.
 2     The manifest, or the record given to ``verify``, could not be read.
 3     ``next`` got past every refusal and then failed: the model could not be
       fitted or set out, the freeze was not confirmed (writing the record,
-      reading it back and verifying it did not all complete), or the record
-      it wrote does not verify. No recommendation was shown. The message
+      reading it back and checking it did not all complete), or the record
+      it wrote fails the internal consistency checks. No recommendation was
+      shown. The message
       names every file the attempt left and says what each one is.
 ====  ======================================================================
 
@@ -166,6 +208,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from latos.analysis.thermovoltage.cycles import reduce_cycles
 from latos.core.enums import Severity
 from latos.core.exceptions import LatosError
 from latos.experiments import (
@@ -190,24 +233,33 @@ from latos.experiments import (
     run_optimization,
     source_revision,
 )
+from latos.experiments._canonical import canonical_json
 from latos.experiments.prepare import PREDICTION_NOISE_GLOSSARY
 from latos.experiments.prereg import (
     PARTIAL_SUFFIX,
+    POLICY_OPTIMIZER_DEFAULT,
+    PRIOR_BEST_FITTED,
     SCHEMA_VERSION,
+    VERDICT_BEST_SAMPLE,
     RecordError,
     freeze_v2,
     interrupted_freeze_files,
     observations_digest_nd,
     read_record,
+    record_seal,
     render_note,
     verify_record,
+    wording_differences,
 )
 from latos.experiments.producers import ite_trace
 from latos.experiments.producers.ite_trace import ManifestError, produce_table
-from latos.experiments.reduce import SIGMA_GLOSSARY
+from latos.experiments.reduce import SIGMA_GLOSSARY, SIGMA_LOWER_BOUND
 from latos.experiments.revision import WORKING_TREE_CLEAN, commit_known
 from latos.ingestion.hashing import hash_bytes
 from latos.optimization.engine import _DEFAULT_DELTA as DEFAULT_DELTA
+from latos.optimization.engine import _GRID_SIZE as DEFAULT_GRID_SIZE
+from latos.optimization.engine import _REL_NOISE as DEFAULT_REL_NOISE
+from latos.optimization.engine import _XI as DEFAULT_XI
 from latos.optimization.engine import OptimizationResult
 from latos.optimization.prereg import prereg_dir
 from latos.optimization.validate import outcome_path_for
@@ -256,8 +308,11 @@ FREEZE_LOCK = ".freeze.lock"
 _INTERRUPTED = "interrupted"
 
 # What `next` freezes with, by way of `run_optimization`, which passes the
-# optimizer no acquisition, no stopping tolerance and no risk of its own.
+# optimizer no acquisition, no exploration margin, no grid size, no stopping
+# tolerance and no risk of its own.
 _CAMPAIGN_ACQUISITION = "ei"
+# The optimizer's random seed `next` fits with.
+CAMPAIGN_SEED = 0
 
 # A specimen read again from its recording by the same contract gives the same
 # numbers; a library update may move the last bits.
@@ -443,7 +498,7 @@ def load_campaign(
     return CampaignState(definition, table, observation_set, prepared)
 
 
-def recommend(state: CampaignState, *, seed: int = 0) -> OptimizationResult:
+def recommend(state: CampaignState, *, seed: int = CAMPAIGN_SEED) -> OptimizationResult:
     """Ask the existing one-variable optimizer for the next composition.
 
     Raises:
@@ -547,7 +602,7 @@ def _specimen_block(observation: Observation, definition: ExperimentDefinition) 
         "none"
         if value.uncertainty is None
         else f"{value.uncertainty:.4f} (cycle SEM, {reduction.get('degrees_of_freedom')} "
-        "d.o.f.; within-specimen lower bound)"
+        "d.o.f.; within-session cycle variation only, not a complete uncertainty)"
     )
     inputs = observation.inputs
     lines = [
@@ -717,13 +772,15 @@ def _recommendation_lines(result: OptimizationResult, state: CampaignState) -> l
         f"  predicted {result.target_name} = {recommendation.predicted_mean:.4f} {unit}",
         f"  95% predictive interval = [{low:.4f}, {high:.4f}] {unit}   "
         f"(model alone: +/- {recommendation.ci95:.4f} {unit})",
-        f"  best fitted condition so far = {result.best_y:.4f} {unit} at {name} = "
-        f"{result.best_x:.4f} (specimens outside the search bounds are not fitted)",
+        f"  best observed among fitted conditions = {result.best_y:.4f} {unit} at {name} = "
+        f"{result.best_x:.4f} (specimens outside the search bounds are kept as evidence, "
+        "not fitted)",
         f"  largest expected improvement over the search range = {result.max_ei:.4g} {unit} "
         f"(noise threshold {result.noise_threshold:.4g} {unit})",
     ]
     if result.stopping is not None:
         lines.append(f"  {result.stopping.action}: {result.stopping.reason}")
+        lines.append(f"  ({VERDICT_BEST_SAMPLE})")
     if result.reliability is not None:
         lines.append(f"  reliability: {result.reliability.level}. {result.reliability.note}")
     return lines
@@ -973,8 +1030,9 @@ def _unfinished(directory: Path) -> list[str]:
     reasons = [
         f"{path} was left by a freeze that did not complete. It is not a record, and nothing "
         "it states was confirmed as frozen. If anyone has opened it, its recommendation has "
-        "been seen, and freezing the same data again would give the same one without saying "
-        "so. A run stopped at the last step can also have published the record itself beside "
+        "been seen, and freezing the same data again is likely to give the same one (the "
+        "optimizer is seeded), with nothing in the new record saying it had been seen. A run "
+        "stopped at the last step can also have published the record itself beside "
         "it: run `verify` on any prereg_*.json there of the same name before deciding what "
         f"was frozen. Once that is noted, move it to {directory.parent / _INTERRUPTED}, a "
         "folder nothing here reads, and run this again"
@@ -1160,9 +1218,9 @@ def _refusals(
         # Decided before the model is fitted: something that has been seen
         # cannot be made prospective afterwards by committing the code.
         reasons.append(
-            "what is frozen must be reproducible from a precise source revision, and this one "
-            f"is not: {revision.describe()}. Commit the code, or restore the tree, and run this "
-            "again"
+            "what is frozen must name the precise source revision that computed it, and this "
+            f"tree is not one: {revision.describe()}. Commit the code, or restore the tree, and "
+            "run this again"
         )
     return reasons
 
@@ -1222,8 +1280,12 @@ def _what_it_is(path: Path) -> str:
     except ValueError as exc:
         return f"not a record: {_why(exc)}"
     if problems:
-        return f"a version {SCHEMA_VERSION} record that does NOT verify"
-    return f"a complete version {SCHEMA_VERSION} record, and it verifies against its own seal"
+        return f"a version {SCHEMA_VERSION} record that does NOT pass its consistency checks"
+    return (
+        f"a complete version {SCHEMA_VERSION} record that matches its own seal and passes its "
+        "internal consistency checks; the campaign's checks against the recordings are "
+        "`verify`'s"
+    )
 
 
 def _freeze_failure(
@@ -1232,8 +1294,8 @@ def _freeze_failure(
     """What to say when a model was fitted and its freeze was not confirmed.
 
     A freeze is confirmed when the record has been written, read back and
-    verified. Any of the three may be what failed, so the files the attempt
-    left are each said as what they are.
+    passed its internal consistency checks. Any of the three may be what
+    failed, so the files the attempt left are each said as what they are.
 
     Args:
         exc: What stopped the freeze.
@@ -1244,8 +1306,8 @@ def _freeze_failure(
     left = sorted(_file_names(directory) - before)
     lines = [
         "A model was fitted and its freeze was NOT confirmed. A freeze is confirmed only when the "
-        "record has been written, read back and verified, and that did not complete. What the "
-        "model suggested is not shown.",
+        "record has been written, read back and passed its internal consistency checks, and "
+        "that did not complete. What the model suggested is not shown.",
         f"  reason: {type(exc).__name__}: {_why(exc)}",
     ]
     if left:
@@ -1469,9 +1531,10 @@ def _freeze_held(
         )
         return EXIT_FAILED
 
-    # Freeze, read back and verify first. What the model suggested is printed
-    # only once a record that verifies is on disk, so nothing on the screen can
-    # be taken for a commitment that was not made.
+    # Freeze, read back and check first. What the model suggested is printed
+    # only once a record that passes the internal consistency checks is on
+    # disk, so nothing on the screen can be taken for a commitment that was not
+    # made.
     before = now
     try:
         path = freeze_v2(
@@ -1512,6 +1575,8 @@ def _freeze_held(
     print(f"Seal:   {record['seal']['sha256']}")
     print()
     print("\n".join([f"Recommendation, frozen in {path.name}", *shown]))
+    selection = record["acquisition"]["selection"]
+    print(f"  how it was chosen ({selection['rule']}): {selection['explanation']}")
     print()
     print("Write the seal in the lab notebook now, before the specimen is made.")
     return EXIT_OK
@@ -1531,8 +1596,17 @@ def _verify(path: Path, seal: str | None) -> int:
         return EXIT_UNREADABLE
     problems = list(verify_record(record, expected_seal=seal))
     notes: list[str] = []
+    # Whether the body is shown unedited since the freeze: it matches the seal
+    # noted then, and that seal is its own.
+    block = record.get("seal")
+    stated: dict[str, Any] = block if isinstance(block, dict) else {}
+    sealed = (
+        seal is not None
+        and stated.get("sha256") == seal.strip().lower()
+        and record_seal(record) == stated.get("sha256")
+    )
     try:
-        found, notes = _campaign_findings(record, path)
+        found, notes = _campaign_findings(record, path, sealed=sealed)
         problems += found
     except Exception as exc:
         problems.append(f"the campaign's own checks could not be made: {type(exc).__name__}: {exc}")
@@ -1543,32 +1617,116 @@ def _verify(path: Path, seal: str | None) -> int:
         for note in notes:
             print(f"  NOTE: {note}")
         return EXIT_REFUSED
-    against = "its own seal" if seal is None else "its own seal and the seal given"
-    print(f"{path.name} verifies against {against}.")
-    print(
-        "  Its note is the one it renders, its commit is in this repository as far as Git "
-        "could say, and every recording it names that is still beside it is byte for byte "
-        "the one it was read from and gives the values the record holds."
-    )
-    print(f"Seal: {record['seal']['sha256']}")
-    source = record["source_revision"]
-    print(f"Source revision: {source['git_commit']} (working tree {source['working_tree']})")
-    for note in notes:
-        print(f"  NOTE: {note}")
-    if seal is None:
-        print(
-            "  Without the seal noted at the freeze, this shows that the record is consistent, "
-            "not that it is the one frozen. Pass --seal to compare."
-        )
+    print("\n".join(_verify_report(record, path, seal, notes)))
     return EXIT_OK
 
 
-def _campaign_findings(record: Mapping[str, Any], path: Path) -> tuple[list[str], list[str]]:
+def _verify_report(
+    record: Mapping[str, Any], path: Path, seal: str | None, notes: Sequence[str]
+) -> list[str]:
+    """What a `verify` that found no problem checked, and what it did not.
+
+    Each kind of check is said separately, so that the exit status is not
+    read as more than it is: not a reproduction of the computation, and not a
+    validation of the prediction. A NOTE is a check that could not be
+    settled and is counted as such, never as passed.
+    """
+    left = []
+    if notes:
+        left.append(f"{_label(len(notes), 'NOTE')} (listed below; not verified)")
+    if seal is None:
+        left.append("the comparison with the seal noted at the freeze (--seal was not given)")
+    unsettled = "nothing left unsettled" if not left else "left unsettled: " + "; and ".join(left)
+    in_campaign = prereg_dir(path.resolve().parent.parent.parent) == path.resolve().parent
+    scope = "consistency and of its sources" if in_campaign else "consistency only"
+    lines = [
+        f"{path.name}: no check `verify` makes found a problem, with {unsettled}.",
+        f"  This is a check of the record's {scope}. It does not fit the model again, and it "
+        "validates no prediction.",
+        "",
+        "External seal integrity",
+        "  - The record matches its own seal.",
+        "  - The seal noted at the freeze: "
+        + (
+            "NOT COMPARED, because --seal was not given. This shows the record is consistent, "
+            "not that it is the one frozen."
+            if seal is None
+            else "compared, and the record's seal is that one."
+        ),
+        "",
+        "Internal record consistency (recomputed from the record's own contents)",
+        "  - the observation digest, the definition hash, and y from y_raw and the objective;",
+        "  - each condition's value and design point from its specimens, and its uncertainty "
+        "label and sigma from the uncertainty and scope its specimens state, with the "
+        "substitute for a condition that has none;",
+        "  - the uncertainty provenance from those labels, and the prediction noise and its "
+        "source from the conditions' sigma;",
+        "  - the prediction, both intervals and the recommended point against the frozen grid "
+        "the record holds, the selection rule, the expected improvement where the band is "
+        "plain, the prior best, and the stopping verdict from its stated probability;",
+        "  - each producer-detail digest, and that the source revision is stated and coherent.",
+        "",
+        "Campaign checks (from the record's contents and this code)",
+        "  - each fitted specimen's value and uncertainty are the mean and the standard error "
+        "of the cycles its producer detail lists (no uncertainty only for one cycle or "
+        "identical cycles), and each within-specimen label rests on at least two such cycles; "
+        "the slopes themselves are not fitted again;",
+        "  - every row's producer detail is this producer's, from one manifest, with one "
+        "protocol; its inline definition is this campaign's; its optimizer settings are those "
+        "`next` uses; its commit is in this repository as far as Git could say;",
+        "  - its note, protocol, glossaries, criteria, selection explanation and verdict "
+        "sentence are the words this code writes.",
+        "",
+        "Checks against the record's sources",
+    ]
+    if in_campaign:
+        lines += [
+            "  - every recording it names, the reversed-lead runs' included, is beside it and "
+            "byte for byte the one read;",
+            "  - each specimen's recording, read again as its frozen manifest row, gives the "
+            "composition, value and uncertainty the record holds;",
+            "  - while the manifest beside it is the one frozen, the record holds exactly its "
+            "specimens, each as its row of that manifest.",
+        ]
+    else:
+        lines.append(
+            "  - NOT MADE: the record is not in a campaign's record folder, so it was not "
+            "compared with the recordings and manifest it was read from."
+        )
+    lines += [
+        "  Each check above holds unless a NOTE below says it could not be settled.",
+        "",
+        "Not independently recomputed (the seal holds them as written)",
+        "  - the fitted model: its mean and bands over the grid, its length-scale, the stopping "
+        "probability and the leave-one-out counts;",
+        "  - the reliability note, the optimizer's messages and the environment versions;",
+        "  - from the recordings: the on- and off-durations, the cycle boundaries and fits, the "
+        "rest of the reduction detail and the reversed-lead analyses. Reading a specimen again "
+        "computes them, but only its composition, value and uncertainty are compared.",
+        "",
+        "Prospective validation: NONE. No outcome of this recommendation has been measured and "
+        "scored, and no code scores a version 2 record yet. Its validation criteria are stated, "
+        "not applied.",
+        "",
+        f"Seal: {record['seal']['sha256']}",
+    ]
+    source = record["source_revision"]
+    lines.append(f"Source revision: {source['git_commit']} (working tree {source['working_tree']})")
+    lines += [f"  NOTE: {note}" for note in notes]
+    return lines
+
+
+def _campaign_findings(
+    record: Mapping[str, Any], path: Path, *, sealed: bool = False
+) -> tuple[list[str], list[str]]:
     """What a record of this campaign must also agree with, beyond itself.
 
     Its producer's detail on every row, the recordings and the manifest it was
-    read from when they are still beside it, its note, and its commit. Files
-    are read and Git is asked read-only; nothing is written.
+    read from when they are still beside it, its note, the contract's protocol
+    and the other words a freeze writes, and its commit. Words are fixed by the
+    code that wrote them, so a difference read by that same code is an edit and
+    read by other code is noted for the seal to settle. Files are read and Git
+    is asked read-only; nothing is written.
 
     Returns:
         The problems, then the notes: what could not be compared, or changed
@@ -1582,8 +1740,10 @@ def _campaign_findings(record: Mapping[str, Any], path: Path) -> tuple[list[str]
             "this campaign and none of the campaign's checks applies to it"
         ], notes
     rows = [*record["specimens"], *record["excluded"]]
-    problems += _producer_detail_problems(rows)
+    found, protocol_words = _producer_detail_problems(record)
+    problems += found
     problems += _campaign_settings_problems(record)
+    problems += _uncertainty_support(record)
 
     source = record["source_revision"]
     if source.get("working_tree") != WORKING_TREE_CLEAN:
@@ -1602,65 +1762,132 @@ def _campaign_findings(record: Mapping[str, Any], path: Path) -> tuple[list[str]
     campaign = folder.parent.parent
     in_campaign = prereg_dir(campaign) == folder
     note = path.with_suffix(".md")
+    words = [*wording_differences(record), *protocol_words]
+    if record["experiment"].get("definition_sha256") != definition_sha256(DEFINITION):
+        # The generic check holds the inline definition to its own hash; this
+        # holds it to the campaign's. A later revision may define it otherwise.
+        words.append(
+            f"its inline definition is not this code's {DEFINITION.name} {DEFINITION.version} "
+            "definition (experiment.definition_sha256 differs)"
+        )
+    written: str | None = None
     try:
         written = note.read_text(encoding="utf-8")
     except FileNotFoundError:
-        written = None
-    except OSError as exc:
-        problems.append(f"its note {note.name} could not be read ({_why(exc)})")
-        written = ""
-    if written is None:
         # A freeze writes the note with the record; a copy elsewhere may not.
         (problems if in_campaign else notes).append(f"its note {note.name} is not beside it")
-    elif written and written != render_note(record):
-        problems.append(
-            f"its note {note.name} is not the note this record renders: it was edited, or "
-            "written by another version of Latos. Compare the two before relying on either"
-        )
+    except OSError as exc:
+        problems.append(f"its note {note.name} could not be read ({_why(exc)})")
+    if written is not None and written != render_note(record):
+        # An emptied note is a note that is not the one rendered, like any other.
+        words.append(f"its note {note.name} is not the note this record renders")
 
-    if not in_campaign:
+    if in_campaign:
+        found, said = _files_against(rows, campaign)
+        again, read_notes = _read_again(record, campaign)
+        listed, row_words = _manifest_rows(rows, campaign)
+        problems += found + listed + again
+        notes += said + read_notes
+        words += row_words
+    else:
         notes.append(
             "the record is not in a campaign's record folder, so it was not compared with the "
             "recordings and manifest it was read from"
         )
-        return problems, notes
-    found, said = _files_against(rows, campaign)
-    return problems + found + _manifest_rows(rows, campaign) + _read_again(record, campaign), (
-        notes + said
+    judged, noted = _judge_words(words, commit, sealed=sealed)
+    return problems + judged, notes + noted
+
+
+def _judge_words(
+    words: Sequence[str], commit: Any, *, sealed: bool = False
+) -> tuple[list[str], list[str]]:
+    """Words that differ, as problems when this code wrote the record, else as notes.
+
+    Words are fixed by the code that wrote them. Read by that same code, a
+    difference can only be an edit; read by other code, it may also be words
+    that changed between the two, which only the seal can settle. When the
+    record already matches the seal noted at the freeze (`sealed`), its own
+    words are shown unedited, and only the note beside it, which no seal
+    covers, can still have been edited.
+    """
+    if not words:
+        return [], []
+    running = source_revision()
+    if running.working_tree == WORKING_TREE_CLEAN and running.git_commit == commit:
+        return [
+            f"{said}: this code is the revision that wrote the record, so it was edited"
+            for said in words
+        ], []
+    opening = (
+        f"the record was written by commit {commit}, and the code reading it is "
+        f"{running.describe()}."
     )
+    settle = (
+        " The record matches the seal noted at the freeze, so its own words are as frozen and "
+        "changed between the two revisions; the note beside it is not sealed, so a difference "
+        "in the note may also be an edit"
+        if sealed
+        else " Either it was edited, or the words changed between the two; only the seal noted "
+        "at the freeze can tell which"
+    )
+    return [], [f"{said}: {opening}{settle}" for said in words]
 
 
-def _manifest_rows(rows: Sequence[Mapping[str, Any]], campaign: Path) -> list[str]:
-    """While the manifest is the one frozen, the record holds exactly its specimens."""
+def _manifest_rows(
+    rows: Sequence[Mapping[str, Any]], campaign: Path
+) -> tuple[list[str], list[str]]:
+    """While the manifest is the one frozen, the record holds exactly its specimens and rows.
+
+    Each specimen's manifest row, as the producer read it with the defaults
+    applied, must be a row of that manifest for the same sample id. The
+    defaults are applied by the reading code, so a row that differs is judged
+    as the words are.
+
+    Returns:
+        The problems, then the rows that differ, for `_judge_words`.
+    """
     frozen = {
         (detail["manifest"].get("file"), detail["manifest"].get("sha256"))
         for detail in (row.get("producer_detail") or {} for row in rows)
         if isinstance(detail.get("manifest"), dict)
     }
     if len(frozen) != 1:
-        return []  # said by `_producer_detail_problems`
+        return [], []  # said by `_producer_detail_problems`
     ((name, digest),) = frozen
     path = campaign / str(name)
     if _digest_of(path) != digest:
-        return []  # changed or gone since: a note, said by `_files_against`
-    declared = sorted(
-        str(row.get(ite_trace.SAMPLE_ID, "")).strip() for row in ite_trace.load_manifest(path).rows
-    )
+        return [], []  # changed or gone since: a note, said by `_files_against`
+    on_disk = {
+        str(row.get(ite_trace.SAMPLE_ID, "")).strip(): json.loads(canonical_json(row))
+        for row in ite_trace.load_manifest(path).rows
+    }
     held = sorted(str(row.get("sample_id") or "").strip() for row in rows)
-    if declared != held:
+    if sorted(on_disk) != held:
         return [
             f"the manifest {name} is the one the record was frozen from, and the record does "
             "not hold exactly its specimens: one was added to the record or taken out of it"
-        ]
-    return []
+        ], []
+    differ = []
+    for row in rows:
+        label = str(row.get("sample_id") or "").strip()
+        stated = ((row.get("producer_detail") or {}).get("manifest") or {}).get("row_with_defaults")
+        # A row stating none is a problem, said by `_producer_detail_problems`.
+        if isinstance(stated, dict) and stated != on_disk[label]:
+            differ.append(
+                f"{label}: the manifest row it states it was read as is not its row of "
+                f"{name}, which is the manifest the record was frozen from"
+            )
+    return [], differ
 
 
 def _campaign_settings_problems(record: Mapping[str, Any]) -> list[str]:
     """What `next` always freezes with, and a record of this campaign must state.
 
-    `next` asks for expected improvement, leaves the stopping tolerance at the
-    prediction noise and its risk at the optimizer's default, takes the
-    optimizer's best fitted value as the baseline, and grades reliability.
+    `next` asks for expected improvement, leaves the exploration policy, the
+    exploration margin, the grid size and the stopping risk at the optimizer's
+    defaults and the stopping tolerance at the prediction noise, takes the
+    best observed among fitted conditions as the baseline, and grades
+    reliability.
     """
     problems = []
     acquisition = record["acquisition"]
@@ -1670,34 +1897,58 @@ def _campaign_settings_problems(record: Mapping[str, Any]) -> list[str]:
             f"its acquisition is {acquisition.get('function')!r}; `next` uses "
             f"{_CAMPAIGN_ACQUISITION!r}"
         )
+    if acquisition.get("xi") != DEFAULT_XI:
+        problems.append(f"its exploration margin xi is not the {DEFAULT_XI} `next` uses")
+    if record["frozen_config"].get("grid_size") != DEFAULT_GRID_SIZE:
+        problems.append(f"its grid size is not the {DEFAULT_GRID_SIZE} points `next` uses")
+    if record["frozen_config"].get("rel_noise") != DEFAULT_REL_NOISE:
+        problems.append(f"its assumed relative noise is not the {DEFAULT_REL_NOISE} `next` uses")
+    if record["frozen_config"].get("seed") != CAMPAIGN_SEED:
+        problems.append(f"its random seed is not the {CAMPAIGN_SEED} `next` uses")
     if claim.get("delta") != DEFAULT_DELTA:
         problems.append(f"its stopping risk delta is not the {DEFAULT_DELTA} `next` uses")
     if claim.get("epsilon") != record["frozen_config"].get("noise_std"):
         problems.append("its stopping tolerance epsilon is not the prediction noise `next` uses")
     if record.get("prior_best") != claim.get("best_measured"):
         problems.append("its prior best is not the best fitted value `next` takes as the baseline")
+    if record.get("prior_best_basis") != PRIOR_BEST_FITTED:
+        problems.append(f"its prior best is not labelled as the {PRIOR_BEST_FITTED}")
+    selection = acquisition.get("selection") or {}
+    if selection.get("explore_policy_source") != POLICY_OPTIMIZER_DEFAULT:
+        problems.append(
+            "its exploration policy is not the optimizer's default, and `next` leaves it there"
+        )
     if record.get("reliability") is None:
         problems.append("it holds no reliability grade, and `next` always grades")
     return problems
 
 
-def _read_again(record: Mapping[str, Any], campaign: Path) -> list[str]:
+def _read_again(record: Mapping[str, Any], campaign: Path) -> tuple[list[str], list[str]]:
     """Read each frozen specimen again from its recording, as the manifest row it was frozen with.
 
     The values the producer gives now must be the values the record holds:
-    the composition, the recording's SHA-256, the value and its uncertainty.
-    Nothing is written.
+    the composition, the value and its uncertainty, from a recording with the
+    SHA-256 it was frozen with. A recording whose bytes changed is already a
+    problem (`_files_against`); what its numbers give now is said beside it,
+    as a note when they still agree and a problem when they do not, so that a
+    re-saved file is told apart from changed data. Nothing is written.
+
+    Returns:
+        The problems, then the notes.
     """
     stored = record["experiment"]["definition"]
     design = next(v for v in stored["variables"] if v["role"] == VariableRole.DESIGN.value)
     response = next(r for r in stored["responses"] if r["name"] == stored["objective"]["response"])
-    problems = []
+    problems: list[str] = []
+    notes: list[str] = []
     for row in [*record["specimens"], *record["excluded"]]:
         label = row.get("sample_id") or row.get("record_id")
         detail = row.get("producer_detail") or {}
         frozen = (detail.get("manifest") or {}).get("row_with_defaults")
         if not isinstance(frozen, dict) or not (detail.get("source") or {}).get("sha256"):
-            continue  # refused before its recording was read: nothing to read again
+            # Refused before its recording was read, or stating no manifest row
+            # (a problem `_producer_detail_problems` reports): nothing to read again.
+            continue
         manifest = ite_trace.Manifest(
             path=campaign / str(detail["manifest"]["file"]),
             sha256=str(detail["manifest"]["sha256"]),
@@ -1710,32 +1961,46 @@ def _read_again(record: Mapping[str, Any], campaign: Path) -> list[str]:
             continue
         now = (
             again.get(design["column"]),
-            again.get(ite_trace.TRACE_SHA256),
             again.get(response["column"]),
             again.get(response.get("uncertainty_column")),
         )
         if "inputs" in row:
             value = row["responses"].get(response["name"]) or {}
-            then = (
-                row["inputs"].get(design["name"]),
-                row["metadata"].get(ite_trace.TRACE_SHA256),
-                value.get("value"),
-                value.get("uncertainty"),
-            )
+            then = (row["inputs"].get(design["name"]), value.get("value"), value.get("uncertainty"))
+            frozen_sha = row["metadata"].get(ite_trace.TRACE_SHA256)
         else:
             values = row["values"]
             then = (
                 values.get(design["column"]),
-                values.get(ite_trace.TRACE_SHA256),
                 values.get(response["column"]),
                 values.get(response.get("uncertainty_column")),
             )
-        if not all(_same_value(a, b) for a, b in zip(now, then, strict=True)):
+            frozen_sha = values.get(ite_trace.TRACE_SHA256)
+        same = all(_same_value(a, b) for a, b in zip(now, then, strict=True))
+        if again.get(ite_trace.TRACE_SHA256) is None:
             problems.append(
-                f"{label}: its recording, read again as the row it was frozen with, does not "
+                f"{label}: its recording could not be read again, so the values the record holds "
+                "cannot be compared with it"
+            )
+        elif again.get(ite_trace.TRACE_SHA256) == frozen_sha:
+            if not same:
+                problems.append(
+                    f"{label}: its recording, read again as the row it was frozen with, does not "
+                    "give the values the record holds"
+                )
+        elif same:
+            notes.append(
+                f"{label}: its recording has changed since the freeze, and read again it gives "
+                "the values the record holds (composition, value, uncertainty). Numerical "
+                "equivalence may still hold, but the file is not the one frozen, so the frozen "
+                "source is not verified"
+            )
+        else:
+            problems.append(
+                f"{label}: its recording has changed since the freeze, and read again it does not "
                 "give the values the record holds"
             )
-    return problems
+    return problems, notes
 
 
 def _same_value(a: Any, b: Any) -> bool:
@@ -1745,12 +2010,27 @@ def _same_value(a: Any, b: Any) -> bool:
     return bool(a == b)
 
 
-def _producer_detail_problems(rows: Sequence[Mapping[str, Any]]) -> list[str]:
-    """Whether every row's producer detail is this producer's, for this row, from one manifest."""
+def _producer_detail_problems(record: Mapping[str, Any]) -> tuple[list[str], list[str]]:
+    """Whether every row's producer detail is this producer's, for this row, from one manifest.
+
+    Every row states the contract's protocol, the same on every row. A row
+    that holds a value was read from a recording, so it states that
+    recording's SHA-256, and the same one in its own columns and in its
+    producer's detail: without it nothing could tie the value to its data.
+
+    Returns:
+        The problems, then the words that differ: a protocol that is not the
+        one this code writes for the contract. The protocol describes the
+        processing and does not define it, so words that differ are judged
+        as `_campaign_findings` judges every other word a freeze writes.
+    """
+    stored = record["experiment"]["definition"]
+    design = next(v for v in stored["variables"] if v["role"] == VariableRole.DESIGN.value)
+    response = next(r for r in stored["responses"] if r["name"] == stored["objective"]["response"])
     problems = []
     manifests: set[tuple[Any, Any]] = set()
     protocols: list[Any] = []
-    for row in rows:
+    for row in [*record["specimens"], *record["excluded"]]:
         label = row.get("sample_id") or row.get("record_id")
         detail = row.get("producer_detail")
         if not isinstance(detail, dict):
@@ -1760,22 +2040,169 @@ def _producer_detail_problems(rows: Sequence[Mapping[str, Any]]) -> list[str]:
             problems.append(f"{label}: its producer detail is not from {ite_trace.CONTRACT}")
         if row.get("sample_id") is not None and detail.get("sample_id") != row["sample_id"]:
             problems.append(f"{label}: its producer detail is for another specimen")
-        values = row["metadata"] if "inputs" in row else row["values"]
-        stated = values.get(ite_trace.TRACE_SHA256)
-        read = (detail.get("source") or {}).get("sha256")
-        if stated is not None and stated != read:
-            problems.append(
-                f"{label}: the recording SHA-256 it states is not the one its producer read"
-            )
+        problems += [f"{label}: {said}" for said in _recording_digest(row, detail, response)]
+        problems += [f"{label}: {said}" for said in _kept_values(row, design, response)]
         manifest = detail.get("manifest")
         if isinstance(manifest, dict):
             manifests.add((manifest.get("file"), manifest.get("sha256")))
+        if not (isinstance(manifest, dict) and isinstance(manifest.get("row_with_defaults"), dict)):
+            # The producer states the manifest row on every row it makes, refused
+            # ones included; without it the row cannot be read again or compared.
+            problems.append(f"{label}: its producer detail states no manifest row it was read as")
         if "protocol" in detail:
             protocols.append(detail["protocol"])
+        else:
+            problems.append(f"{label}: its producer detail states no protocol")
     if len(manifests) > 1:
         problems.append("the specimens were not all read from one manifest")
     if any(protocol != protocols[0] for protocol in protocols):
         problems.append("the specimens do not all state the same protocol")
+    contract = json.loads(json.dumps(ite_trace.PROTOCOL, ensure_ascii=False))
+    words = (
+        [
+            f"the protocol the specimens state is not the {ite_trace.CONTRACT} protocol this code "
+            "writes, word for word"
+        ]
+        if any(protocol != contract for protocol in protocols)
+        else []
+    )
+    return problems, words
+
+
+def _recording_digest(
+    row: Mapping[str, Any], detail: Mapping[str, Any], response: Mapping[str, Any]
+) -> list[str]:
+    """Whether a row states the SHA-256 its producer read, and states one if it holds a value."""
+    if "inputs" in row:
+        values = row["metadata"]
+        value = (row["responses"].get(response["name"]) or {}).get("value")
+    else:
+        values = row["values"]
+        value = values.get(response["column"])
+    stated = values.get(ite_trace.TRACE_SHA256)
+    read = (detail.get("source") or {}).get("sha256")
+    if stated != read:
+        return ["the recording SHA-256 it states is not the one its producer read"]
+    if value is not None and not (isinstance(read, str) and read):
+        return [
+            "it holds a value and no SHA-256 of the recording it was read from, so the value "
+            "cannot be tied to its data"
+        ]
+    return []
+
+
+def _kept_values(
+    row: Mapping[str, Any], design: Mapping[str, Any], response: Mapping[str, Any]
+) -> list[str]:
+    """Whether a specimen kept outside the bounds states one set of numbers, not two.
+
+    Such a row holds the producer's columns and, beside them, the specimen as
+    a specimen is kept. Both come from one reading, so the recording SHA-256,
+    the design value and the response value must be the same in each.
+    """
+    if "inputs" not in row or "category" not in row:
+        return []  # a fitted specimen holds no producer columns
+    values = row.get("values")
+    if not isinstance(values, dict):
+        return ["it holds no producer columns, so its values cannot be tied to its recording"]
+    pairs = (
+        (
+            "recording SHA-256",
+            values.get(ite_trace.TRACE_SHA256),
+            row["metadata"].get(ite_trace.TRACE_SHA256),
+        ),
+        ("design value", values.get(design["column"]), row["inputs"].get(design["name"])),
+        (
+            "response value",
+            values.get(response["column"]),
+            (row["responses"].get(response["name"]) or {}).get("value"),
+        ),
+    )
+    return [
+        f"the {what} in its producer columns is not the one it holds as a specimen"
+        for what, column, kept in pairs
+        if not _same_value(column, kept)
+    ]
+
+
+# The fewest measurement cycles a within-specimen spread can be estimated from.
+_CYCLES_FOR_A_SPREAD = 2
+
+
+def _uncertainty_support(record: Mapping[str, Any]) -> list[str]:
+    """Whether each fitted specimen's value and uncertainty rest on the cycles its detail lists.
+
+    A within-specimen label says the uncertainty was estimated from repeated
+    measurements on the one specimen; for this producer those are the
+    accepted measurement cycles, which its detail lists with their slopes. So
+    a specimen's value must be the mean of the cycles included in it, its
+    uncertainty their standard error as its reduction reports it, its scope
+    the one the definition declares, and a condition labelled within-specimen
+    must rest on at least two such cycles. Recomputed from the record alone,
+    as `reduce_cycles` computes it; nothing is read. The slopes themselves
+    are fitted from the recording and are not fitted again here.
+    """
+    stored = record["experiment"]["definition"]
+    response = next(r for r in stored["responses"] if r["name"] == stored["objective"]["response"])
+    problems: list[str] = []
+    counts: dict[str, int] = {}
+    for row in record["specimens"]:
+        label = row["sample_id"]
+        detail = row.get("producer_detail") or {}
+        reduction, cycles = detail.get("reduction"), detail.get("cycles")
+        if not (isinstance(reduction, dict) and isinstance(cycles, list)):
+            problems.append(f"{label}: its producer detail lists no cycles its value rests on")
+            continue
+        included = [
+            c for c in cycles if isinstance(c, dict) and c.get("included_in_specimen_value")
+        ]
+        slopes = [c.get("slope_mv_k") for c in included]
+        if (
+            [c.get("index") for c in included] != reduction.get("cycles_used")
+            or slopes != reduction.get("cycle_values_mv_k")
+            or not slopes
+            or not all(isinstance(s, (int, float)) and math.isfinite(s) for s in slopes)
+        ):
+            problems.append(
+                f"{label}: the cycles its reduction uses are not the cycles its detail includes"
+            )
+            continue
+        counts[label] = len(slopes)
+        again = reduce_cycles([float(s) for s in slopes if s is not None])
+        value = row["responses"].get(response["name"]) or {}
+        reported = reduction.get("uncertainty_reported_mv_k")
+        # The producer withholds the standard error only for one cycle, or for
+        # cycles identical to its own tolerance.
+        withheld = again.sd is None or again.sd <= ite_trace._IDENTICAL_REL * abs(again.mean)
+        if reported is None and not withheld:
+            problems.append(
+                f"{label}: its reduction reports no uncertainty, though the cycles its detail "
+                "includes are more than one and not identical"
+            )
+        if not _same_value(again.mean, value.get("value")):
+            problems.append(f"{label}: its value is not the mean of the cycles its detail includes")
+        if reported is not None and (again.sem is None or not _same_value(again.sem, reported)):
+            problems.append(
+                f"{label}: the uncertainty its reduction reports is not the standard error of "
+                "the cycles its detail includes"
+            )
+        if not _same_value(value.get("uncertainty"), reported):  # None only matches None
+            problems.append(f"{label}: its uncertainty is not the one its reduction reports")
+        if value.get("uncertainty") is not None and value.get("uncertainty_scope") != response.get(
+            "uncertainty_scope"
+        ):
+            problems.append(
+                f"{label}: its uncertainty scope is not the one the definition declares"
+            )
+    block = record["observations"]
+    for index, (said, ids) in enumerate(
+        zip(block["sigma_sources"], block["sample_ids"], strict=True)
+    ):
+        if said == SIGMA_LOWER_BOUND and any(counts.get(i, 0) < _CYCLES_FOR_A_SPREAD for i in ids):
+            problems.append(
+                f"condition {index + 1} is labelled within-specimen, and its specimen does not "
+                "rest on at least two measurement cycles"
+            )
     return problems
 
 
@@ -1785,8 +2212,11 @@ def _files_against(
     """Compare the recordings and the manifest a record names with the files in `campaign`.
 
     A recording that is missing or has changed is a problem: the record can no
-    longer be taken back to its data. A manifest that has changed is a note,
-    because a campaign adds specimens to it after a freeze.
+    longer be taken back to its data. A recording is identified by its bytes,
+    so a file re-saved with the same numbers is a changed file; `_read_again`
+    says whether its numbers still agree, which can never restore the identity
+    of the file that was frozen. A manifest that has changed is a note, because
+    a campaign adds specimens to it after a freeze.
     """
     problems: list[str] = []
     notes: list[str] = []
@@ -1809,7 +2239,11 @@ def _files_against(
         if now is None:
             problems.append(f"the recording {name} is not in {campaign}, so it cannot be compared")
         elif now != digest:
-            problems.append(f"the recording {name} is not the one the record was frozen from")
+            problems.append(
+                f"the recording {name} is not the one the record was frozen from: the source "
+                f"identity changed (SHA-256 now {now[:16]}..., frozen {digest[:16]}...), so the "
+                "frozen source is not verified"
+            )
     for name, digest in sorted(manifests.items()):
         now = _digest_of(campaign / name)
         if now is None:
@@ -1858,7 +2292,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help=("make every check except the source-tree one, and print a preview; freeze nothing"),
     )
 
-    verify = commands.add_parser("verify", help="recompute what a frozen record claims")
+    verify = commands.add_parser(
+        "verify",
+        help="check a frozen record's seal, consistency and sources; it does not refit the model "
+        "or validate a prediction",
+    )
     verify.add_argument("record", type=Path, help="the frozen record (.json)")
     verify.add_argument("--seal", default=None, help="the seal noted when it was frozen")
 

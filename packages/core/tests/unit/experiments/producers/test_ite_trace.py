@@ -11,8 +11,13 @@ import numpy as np
 import pytest
 
 from latos.analysis.thermovoltage.cycles import AUTOMATIC_SETTINGS
+from latos.analysis.thermovoltage.slope import (
+    POLARITY_V_PLUS_ON_COLD,
+    POLARITY_V_PLUS_ON_HOT,
+    resolve_polarity,
+)
 from latos.core.enums import Severity
-from latos.experiments._canonical import canonical_json
+from latos.experiments._canonical import canonical_json, sha256_hex
 from latos.experiments.producers import ite_trace
 from latos.experiments.producers.ite_trace import (
     COLUMNS,
@@ -234,6 +239,27 @@ def test_with_neither_marks_nor_a_declaration_the_fallback_warns(tmp_path: Path)
     automatic = row.producer_detail["boundaries"]["automatic"]
     assert automatic["settings"] == AUTOMATIC_SETTINGS
     assert automatic["end_is_recording_end"] is True
+    assert "it takes the end of the recording as the end of the last cycle" in warning
+
+
+def test_the_fallback_says_when_an_unfinished_last_cycle_is_left_out(tmp_path: Path) -> None:
+    # Three whole cycles, then the drive switched on again and the recording
+    # stopped before it was switched off: an odd number of switches.
+    make_recording(
+        tmp_path / "run.xlsx",
+        switches=[10.0, 190.0, 370.0, 550.0, 730.0, 910.0, 1090.0, 1200.0],
+        marks=None,
+        tail_s=1.0,
+    )
+    row = _row(tmp_path)
+
+    automatic = row.producer_detail["boundaries"]["automatic"]
+    assert automatic["end_is_recording_end"] is False
+    assert row.producer_detail["reduction"]["k"] == 3
+    (warning,) = _warnings(row)
+    assert "the last switch-on it found closes the last cycle" in warning
+    assert "the unfinished cycle after it is left out" in warning
+    assert "takes the end of the recording" not in warning
 
 
 @pytest.mark.parametrize(
@@ -553,6 +579,13 @@ def test_no_channel_map_is_a_refusal_not_a_guess(tmp_path: Path) -> None:
             {},
             "does not rise while the drive is on",
         ),
+        # With no marks, a swapped map on a recording that starts at rest is
+        # refused by the estimate's first-sample rule, as PROTOCOL says.
+        (
+            {"cold": "CH1-A-3", "hot": "CH1-A-1", "voltage": "CH1-A-10"},
+            {"marks": None},
+            "the recording starts with the temperature difference already high",
+        ),
     ],
 )
 def test_a_channel_or_unit_problem_is_refused(
@@ -632,12 +665,17 @@ def test_the_uncertainty_is_the_cycle_standard_error_labelled_as_a_lower_bound(
 
     basis = row.provenance[SEM]
     assert "divided by sqrt(3), 2 degrees of freedom" in basis
-    assert "within-specimen, within-session Type A component and a lower bound" in basis
+    assert "within-session Type A estimate of how well the cycles pin down their mean" in basis
+    assert "not a complete uncertainty budget" in basis
     assert "not been shown independent or exchangeable" in basis
     stated = PROTOCOL["uncertainty"]
     assert stated["scope"] == "specimen"
     assert stated["is_lower_bound"] is True
     assert "a new mounting of the same mixture" in stated["does_not_cover"]
+    # The formula as the code computes it, not "(k - 1) / sqrt(k)".
+    assert stated["reported"].startswith("standard error of the mean of the k accepted cycle")
+    assert "s / sqrt(k)" in stated["reported"]
+    assert "(divisor k - 1); k - 1 degrees of freedom" in stated["reported"]
 
 
 def test_the_fit_standard_error_of_a_cycle_is_never_the_uncertainty(tmp_path: Path) -> None:
@@ -785,6 +823,81 @@ def test_the_protocol_names_no_electrode_material() -> None:
     assert "gold" not in text
     assert "copper" not in text
     assert "electrode material: recorded per specimen when it is known" in text
+
+
+# The protocol of ite-trace/1 as this revision states it. It is copied into
+# every record. A change to it is a decision, not an edit. A documentation
+# correction that changes neither the executable processing nor the accepted
+# scientific interpretation keeps ite-trace/1 and updates this digest. A
+# correction of the accepted interpretation of a reported value, with no change
+# to processing, keeps ite-trace/1 only by the researcher's explicit approval,
+# recorded in the producer's docstring (as the 15 Oct 2026 uncertainty
+# correction was). A change to the reduction mathematics, the accepted windows,
+# the polarity interpretation, the exclusion criteria or any other processing
+# semantics needs explicit review and a new protocol version.
+_PROTOCOL_SHA256 = "2677bd432911b503c74deac9ef2a779fd02fe85706bd876348073f5bbbb91533"
+
+
+def test_the_protocol_text_is_the_one_reviewed() -> None:
+    assert sha256_hex(canonical_json(PROTOCOL)) == _PROTOCOL_SHA256
+
+
+def test_the_lower_bound_names_are_kept_and_not_claimed_as_a_bound() -> None:
+    # The serialized identifiers stay, for records already written; every text
+    # that explains them says the SEM is not an established bound.
+    from latos.experiments.prepare import PREDICTION_NOISE_GLOSSARY, PREDICTION_NOISE_LOWER_BOUND
+    from latos.experiments.reduce import SIGMA_GLOSSARY, SIGMA_LOWER_BOUND
+
+    assert ite_trace.CONTRACT == "ite-trace/1"
+    assert (SIGMA_LOWER_BOUND, PREDICTION_NOISE_LOWER_BOUND) == (
+        "lower_bound_specimen",
+        "lower_bound",
+    )
+    assert PROTOCOL["uncertainty"]["is_lower_bound"] is True
+    disclaimer = "not a rigorously established lower bound on the total experimental uncertainty"
+    assert disclaimer in SIGMA_GLOSSARY[SIGMA_LOWER_BOUND]
+    assert disclaimer in PREDICTION_NOISE_GLOSSARY[PREDICTION_NOISE_LOWER_BOUND]
+    meaning = PROTOCOL["uncertainty"]["is_lower_bound_meaning"]
+    assert "kept under this name for compatibility" in meaning
+    assert "nothing has established, that this standard error is a lower bound" in meaning
+    assert "keeps the serialized name lower_bound_specimen" in SIGMA_GLOSSARY[SIGMA_LOWER_BOUND]
+    docstring = " ".join((ite_trace.__doc__ or "").split())
+    assert disclaimer in docstring
+    # The estimate itself may fall short of the standard error it estimates;
+    # the old wording ("the spread it estimates") was ambiguous and is gone.
+    from latos.analysis.thermovoltage import cycles
+
+    short = "may underestimate the underlying standard error it estimates"
+    cycles_doc = " ".join((cycles.__doc__ or "").split())
+    assert disclaimer in cycles_doc
+    for text in (SIGMA_GLOSSARY[SIGMA_LOWER_BOUND], meaning, cycles_doc):
+        assert short in text
+        assert "spread it estimates" not in text
+    # The approval is recorded in the producer docstring; these lines pin that
+    # wording only. The value tests and the digest test guard the claim itself.
+    assert "Explicitly approved by the researcher on 15 Oct 2026" in docstring
+    assert "The correction changes no computational semantics" in docstring
+
+
+def test_the_protocol_states_the_sign_convention_the_fit_applies() -> None:
+    sign = PROTOCOL["sign"]
+    assert "S = -(slope of V_hot - V_cold against T_hot - T_cold)" in sign
+    assert "A positive S means V_cold - V_hot rises with T_hot - T_cold" in sign
+    assert "on the cold electrode the recorded voltage is used as it is (sign +1)" in sign
+    assert "on the hot electrode it is negated before fitting (sign -1)" in sign
+    assert "a sample at a switch belongs to exactly one cycle" in PROTOCOL["windows"]
+
+
+def test_the_protocol_states_how_the_wiring_words_are_read() -> None:
+    # As the protocol says: the side after the first V+, else the one side named.
+    assert "the side named after the first 'V+' when there is one" in PROTOCOL["sign"]
+    assert resolve_polarity("V- on hot, V+ on cold").convention == POLARITY_V_PLUS_ON_COLD
+    # And, as it also says, a side named for the negative lead alone is read as
+    # the positive lead's: the wiring must be written for the positive lead.
+    assert "names only the negative lead's side is read as the positive" in PROTOCOL["sign"]
+    assert resolve_polarity("V- on the hot electrode").convention == POLARITY_V_PLUS_ON_HOT
+    assert resolve_polarity("on both hot and cold").problem is not None
+    assert resolve_polarity("wired as usual").problem is not None
 
 
 # ─── The manifest ───────────────────────────────────────────────────

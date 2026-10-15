@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import openpyxl
 import pytest
 
 from latos import campaign_trace
@@ -42,6 +43,7 @@ from latos.experiments import (
     VariableRole,
     definition_sha256,
     definition_to_dict,
+    producer_detail_sha256,
 )
 from latos.experiments import prereg as experiments_prereg
 from latos.experiments.prereg import VersionCollision, read_record, verify_record
@@ -353,11 +355,12 @@ def test_three_cycles_are_one_specimen_at_one_condition(tmp_path: Path) -> None:
     assert condition.n_specimens == 1
     assert condition.sample_ids == ("s1",)
     assert condition.y_raw == pytest.approx(6.4 / 3)
-    # The cycle SEM arrives as a specimen-scope value, labelled a lower bound.
+    # The cycle SEM arrives as a specimen-scope value, labelled as a part of the
+    # uncertainty and not the whole of it.
     value = observation.responses[S]
     assert value.uncertainty == pytest.approx(float(np.std([2.0, 2.1, 2.3], ddof=1)) / math.sqrt(3))
     assert value.uncertainty_scope is UncertaintyScope.SPECIMEN
-    assert "lower bound" in value.provenance
+    assert "not a complete uncertainty budget" in value.provenance
     assert condition.sigma_source == "lower_bound_specimen"
     assert state.observation_set.pooled_sd is None  # cycles are repeats, never replicates
     assert state.enough is False
@@ -658,7 +661,10 @@ def test_reversed_runs_and_test_cycles_are_reported_and_are_not_observations(fiv
         text.count("is a reversed-lead diagnostic, not an observation (recorded sign reverses") == 3
     )
     assert "boundaries: declared; controls within tolerance" in text
-    assert "(cycle SEM, 2 d.o.f.; within-specimen lower bound)" in text
+    assert (
+        "(cycle SEM, 2 d.o.f.; within-session cycle variation only, not a complete uncertainty)"
+        in text
+    )
     assert text.isascii()
 
 
@@ -674,7 +680,7 @@ def test_the_report_states_the_domain_and_that_nothing_is_projected(five: Path) 
     )
     assert "  x = 0.240000   signed = +2.0200   optimized = +2.0200   sigma = " in text
     assert "x = 0.000000" not in text
-    assert "[lower_bound_specimen] A within-specimen uncertainty" in text
+    assert "[lower_bound_specimen] Within-specimen variability only" in text
     assert "prediction noise = " in text
     assert "[lower_bound]" in text
 
@@ -866,7 +872,7 @@ def test_the_frozen_record_keeps_the_specimen_outside_the_domain_whole(
     assert "pure-second" not in [i for ids in observations["sample_ids"] for i in ids]
 
     note = path.with_suffix(".md").read_text(encoding="utf-8")
-    assert "## Specimens kept outside the design bounds (not in the model)" in note
+    assert "## Specimens kept outside the design bounds (evidence; not in the model" in note
     assert "## Source revision (frozen)" in note
     assert COMMITTED.git_commit is not None
     assert COMMITTED.git_commit in note
@@ -908,9 +914,23 @@ def test_verify_accepts_the_frozen_record_and_rejects_an_edited_one(
     capsys.readouterr()
 
     assert main(["verify", str(path)]) == 0
+    unsealed = capsys.readouterr().out
+    # Without the noted seal the record is consistent, and is not shown to be the one frozen.
+    assert (
+        "  - The seal noted at the freeze: NOT COMPARED, because --seal was not given" in unsealed
+    )
+    # The comparison is counted as unsettled, not as passed.
+    assert (
+        "with left unsettled: the comparison with the seal noted at the freeze (--seal was not "
+        "given)." in unsealed
+    )
+    assert "nothing left unsettled" not in unsealed
     assert main(["verify", str(path), "--seal", seal]) == 0
     printed = capsys.readouterr().out
-    assert "verifies against its own seal and the seal given" in printed
+    assert (
+        "  - The seal noted at the freeze: compared, and the record's seal is that one." in printed
+    )
+    assert "NOT COMPARED" not in printed
     assert f"Source revision: {COMMITTED.git_commit} (working tree clean)" in printed
     assert main(["verify", str(path), "--seal", "0" * 64]) == 1
 
@@ -951,9 +971,164 @@ def test_verify_reads_and_changes_nothing(
     before = _snapshot(campaign.parent)
     assert main(["verify", str(path), "--seal", read_record(path)["seal"]["sha256"]]) == EXIT_OK
     printed = capsys.readouterr().out
-    assert "Its note is the one it renders" in printed
-    assert "gives the values the record holds" in printed
+    # Status 0 is said for what it is: no problem found, nothing left unsettled,
+    # and neither a reproduction nor a validation.
+    assert (
+        f"{path.name}: no check `verify` makes found a problem, with nothing left unsettled."
+        in (printed)
+    )
+    assert "This is a check of the record's consistency and of its sources." in printed
+    assert "It does not fit the model again, and it validates no prediction." in printed
+    # Each kind of check under its own heading, in order.
+    headings = [
+        "External seal integrity",
+        "Internal record consistency (recomputed from the record's own contents)",
+        "Campaign checks (from the record's contents and this code)",
+        "Checks against the record's sources",
+        "Not independently recomputed (the seal holds them as written)",
+        "Prospective validation: NONE.",
+    ]
+    places = [printed.index(heading) for heading in headings]
+    assert places == sorted(places)
+    assert "selection explanation and verdict sentence are the words this code writes" in printed
+    assert "its inline definition is this campaign's" in printed
+    assert "gives the composition, value and uncertainty the record holds" in printed
+    assert "each within-specimen label rests on at least two such cycles" in printed
+    assert "its mean and bands over the grid, its length-scale, the stopping probability" in printed
+    assert "the on- and off-durations, the cycle boundaries and fits" in printed
+    assert "no code scores a version 2 record yet" in printed
+    assert "verifies" not in printed  # no bare claim that the record "verifies"
+    assert "  NOTE:" not in printed
     assert _snapshot(campaign.parent) == before
+
+
+def test_a_note_is_counted_as_unsettled_and_never_as_passed(
+    campaign: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _frozen(campaign, capsys)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for frozen in (path, path.with_suffix(".md")):
+        shutil.copyfile(frozen, elsewhere / frozen.name)
+    assert main(["verify", str(elsewhere / path.name)]) == EXIT_OK
+    printed = capsys.readouterr().out
+    count = printed.count("  NOTE: ")
+    assert count >= 1
+    unsettled = f"{count} NOTE" if count == 1 else f"{count} NOTEs"
+    assert (
+        f"{path.name}: no check `verify` makes found a problem, with left unsettled: "
+        f"{unsettled} (listed below; not verified); and the comparison with the seal noted at "
+        "the freeze (--seal was not given)." in printed
+    )
+    assert "nothing left unsettled" not in printed
+    # Away from its campaign, nothing is said to have been checked against its sources.
+    assert "This is a check of the record's consistency only." in printed
+    assert "  - NOT MADE: the record is not in a campaign's record folder" in printed
+    assert "  NOTE: the record is not in a campaign's record folder" in printed
+
+
+def _fitted(record: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """The first fitted specimen of a record, and the index of its condition."""
+    row = record["specimens"][0]
+    sample_ids = record["observations"]["sample_ids"]
+    return row, next(i for i, ids in enumerate(sample_ids) if row["sample_id"] in ids)
+
+
+def test_each_fitted_value_and_uncertainty_rest_on_the_cycles_its_detail_lists(
+    campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    record = read_record(_frozen(campaign, capsys))
+    assert campaign_trace._uncertainty_support(record) == []
+    row, _ = _fitted(record)
+    slopes = row["producer_detail"]["reduction"]["cycle_values_mv_k"]
+    value = row["responses"][S]
+    assert len(slopes) == 3
+    assert value["value"] == pytest.approx(float(np.mean(slopes)), rel=1e-12)
+    assert value["uncertainty"] == pytest.approx(
+        float(np.std(slopes, ddof=1)) / math.sqrt(3), rel=1e-12
+    )
+    assert value["uncertainty_scope"] == UncertaintyScope.SPECIMEN.value
+
+
+def _one_cycle_left(row: dict[str, Any]) -> None:
+    """The specimen made to rest on one cycle, consistently, with no uncertainty."""
+    detail = row["producer_detail"]
+    included = [c for c in detail["cycles"] if c["included_in_specimen_value"]]
+    for cycle in included[1:]:
+        cycle["included_in_specimen_value"] = False
+    detail["reduction"].update(
+        cycles_used=[included[0]["index"]],
+        cycle_values_mv_k=[included[0]["slope_mv_k"]],
+        uncertainty_reported_mv_k=None,
+    )
+    row["responses"][S].update(value=included[0]["slope_mv_k"], uncertainty=None)
+
+
+@pytest.mark.parametrize(
+    ("change", "finding"),
+    [
+        (
+            lambda row: row["producer_detail"]["cycles"][-1].update(slope_mv_k=9.0),
+            "the cycles its reduction uses are not the cycles its detail includes",
+        ),
+        (
+            lambda row: row["responses"][S].update(value=row["responses"][S]["value"] + 0.1),
+            "its value is not the mean of the cycles its detail includes",
+        ),
+        (
+            lambda row: row["producer_detail"]["reduction"].update(uncertainty_reported_mv_k=0.5),
+            "the uncertainty its reduction reports is not the standard error of the cycles",
+        ),
+        (
+            lambda row: row["responses"][S].update(
+                uncertainty=row["responses"][S]["uncertainty"] * 2
+            ),
+            "its uncertainty is not the one its reduction reports",
+        ),
+        (
+            lambda row: row["responses"][S].update(uncertainty_scope="condition"),
+            "its uncertainty scope is not the one the definition declares",
+        ),
+        (
+            lambda row: (
+                row["responses"][S].update(uncertainty=None),
+                row["producer_detail"]["reduction"].update(uncertainty_reported_mv_k=None),
+            ),
+            "its reduction reports no uncertainty, though the cycles its detail includes are "
+            "more than one and not identical",
+        ),
+        (
+            _one_cycle_left,
+            "is labelled within-specimen, and its specimen does not rest on at least two "
+            "measurement cycles",
+        ),
+    ],
+    ids=["cycle", "value", "reported", "uncertainty", "scope", "withheld", "one-cycle"],
+)
+def test_an_uncertainty_its_cycles_do_not_support_is_caught(
+    change: Any, finding: str, campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    record = read_record(_frozen(campaign, capsys))
+    row, _ = _fitted(record)
+    change(row)
+    problems = campaign_trace._uncertainty_support(record)
+    assert any(finding in problem for problem in problems), problems
+
+
+def test_a_resealed_uncertainty_its_cycles_do_not_give_fails_verify(
+    campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _frozen(campaign, capsys)
+
+    def doubled(record: dict[str, Any]) -> None:
+        row, _ = _fitted(record)
+        row["responses"][S]["uncertainty"] *= 2
+
+    _resealed(path, doubled)
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    printed = capsys.readouterr().out
+    assert "its uncertainty is not the one its reduction reports" in printed
+    assert "is not the uncertainty its specimen states" in printed
 
 
 @pytest.mark.parametrize("how", ["overwritten", "removed"])
@@ -1041,6 +1216,243 @@ def test_verify_catches_what_a_resealed_record_no_longer_shares_with_its_campaig
     assert "is not the note this record renders" in printed
 
 
+def _every_protocol(change: Any) -> Any:
+    """Apply `change` to the protocol every row states, digests redone, so the rows agree."""
+
+    def apply(record: dict[str, Any]) -> None:
+        for row in [*record["specimens"], *record["excluded"]]:
+            change(row["producer_detail"]["protocol"])
+            row["producer_detail_sha256"] = producer_detail_sha256(row["producer_detail"])
+
+    return apply
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda p: p.update(sign=p["sign"].replace("(sign -1)", "(sign +1)")),
+        lambda p: p["uncertainty"].update(reported="standard deviation (k - 1) / sqrt(k)"),
+        lambda p: p["boundaries"].update(thermal_signature_limit_s=60.0),
+        lambda p: p.pop("units"),
+    ],
+    ids=["sign", "uncertainty", "limit", "units-dropped"],
+)
+def test_verify_catches_a_protocol_altered_on_every_row(
+    change: Any, campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _frozen(campaign, capsys)
+    _resealed(path, _every_protocol(change))
+    assert verify_record(read_record(path)) == ()  # the record agrees with itself
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    printed = capsys.readouterr().out
+    assert (
+        "the protocol the specimens state is not the ite-trace/1 protocol this code writes, word "
+        "for word: this code is the revision that wrote the record, so it was edited"
+    ) in printed
+    assert "do not all state the same protocol" not in printed
+
+
+def test_a_protocol_read_by_another_revision_is_noted_for_the_seal_to_settle(
+    campaign: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The protocol describes the processing. A later commit may describe it in
+    # other words under the same contract, so its difference is noted, not refused.
+    path = _frozen(campaign, capsys)
+    _resealed(path, _every_protocol(lambda p: p.update(units="the units, said otherwise")))
+    later = SourceRevision(git_commit="cd" * 20, working_tree="clean")
+    monkeypatch.setattr(campaign_trace, "source_revision", lambda: later)
+    assert main(["verify", str(path)]) == EXIT_OK
+    printed = capsys.readouterr().out
+    assert "  NOTE: the protocol the specimens state is not the ite-trace/1 protocol" in printed
+    assert "only the seal noted at the freeze can tell which" in printed
+
+
+@pytest.mark.parametrize("rows", ["one", "accepted", "every"])
+def test_a_row_that_states_no_protocol_is_caught(
+    rows: str, campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def drop(record: dict[str, Any]) -> None:
+        chosen = {
+            "one": record["specimens"][:1],
+            "accepted": record["specimens"],
+            "every": [*record["specimens"], *record["excluded"]],
+        }[rows]
+        for row in chosen:
+            del row["producer_detail"]["protocol"]
+            row["producer_detail_sha256"] = producer_detail_sha256(row["producer_detail"])
+
+    path = _frozen(campaign, capsys)
+    _resealed(path, drop)
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    assert "its producer detail states no protocol" in capsys.readouterr().out
+
+
+def test_a_value_whose_recording_digest_was_dropped_is_caught(
+    campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Without the recording's SHA-256 nothing could tie the value to its data,
+    # and reading the recording again would be skipped.
+    def unhook(record: dict[str, Any]) -> None:
+        row = record["specimens"][0]
+        del row["producer_detail"]["source"]
+        del row["metadata"][ite_trace.TRACE_SHA256]
+        row["producer_detail_sha256"] = producer_detail_sha256(row["producer_detail"])
+
+    path = _frozen(campaign, capsys)
+    _resealed(path, unhook)
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    assert "it holds a value and no SHA-256 of the recording it was read from" in (
+        capsys.readouterr().out
+    )
+
+
+@pytest.mark.parametrize("content", [b"", b"\n"])
+def test_an_emptied_note_is_not_the_note_rendered(
+    content: bytes, campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _frozen(campaign, capsys)
+    path.with_suffix(".md").write_bytes(content)
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    assert "is not the note this record renders" in capsys.readouterr().out
+
+
+def _edit_words(record: dict[str, Any]) -> None:
+    record["prediction_noise"]["meaning"] = "A complete uncertainty budget."
+    record["acquisition"]["selection"]["explanation"] = "Chosen by the operator."
+
+
+def test_scientific_notes_edited_by_the_revision_that_wrote_them_are_caught(
+    campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _frozen(campaign, capsys)
+    _resealed(path, _edit_words)
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    printed = capsys.readouterr().out
+    revision = "this code is the revision that wrote the record, so it was edited"
+    assert "prediction_noise.meaning is not the wording this version of Latos writes" in printed
+    assert "acquisition.selection.explanation is not the wording" in printed
+    assert printed.count(revision) >= 3  # the two fields, and the note that no longer renders
+
+
+def test_words_read_by_another_revision_are_noted_for_the_seal_to_settle(
+    campaign: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _frozen(campaign, capsys)
+    _resealed(path, _edit_words)
+    # A later commit reads it: its words may have changed since, so a difference
+    # is said, and left to the seal noted at the freeze.
+    later = SourceRevision(git_commit="cd" * 20, working_tree="clean")
+    monkeypatch.setattr(campaign_trace, "source_revision", lambda: later)
+    assert main(["verify", str(path)]) == EXIT_OK
+    printed = capsys.readouterr().out
+    assert "  NOTE: prediction_noise.meaning is not the wording this version of Latos writes" in (
+        printed
+    )
+    assert "only the seal noted at the freeze can tell which" in printed
+    assert main(["verify", str(path), "--seal", "0" * 64]) == EXIT_REFUSED
+
+
+def test_words_that_differ_under_the_noted_seal_are_said_to_be_a_change_of_code(
+    campaign: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _frozen(campaign, capsys)
+    seal = read_record(path)["seal"]["sha256"]
+    # The code that reads it writes other words than the code that froze it.
+    later = SourceRevision(git_commit="cd" * 20, working_tree="clean")
+    monkeypatch.setattr(campaign_trace, "source_revision", lambda: later)
+    monkeypatch.setitem(experiments_prereg.SIGMA_GLOSSARY, "lower_bound_specimen", "other words")
+    assert main(["verify", str(path), "--seal", seal]) == EXIT_OK
+    printed = capsys.readouterr().out
+    assert "  NOTE: observations.sigma_glossary['lower_bound_specimen'] is not the wording" in (
+        printed
+    )
+    # The seal already settles that the record was not edited.
+    assert "The record matches the seal noted at the freeze, so its own words are as frozen" in (
+        printed
+    )
+    assert "only the seal noted at the freeze can tell which" not in printed
+
+
+@pytest.mark.parametrize(
+    ("change", "finding"),
+    [
+        (
+            lambda r: r["acquisition"]["selection"].update(
+                explore_policy_source="stated_at_freeze"
+            ),
+            "its exploration policy is not the optimizer's default",
+        ),
+        (
+            lambda r: r.update(prior_best_basis="baseline given when the record was frozen"),
+            "its prior best is not labelled as the best observed among fitted conditions",
+        ),
+        (
+            lambda r: r["acquisition"].update(xi=0.3),
+            "its exploration margin xi is not the 0.01 `next` uses",
+        ),
+        (
+            lambda r: r["frozen_config"].update(grid_size=100),
+            "its grid size is not the 200 points `next` uses",
+        ),
+        (
+            lambda r: r["frozen_config"].update(rel_noise=0.5),
+            "its assumed relative noise is not the",
+        ),
+        (lambda r: r["frozen_config"].update(seed=7), "its random seed is not the 0 `next` uses"),
+    ],
+)
+def test_a_record_of_this_campaign_states_what_next_always_freezes_with(
+    change: Any, finding: str, campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _frozen(campaign, capsys)
+    _resealed(path, change)
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    assert finding in capsys.readouterr().out
+
+
+def test_a_recording_resaved_with_the_same_numbers_is_a_changed_source(
+    campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _frozen(campaign, capsys)
+    recording = campaign.parent / "half.xlsx"
+    before = hashlib.sha256(recording.read_bytes()).hexdigest()
+    # Opened and saved again with a property changed: every number is the same,
+    # the bytes are not.
+    workbook = openpyxl.load_workbook(recording)
+    workbook.properties.title = "re-saved"
+    workbook.save(recording)
+    assert hashlib.sha256(recording.read_bytes()).hexdigest() != before
+
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    printed = capsys.readouterr().out
+    assert (
+        "  - the recording half.xlsx is not the one the record was frozen from: the source "
+        "identity changed (SHA-256 now "
+    ) in printed
+    assert f"frozen {before[:16]}...), so the frozen source is not verified" in printed
+    assert (
+        "NOTE: half: its recording has changed since the freeze, and read again it gives the "
+        "values the record holds (composition, value, uncertainty). Numerical equivalence may "
+        "still hold, but the file is not the one frozen, so the frozen source is not verified"
+    ) in printed
+    assert "half: its recording, read again" not in printed
+
+
+def test_a_recording_changed_in_its_numbers_is_said_to_be_so(
+    campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _frozen(campaign, capsys)
+    make_recording(campaign.parent / "half.xlsx", seebeck_mv_k=[1.0, 1.1, 1.2])
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    printed = capsys.readouterr().out
+    assert "source identity changed" in printed
+    assert (
+        "half: its recording has changed since the freeze, and read again it does not give "
+        "the values the record holds"
+    ) in printed
+    assert "Numerical equivalence may still hold" not in printed
+
+
 def _set_value(record: dict[str, Any], sample_id: str, value: float) -> None:
     """Give one fitted specimen another value, and redo everything derived from it."""
     (row,) = (row for row in record["specimens"] if row["sample_id"] == sample_id)
@@ -1080,6 +1492,144 @@ def test_verify_holds_a_resealed_record_to_its_recordings_and_to_how_next_freeze
     assert main(["verify", str(path)]) == EXIT_REFUSED
     printed = capsys.readouterr().out
     assert finding in printed, printed
+
+
+def _restate_manifest_row(record: dict[str, Any]) -> None:
+    row = record["specimens"][0]
+    row["producer_detail"]["manifest"]["row_with_defaults"]["operator"] = "someone else"
+    row["producer_detail_sha256"] = producer_detail_sha256(row["producer_detail"])
+
+
+def test_a_manifest_row_the_manifest_does_not_hold_is_caught(
+    campaign: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _frozen(campaign, capsys)
+    _resealed(path, _restate_manifest_row)
+    sample = read_record(path)["specimens"][0]["sample_id"]
+    said = f"{sample}: the manifest row it states it was read as is not its row of"
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    printed = capsys.readouterr().out
+    assert (
+        f"  - {said} {campaign.name}, which is the manifest the record was frozen from: this "
+        "code is the revision that wrote the record, so it was edited"
+    ) in printed
+    # Read by a later revision, which may apply the defaults otherwise: for the seal.
+    later = SourceRevision(git_commit="cd" * 20, working_tree="clean")
+    monkeypatch.setattr(campaign_trace, "source_revision", lambda: later)
+    assert main(["verify", str(path)]) == EXIT_OK
+    assert f"  NOTE: {said}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("rows", ["one", "every"])
+def test_a_row_that_states_no_manifest_row_is_caught(
+    rows: str, campaign: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def strip(record: dict[str, Any]) -> None:
+        every = [*record["specimens"], *record["excluded"]]
+        for row in every[:1] if rows == "one" else every:
+            del row["producer_detail"]["manifest"]
+            row["producer_detail_sha256"] = producer_detail_sha256(row["producer_detail"])
+        # And the change the manifest would have shown: the kept specimen dropped.
+        record["excluded"] = [x for x in record["excluded"] if x["sample_id"] != "pure-second"]
+        record["exclusion_glossary"] = {}
+
+    path = _frozen(campaign, capsys)
+    _resealed(path, strip)
+    path.with_suffix(".md").write_text(experiments_prereg.render_note(read_record(path)), "utf-8")
+    # Not a word that may change between revisions: refused under any of them.
+    later = SourceRevision(git_commit="cd" * 20, working_tree="clean")
+    monkeypatch.setattr(campaign_trace, "source_revision", lambda: later)
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    assert "its producer detail states no manifest row it was read as" in capsys.readouterr().out
+
+
+def test_a_record_under_another_definition_is_not_this_campaigns_unseen(
+    campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The same name and version, with the drive set-point's tolerance widened.
+    drive = DEFINITION.variables[1]
+    assert drive.name == ite_trace.DRIVE_VOLTAGE and drive.tolerance is not None
+    widened = replace(drive, tolerance=drive.tolerance + 0.5)
+    other = replace(
+        DEFINITION, variables=(DEFINITION.variables[0], widened, *DEFINITION.variables[2:])
+    )
+    assert definition_sha256(other) != definition_sha256(DEFINITION)
+
+    def redefine(record: dict[str, Any]) -> None:
+        record["experiment"] = experiments_prereg._experiment_block(other)
+
+    path = _frozen(campaign, capsys)
+    _resealed(path, redefine)
+    assert verify_record(read_record(path)) == ()  # consistent with its own definition
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    assert (
+        f"its inline definition is not this code's {DEFINITION.name} {DEFINITION.version} "
+        "definition (experiment.definition_sha256 differs): this code is the revision"
+    ) in capsys.readouterr().out
+
+
+def test_a_kept_specimen_without_its_producer_columns_is_caught(
+    campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def drop(record: dict[str, Any]) -> None:
+        (kept,) = (row for row in record["excluded"] if "inputs" in row)
+        del kept["values"]
+
+    path = _frozen(campaign, capsys)
+    _resealed(path, drop)
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    assert "pure-second: it holds no producer columns" in capsys.readouterr().out
+
+
+def _kept_column(which: str) -> Any:
+    """Change one of the producer columns of the specimen kept outside the bounds."""
+
+    def change(record: dict[str, Any]) -> None:
+        stored = record["experiment"]["definition"]
+        column = {
+            "recording": ite_trace.TRACE_SHA256,
+            "design": next(v for v in stored["variables"] if v["role"] == "design")["column"],
+            "response": next(
+                r for r in stored["responses"] if r["name"] == stored["objective"]["response"]
+            )["column"],
+        }[which]
+        (kept,) = (row for row in record["excluded"] if "inputs" in row)
+        kept["values"][column] = "0" * 64 if which == "recording" else 0.5
+
+    return change
+
+
+@pytest.mark.parametrize(
+    ("which", "finding"),
+    [
+        ("recording", "the recording SHA-256 in its producer columns is not the one it holds"),
+        ("design", "the design value in its producer columns is not the one it holds"),
+        ("response", "the response value in its producer columns is not the one it holds"),
+    ],
+)
+def test_the_specimen_kept_outside_the_bounds_states_one_set_of_numbers(
+    which: str, finding: str, campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _frozen(campaign, capsys)
+    _resealed(path, _kept_column(which))
+    assert verify_record(read_record(path)) == ()  # the record agrees with itself
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    assert f"pure-second: {finding}" in capsys.readouterr().out
+
+
+def test_the_kept_specimens_recording_digest_is_held_to_its_producer(
+    campaign: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def restate(record: dict[str, Any]) -> None:
+        (kept,) = (row for row in record["excluded"] if "inputs" in row)
+        kept["metadata"][ite_trace.TRACE_SHA256] = "0" * 64
+
+    path = _frozen(campaign, capsys)
+    _resealed(path, restate)
+    assert main(["verify", str(path)]) == EXIT_REFUSED
+    assert "pure-second: the recording SHA-256 it states is not the one its producer read" in (
+        capsys.readouterr().out
+    )
 
 
 def test_an_edited_note_is_caught_even_with_the_seal(
@@ -2147,10 +2697,18 @@ def test_the_recommendation_is_shown_only_after_the_record_is_frozen_and_verifie
         "Seal:   ",
         f"Recommendation, frozen in {path.name}",
         "  make aliquat_mass_fraction = ",
+        "  best observed among fitted conditions = ",
+        # The optimizer's verdict names "the best sample so far"; what that is follows it.
+        "  (In this sentence, the best sample so far is the best observed among fitted "
+        "conditions. Specimens kept outside the search bounds are evidence and are not among "
+        "them.)",
+        "  how it was chosen (",
         "Write the seal in the lab notebook now, before the specimen is made.",
     ]
     places = [printed.index(text) for text in order]
     assert places == sorted(places)
+    verdict = printed.index("the best sample so far (")
+    assert places[4] < verdict < places[5]
     assert printed.count("make aliquat_mass_fraction") == 1
     assert "PREVIEW" not in printed
 
@@ -2159,7 +2717,8 @@ _NOT_SHOWN = (
     "make aliquat_mass_fraction",
     "  predicted ",
     "95% predictive interval",
-    "best fitted condition so far",
+    "best observed among fitted conditions",
+    "how it was chosen",
     "Recommendation",
     "Frozen:",
     "Seal:",
@@ -2299,7 +2858,8 @@ def test_a_note_that_cannot_be_written_leaves_no_record(
     directory = prereg_dir(campaign.parent)
     assert (
         "A model was fitted and its freeze was NOT confirmed. A freeze is confirmed only when "
-        "the record has been written, read back and verified, and that did not complete."
+        "the record has been written, read back and passed its internal consistency checks, and "
+        "that did not complete."
     ) in printed
     assert list(directory.iterdir()) == []
     assert "left no file in it" in printed
@@ -2327,8 +2887,10 @@ def test_a_record_left_by_a_failed_freeze_that_does_not_verify_is_said_so(
     assert main(["next", str(campaign)]) == EXIT_FAILED
     printed = capsys.readouterr().out
     (left,) = _records(prereg_dir(campaign.parent))
-    assert f"    {left.name}: a version 2 record that does NOT verify" in printed
-    assert "verifies against its own seal" not in printed
+    assert f"    {left.name}: a version 2 record that does NOT pass its consistency checks" in (
+        printed
+    )
+    assert "passes its internal consistency checks" not in printed
     assert "was not written" not in printed
 
 
@@ -2367,8 +2929,9 @@ def test_a_read_back_that_fails_does_not_make_a_whole_record_a_broken_one(
     assert "  reason: PermissionError: Permission denied" in printed
     assert "was not written" not in printed
     assert (
-        f"    {left.name}: a complete version 2 record, and it verifies against its own seal"
-        in printed
+        f"    {left.name}: a complete version 2 record that matches its own seal and passes its "
+        "internal consistency checks; the campaign's checks against the recordings are "
+        "`verify`'s" in printed
     )
     assert f"    {left.with_suffix('.md').name}: " in printed  # its note was published first
     assert "`next` will refuse to fit these observations again" in printed

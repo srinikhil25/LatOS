@@ -190,7 +190,10 @@ class DesignPoint:
     weighing, the mixing, the mounting and the contacts as well as the voltmeter.
     Feeding a fit error to the optimizer as though it were the measurement
     uncertainty therefore understates the noise, and an over-confident surrogate
-    is precisely the failure the reliability layer exists to catch.
+    is precisely the failure the reliability layer exists to catch. This path
+    still does so when no usable pooled spread exists, for want of anything
+    else: such a point carries ``sigma_source`` ``fit`` (see
+    `aggregate_replicates`).
     """
 
     composition: float  # the mean composition of the replicates
@@ -489,6 +492,13 @@ def aggregate_replicates(fits: tuple[SampleFit, ...]) -> tuple[tuple[DesignPoint
     the correct uncertainty for a single observation drawn from that population
     and is usually larger, and more honest, than its own fit error.
 
+    When no usable pooled spread exists (no condition was replicated, or the
+    replicates were identical and their spread was discarded), a point made
+    once falls back to its own slope-fit standard error (source ``fit``), which
+    describes only the line drawn through that specimen's points and so
+    understates the noise as `DesignPoint` explains; a point without one is
+    ``undetermined``.
+
     Returns the design points and any notes for the report.
     """
     notes: list[str] = []
@@ -581,11 +591,17 @@ def aggregate_replicates(fits: tuple[SampleFit, ...]) -> tuple[tuple[DesignPoint
 def _optimize(points: tuple[DesignPoint, ...]) -> tuple[OptimizationResult, str | None]:
     """Fit the surrogate over composition, weighting each point by its own error.
 
-    A point whose uncertainty could not be determined — a two-point slope fit has
-    no degrees of freedom left, and a lone sample at an unreplicated condition
-    has nothing to compare itself with — is given the largest error in the
-    campaign rather than the smallest. Treating "unknown" as "excellent" is how
-    one under-measured point comes to dominate a surface.
+    A point whose uncertainty could not be determined — no usable pooled spread,
+    and no slope-fit standard error of its own, as from a two-point fit with no
+    degrees of freedom left — is given the largest error known in the campaign
+    rather than the smallest. Treating "unknown" as "excellent" is how one
+    under-measured point comes to dominate a surface. When no point has a known
+    error, every point is given the standard deviation of the design-point
+    values instead, or 1.0 mV/K when those are all equal: an assumption, which
+    also mixes the composition dependence into the noise. A point that
+    does carry its own fit error (source ``fit``, see `aggregate_replicates`) is
+    weighted by it, although that error leaves out what varies between
+    specimens.
 
     Returns the result and, when one applies, a note for the report.
     """

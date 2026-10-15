@@ -31,6 +31,9 @@ _ND_EXTRA_CONDITIONS = 2
 # "declared" passes the prepared prediction noise. "engine_median" passes none,
 # so the optimizer takes the median of the per-point uncertainties itself; it
 # exists only so an older pipeline can be reproduced exactly while it migrates.
+# A version 2 record refuses a result made with it whenever that median is not
+# the prepared noise the record states (a pooled spread, or more than one
+# specimen per condition, makes them differ).
 NOISE_LEVELS = ("declared", "engine_median")
 
 

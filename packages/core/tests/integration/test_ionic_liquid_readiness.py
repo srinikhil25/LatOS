@@ -203,7 +203,8 @@ def test_each_signed_value_matches_the_audit(
         assert value.uncertainty == pytest.approx(spread / math.sqrt(k), rel=1e-9)
         assert value.uncertainty_scope is UncertaintyScope.SPECIMEN
         assert detail["reduction"]["degrees_of_freedom"] == k - 1
-        assert "a lower bound" in value.provenance
+        assert "estimate of how well the cycles pin down their mean" in value.provenance
+        assert "not a complete uncertainty budget" in value.provenance
         assert "not been shown independent or exchangeable" in value.provenance
 
 
@@ -266,7 +267,7 @@ def test_the_prepared_arrays_are_the_signed_values_of_the_positive_branch(
     assert all(_LOW <= x <= _HIGH for x in prepared.x[:, 0].tolist())
     assert max(prepared.x[:, 0].tolist()) == _HIGH
 
-    # Each uncertainty is one specimen's own, labelled as the lower bound it is.
+    # Each uncertainty is one specimen's own, labelled as within-specimen only.
     assert prepared.sigma_sources == ("lower_bound_specimen",) * 4
     assert prepared.sigma is not None
     by_id = {o.sample_id: o for o in state.observation_set.observations}
@@ -297,7 +298,7 @@ def test_the_check_command_fits_nothing_and_writes_nothing(
     assert status == (1 if reasons else 0)
     assert ("NOT READY" in printed) == bool(reasons)
     for reason in reasons:
-        assert reason.startswith("what is frozen must be reproducible from a precise source") or (
+        assert reason.startswith("what is frozen must name the precise source revision") or (
             "prereg_" in reason
         ), reason
     for observation in _complete(state):

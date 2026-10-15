@@ -14,13 +14,41 @@ What the contract fixes
 The contract revision is the scientific transformation from a recording to a
 reported value. It is not the software version: the same contract can be
 re-implemented, and a new release that changes nothing below keeps the
-revision. Any change to what follows needs ``ite-trace/2``.
+revision.
+
+How the revision is governed. A documentation correction, to this text or to
+`PROTOCOL`, that changes neither the executable processing nor the accepted
+scientific interpretation of a reported value may keep ``ite-trace/1``; the
+corrected `PROTOCOL` must still describe what the code does. Any change to the
+reduction mathematics, the accepted windows, the interpretation of the
+polarity declaration, the exclusion criteria (test runs, refusals, the
+rise-and-fall rule, the gap rule) or any other processing semantics requires
+explicit review and a new protocol version, ``ite-trace/2`` or later. A
+correction that keeps the revision still changes the words of the protocol
+every record states: a record written before it shows a wording difference,
+never a different value. Explicitly approved by the researcher on 15 Oct 2026
+and kept at ``ite-trace/1``: the correction of what ``is_lower_bound`` and the
+``lower_bound_specimen`` and ``lower_bound`` labels mean. Components of the
+uncertainty are left out; the within-specimen SEM is not a rigorously
+established lower bound on the total experimental uncertainty; and from few
+cycles, such as only three, it may underestimate the underlying standard error
+it estimates. The correction changes how the reported uncertainty is read,
+which the first sentence of this rule does not cover; the revision is kept by
+that explicit approval. Any other correction of the accepted interpretation of
+a reported value keeps the revision only by such an approval, recorded here.
+The correction changes no computational semantics: no number, uncertainty,
+window, sign, exclusion or serialized identifier name. Only words change: the
+protocol's text (and with it the protocol's SHA-256 digest and the
+producer-detail digest of every row written after the correction), the
+glossary entry of the within-specimen label, and the basis written beside each
+uncertainty value. `verify` compares the first two with what a record states;
+nothing compares the basis.
 
 *The response.* ``apparent_seebeck_cycle_mv_k`` is the signed mean, over the
 accepted cycles of one specimen, of the whole-cycle least-squares slope of the
-recorded voltage against the temperature difference. `analysis.thermovoltage.
-cycles` defines the slope, the windows and the reduction, and says what the
-quantity is not.
+oriented voltage (the recorded voltage times the wiring sign; see *The sign*)
+against the temperature difference. `analysis.thermovoltage.cycles` defines the
+slope, the windows and the reduction, and says what the quantity is not.
 
 *The sign.* The wiring is declared per specimen and reaches the arithmetic
 through `analysis.thermovoltage.slope.resolve_polarity`, the same function the
@@ -29,11 +57,19 @@ the sign of its response would be a guess. No absolute value is taken anywhere
 in this module. A magnitude, if the experiment wants one, is the objective's
 business, several steps downstream.
 
-*The uncertainty.* ``apparent_seebeck_cycle_sem_mv_k`` is the standard error of
-the mean of the accepted cycles. It is a within-specimen, within-session Type A
-component and always a lower bound. With one accepted cycle, or with identical
-ones, none is reported. The least-squares standard error of a single cycle's
-slope is kept as a diagnostic and is never reported as an uncertainty.
+*The uncertainty.* ``apparent_seebeck_cycle_sem_mv_k`` is the estimated standard
+error of the mean of the accepted cycles. It is a within-specimen, within-session Type A
+component, not a complete uncertainty budget: variation between mountings and
+sessions, and the instrument, are not quantified. From three cycles it has two
+degrees of freedom and is itself uncertain; it is reported as computed, and
+PROTOCOL states how often such an estimate underestimates the standard error it
+estimates. The serialized flag ``is_lower_bound`` and the
+``lower_bound_specimen`` and ``lower_bound`` labels keep their names for
+compatibility with records already written; the within-specimen SEM is not a
+rigorously established lower bound on the total experimental uncertainty. With
+one accepted cycle, or with identical ones, none is reported. The least-squares standard error of a
+single cycle's slope is kept as a diagnostic and is never reported as an
+uncertainty.
 
 *Composition.* ``aliquat_mass_fraction`` is
 m(Aliquat 336TG) / (m(Aliquat 336TG) + m([HMIM][TFSI])), from the weighed
@@ -44,10 +80,15 @@ file name or a nominal label.
 *Cycle boundaries.* In order of trust: a declaration in the manifest; the
 logger's event marks; an estimate from the temperature trace. The estimate is a
 fallback and always warns. A declaration that replaces marks keeps both sets
-and warns with the differences. Marks that disagree with the temperature trace
-by more than `SIGNATURE_LIMIT_S` are refused, since a mark pressed at the wrong
+and warns with the differences, or with both counts when they differ. The end
+is counted with the declared times, so a declaration of every switch and the
+end, beside marks for the switches alone, warns with counts that differ by one
+and lists no difference. Marks
+that disagree with the switches seen in the temperature trace, in number or by
+more than `SIGNATURE_LIMIT_S`, are refused, since a mark pressed at the wrong
 moment moves the window; a declaration that disagrees is used as written, with
-a warning, because the person who ran it has the last word.
+a warning, because the person who ran it has the last word. PROTOCOL states
+each rule exactly.
 
 *Test cycles.* A manifest may declare that the first cycles of a recording were
 deliberate test runs. They are excluded by that declaration, not by any
@@ -71,9 +112,10 @@ stays visible and the reason travels to the frozen record. Refused: an
 unreadable or missing recording; a gap in the samples; a channel that is not in
 the file, or a unit that cannot be converted; a missing or uninterpretable
 wiring declaration; event marks that are missing, repeated, out of order or
-even in number; boundaries that leave the recording or do not increase; a cycle
-in which the temperature difference does not rise while the drive is on and
-fall while it is off; a composition that is missing, ambiguous or names an
+even in number; boundaries that leave the recording or do not increase; a
+measured cycle in which the temperature difference does not rise while the
+drive is on and fall while it is off, or does not vary at all; a composition
+that is missing, ambiguous or names an
 unknown component.
 
 A manifest that is itself malformed (an unknown key, a wrong type, a repeated
@@ -233,46 +275,119 @@ PROTOCOL: dict[str, Any] = {
         "name": APPARENT_SEEBECK,
         "unit": "mV/K",
         "per_cycle": (
-            "ordinary least-squares slope of the signed recorded voltage (mV) against the "
-            "temperature difference T_hot - T_cold (K), over every sample of one whole "
-            "cycle; free intercept; no time term; no delay correction"
+            "ordinary least-squares slope of the oriented voltage (mV) against the temperature "
+            "difference T_hot - T_cold (K), over every recorded sample in the cycle's half-open "
+            "window (see windows); the oriented voltage is the recorded voltage converted to mV "
+            "(see units) and multiplied by the wiring sign, +1 with the positive lead on the "
+            "cold electrode and -1 with it on the hot electrode (see sign); free intercept, "
+            "which is not part of the value; no time term; no delay correction"
         ),
         "per_specimen": "signed mean of the accepted cycles",
         "is": "an operational response of this drive programme, heating and cooling together",
         "is_not": "a steady-state Seebeck coefficient",
     },
     "sign": (
-        "S is the slope of V_cold - V_hot against T_hot - T_cold. With the positive lead on "
-        "the cold electrode the recorded voltage is used as it is; with it on the hot "
-        "electrode the recorded voltage is negated before fitting. A positive S means the "
-        "cold electrode is at the higher potential. No absolute value is taken."
+        "S, the per-cycle response, is the least-squares slope of V_cold - V_hot against "
+        "T_hot - T_cold over one whole cycle, with a free intercept: S = -(slope of "
+        "V_hot - V_cold against T_hot - T_cold). The recorded voltage is taken to be the "
+        "logger's reading of the positive lead minus the negative lead; that is an assumption "
+        "about the instrument, not checked by this producer. With the positive lead on the "
+        "cold electrode the recorded voltage is used as it is (sign +1); with it on the hot "
+        "electrode it is negated before fitting (sign -1). The wiring is declared per "
+        "recording, never as a default, and read from its words: the side named after the "
+        "first 'V+' when there is one, otherwise the one side it names. A recording whose "
+        "wiring is missing, names no side, or names both sides without a 'V+' is refused. A "
+        "declaration that names only the negative lead's side is read as the positive lead's "
+        "side, so the wiring must be written as the side of the positive lead. Nothing checks "
+        "the declaration against the data or the bench: an optional reversed-lead run is "
+        "checked only for whether its recorded slope has the opposite sign to the forward "
+        "run's (see reversed_lead_run), a check that uses neither declaration, so a wiring "
+        "declared the wrong way round passes it. A "
+        "positive S means V_cold - V_hot rises with "
+        "T_hot - T_cold over the cycle as a whole. S mixes the thermovoltage with whatever "
+        "part of the cell's response keeps up with the drive, and no lag is corrected, so its "
+        "sign need not be that of a steady-state thermovoltage. A constant offset goes into "
+        "the intercept, which is not part of the value. No absolute value is taken."
     ),
     "windows": (
-        "cycle k is [on_k, on_k+1); the last cycle is [on_n, end); heating branch "
-        "[on_k, off_k); cooling branch [off_k, end of the cycle)"
+        "the boundaries are on_1, off_1, ..., on_n, off_n, end: finite, strictly increasing, "
+        "odd in number and at least 3. end is the declared or marked end of the run; for "
+        "automatic boundaries it is the last recorded time when the last cycle is closed "
+        "there, or the next switch-on when a cycle is left unfinished. Cycle k is the "
+        "half-open window [on_k, on_k+1) and the last cycle is [on_n, end): a sample at a "
+        "switch belongs to exactly one cycle, and a sample at end, or before on_1, belongs to "
+        "none. Heating branch [on_k, off_k); cooling branch [off_k, end of the cycle). A "
+        "recording with a step between samples longer than sample_gap_factor times the median "
+        "interval is refused before any window is built. A window that starts before the "
+        "first sample or ends after the last, or a branch with fewer than 3 samples, refuses "
+        "the specimen, test runs included. In each measured cycle T_hot - T_cold must average "
+        "higher over the last fifth of the heating branch's samples than over its first "
+        "fifth, and lower over the last fifth of the cooling branch's samples than over its "
+        "first fifth, or the specimen is refused; a fifth of n samples is 0.2 n rounded to "
+        "the nearest whole number (halves to even), and at least 1. A measured cycle in which "
+        "T_hot - T_cold does not vary, so that no slope can be fitted, also refuses the "
+        "specimen. Declared test runs are exempt from these two rules and from no other, and "
+        "must leave at least one measured cycle"
     ),
     "boundaries": {
         "order_of_trust": [BOUNDARY_DECLARED, BOUNDARY_EVENT_MARKS, BOUNDARY_AUTOMATIC],
         "event_marks": (
-            "numbered 1, 2, 3, ... in order; odd marks are switch-ons, even marks are "
-            "switch-offs, the last mark is the end of the run"
+            "used only when no boundaries are declared. The marks are numbered 1, 2, 3, ... "
+            "in the order they occur in the recording, none missing or repeated, with "
+            "increasing times, odd in number and at least 3 (two per cycle and one for the "
+            "end). The last mark is the end of the run; of the others, odd-numbered marks are "
+            "switch-ons and even-numbered marks switch-offs. Any other set of marks refuses "
+            "the specimen, and so does a set the temperature trace contradicts (see "
+            "thermal_signature_rule). That comparison uses switch times only, so it cannot see "
+            "a hot and cold channel map given the wrong way round: on a recording that starts "
+            "with the drive on, whose first mark is then a switch-off read as a switch-on, such "
+            "a map can pass it and the rise-and-fall rule unnoticed, with the sign of the "
+            "response reversed. With no marks the automatic estimate is used"
         ),
         "declared": (
-            "a declaration replaces the marks; both sets are kept and the specimen warns "
-            "with the differences"
+            "a declaration (one switch-on and one switch-off time per cycle, and the end, in "
+            "seconds from the first sample) replaces the event marks. Any marks are kept "
+            "beside it and not checked; the specimen warns with the declared-minus-marked "
+            "difference of each time in s, paired in order with the end included, when the "
+            "counts agree, or with both counts, the end included, when they do not. Unequal "
+            "numbers of switch-on and switch-off times refuse the specimen. The declaration is "
+            "compared with the temperature trace (see thermal_signature_rule) and used as "
+            "written whatever that comparison finds"
         ),
         "automatic": (
-            "fallback only, always with a warning: a switch-on is counted when the smoothed "
-            "temperature difference climbs past the upper level and a switch-off when it "
-            "falls past the lower one; each is timed where the trace left the preceding "
-            "trough or crest; the last cycle is closed at the end of the recording"
+            "fallback only, used when there is neither a declaration nor any event mark, and "
+            "always with a warning when used. T_hot - T_cold is smoothed with a centred moving "
+            "mean; the swing is the distance between two percentiles of the smoothed trace. A "
+            "switch-on is counted when the smoothed trace reaches the lower percentile plus the "
+            "switch-on share of the swing, and a switch-off when it then falls to the lower "
+            "percentile plus the switch-off share. Each switch is timed at the latest sample, "
+            "at or before its crossing and not before the previous crossing, at which the "
+            "smoothed trace was no more than the onset share of the swing above its lowest "
+            "value since the previous crossing (switch-on), or below its highest (switch-off). "
+            "With an even number of switches the last cycle is closed at the last recorded "
+            "time; with an odd number the last switch-on closes the cycle before it and the "
+            "unfinished cycle is left out. A swing under the minimum, a first smoothed value at "
+            "or above the switch-on level, or fewer than two switches refuses the specimen. The "
+            "estimate follows T_hot - T_cold only, and no check is aimed at the channel map. A "
+            "hot and cold channel map given the wrong way round negates T_hot - T_cold: a "
+            "recording that starts at rest then starts at or above the switch-on level and is "
+            "refused by the rule above, but one that starts with the drive already on can pass "
+            "it, and the rise-and-fall rule after it, unnoticed, with the sign of the response "
+            "reversed. The values are in automatic_settings"
         ),
         "automatic_settings": dict(AUTOMATIC_SETTINGS),
         "thermal_signature_limit_s": SIGNATURE_LIMIT_S,
         "thermal_signature_rule": (
-            "event marks further than the limit from the switch seen in the temperature "
-            "trace are refused; a declaration that far off is used as written, with a "
-            "warning. The limit is provisional."
+            "only the boundaries in force are compared: the declaration if there is one, "
+            "otherwise the event marks; marks replaced by a declaration are not. Their "
+            "switches are compared in order with the switches the automatic estimate finds in "
+            "the same trace. The end of the run is not compared, but when the estimate ends on "
+            "a switch-on (a cycle left unfinished) that switch-on counts as a switch. If the "
+            "numbers of switches differ, or any switch differs by more than the limit (in s), "
+            "event marks refuse the specimen and a declaration is used as written, with a "
+            "warning. If no estimate can be made, the comparison is skipped with a warning. "
+            "Boundaries estimated automatically are not compared. The result is recorded with "
+            "the specimen. The limit is provisional."
         ),
     },
     "test_cycles": (
@@ -280,10 +395,23 @@ PROTOCOL: dict[str, Any] = {
         "declaration, not by any statistic; they are kept in this record"
     ),
     "uncertainty": {
-        "reported": "standard deviation of the accepted cycle values (k - 1) / sqrt(k)",
+        "reported": (
+            "standard error of the mean of the k accepted cycle slopes of one specimen "
+            "(signed, mV/K): s / sqrt(k), where s is their sample standard deviation (divisor "
+            "k - 1); k - 1 degrees of freedom; not reported when k = 1, or when "
+            "s <= 1e-9 x |mean| (identical cycles)"
+        ),
         "scope": "specimen",
         "evaluation": "Type A",
         "is_lower_bound": True,
+        "is_lower_bound_meaning": (
+            "a serialized flag kept under this name for compatibility. It records that "
+            "components of the uncertainty are left out (see does_not_cover). It does not "
+            "state, and nothing has established, that this standard error is a lower bound on "
+            "the total experimental uncertainty: it is one estimated component, and from only "
+            "three cycles it may underestimate the underlying standard error it estimates (see "
+            "small_sample)"
+        ),
         "covers": "repeatability of the cycles of one mounting within one session",
         "does_not_cover": (
             "a new mounting of the same mixture (dosing, contact, cloth), day-to-day "
@@ -295,6 +423,12 @@ PROTOCOL: dict[str, Any] = {
         ),
         "none_when": "one accepted cycle, or identical accepted cycles",
         "never_used": "the least-squares standard error of a single cycle's slope",
+        "small_sample": (
+            "reported as computed, with no correction. With k = 3 it has 2 degrees of freedom: "
+            "were the cycles independent normal draws with one common mean and one common "
+            "spread, it would fall below the true standard error about 63% of the time "
+            "(1 - 1/e), with a median of about 0.83 of it"
+        ),
     },
     "diagnostics_never_in_the_value": [
         "heating-branch slope",
@@ -304,9 +438,30 @@ PROTOCOL: dict[str, Any] = {
         "R squared",
     ],
     "units": (
-        "voltage is converted to mV from the unit in the recorded column header; "
-        "temperatures are read in degrees Celsius; channels are named, never assumed by "
-        "position"
+        "voltage is converted to mV from the bracketed unit in the recorded column header, "
+        "matched exactly: V, mV or uV (also written with the micro sign or the Greek mu). "
+        "That unit is trusted as the unit of the values: the logger's scaling setting is not "
+        "checked. Both temperature channels must carry the header unit °C or C and are used "
+        "as recorded, without conversion; T_hot - T_cold in °C is the same number in K. Any "
+        "other unit on the cold, hot or voltage channel refuses the recording; the other "
+        "recorded channels are not used, and their units are not checked. Times are read "
+        "from the first column, as text of "
+        "the form '<date> h:mm:ss[.f]s': a date, a space, then the time of day ending in s. "
+        "Elapsed time comes from the time of day alone; the date is compared with the row "
+        "before and never parsed. A time of day that does not advance refuses the recording "
+        "when the date is the same, and adds exactly one day when the date differs, however "
+        "many days the dates are apart. A changed date adds nothing while the time of day "
+        "advances. Elapsed time across a change of date is therefore the advance of the time "
+        "of day, plus one day only when the clock went back: rows one day apart at the same "
+        "or an earlier time of day are read exactly, and rows two or more days apart, or a day "
+        "apart with the clock further on, are read as closer than they are. Such a step is "
+        "refused as a gap only when what is read "
+        "exceeds sample_gap_factor times the median interval, and the gap reported is then "
+        "the step as read, not the true one; a step read as shorter, such as rows one day "
+        "and one sample interval apart, is not seen. Times are taken as seconds from the "
+        "first sample; a time without a "
+        "date, or any other form, refuses the recording. Channels are named, never assumed "
+        "by position"
     ),
     "composition": (
         f"{ALIQUAT_MASS_FRACTION} = m({COMPONENT_ALIQUAT}) / (m({COMPONENT_ALIQUAT}) + "
@@ -315,7 +470,15 @@ PROTOCOL: dict[str, Any] = {
     ),
     "reversed_lead_run": (
         "a second recording of the same mounting with the voltage leads swapped; analysed "
-        "as a diagnostic; never a specimen and never an observation"
+        "as a diagnostic under its own wiring declaration; never a specimen and never an "
+        "observation. The one check made is whether the mean recorded slope of its accepted "
+        "cycles (oriented slope times its declared sign) has the opposite sign to the forward "
+        "run's, with a warning when it does not; that product does not depend on either "
+        "declaration. The comparison is made only when the forward run has accepted cycles; "
+        "when the forward specimen is refused, no sign verdict is recorded and no warning "
+        "about the sign is given. The difference of the two oriented means is kept and not "
+        "tested, and the two declarations are not compared with each other or with the bench. "
+        "A reversed run that cannot be analysed warns and shows nothing about the sign"
     ),
     "sample_gap_factor": _GAP_FACTOR,
     "bench": [
@@ -323,7 +486,12 @@ PROTOCOL: dict[str, Any] = {
         "stack: plastic wrap, cotton, electrodes, glass slide",
         "dosing: drops from a disposable pipette; the delivered mass is not measured",
         "mixing: 10-15 s; homogeneity is assumed, not verified",
-        "one mounting per specimen, not remounted between cycles",
+        "campaign practice: one mounting per specimen, not remounted between cycles; "
+        "remounted_between_cycles is read per specimen, from the manifest's defaults when the "
+        "specimen does not state it, and the experiment definition's control on that "
+        "declaration decides whether the specimen is fitted; a declaration omitted from both "
+        "the specimen and the defaults does not exclude it, while an empty value refuses the "
+        "whole manifest",
         "electrode material: recorded per specimen when it is known",
     ],
 }
@@ -770,12 +938,17 @@ def _boundaries(
             "end_is_recording_end": estimate.end_is_recording_end,
             "swing_k": _rounded(estimate.swing_k),
         }
+        closing = (
+            "it takes the end of the recording as the end of the last cycle"
+            if estimate.end_is_recording_end
+            else "the last switch-on it found closes the last cycle, and the unfinished cycle "
+            "after it is left out"
+        )
         out.warnings.append(
             f"{name}: the cycle boundaries were estimated from the temperature trace, "
             "because none are declared and the recording has no event marks. This is a "
             "fallback: its thresholds were checked against one campaign's recordings only, "
-            "and it takes the end of the recording as the end of the last cycle. Declare "
-            "the boundaries in the manifest to replace it."
+            f"and {closing}. Declare the boundaries in the manifest to replace it."
         )
 
     detail["source"] = source
@@ -1055,8 +1228,11 @@ def _measured_columns(
         provenance[APPARENT_SEEBECK_SEM] = (
             f"standard deviation of the {reduction.k} accepted cycle values divided by "
             f"sqrt({reduction.k}), {reduction.dof} degrees of freedom: a within-specimen, "
-            "within-session Type A component and a lower bound; consecutive cycles have not "
-            "been shown independent or exchangeable"
+            "within-session Type A estimate of how well the cycles pin down their mean, not a "
+            "complete uncertainty budget (variation between mountings and sessions, and the "
+            "instrument, are not quantified); estimated from few cycles, it may underestimate "
+            "the underlying standard error it estimates; consecutive cycles have not been "
+            "shown independent or exchangeable"
         )
     else:
         why = (

@@ -60,7 +60,9 @@ def test_a_specimen_scope_uncertainty_is_a_labelled_lower_bound() -> None:
     (condition,) = result.reduced
     assert condition.sigma == 0.01
     assert condition.sigma_source == SIGMA_LOWER_BOUND
-    assert "lower bound" in SIGMA_GLOSSARY[SIGMA_LOWER_BOUND]
+    meaning = SIGMA_GLOSSARY[SIGMA_LOWER_BOUND]
+    assert "Specimen-to-specimen variation is not in it" in meaning
+    assert "not a complete uncertainty budget" in meaning
 
 
 def test_a_condition_scope_uncertainty_is_labelled_as_declared() -> None:

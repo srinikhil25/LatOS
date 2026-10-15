@@ -40,19 +40,23 @@ from latos.experiments.definition import (
 )
 from latos.experiments.identity import definition_sha256
 from latos.experiments.observations import ObservationSet, ReducedObservation
+from latos.experiments.reduce import SIGMA_LOWER_BOUND, SIGMA_UNDETERMINED
 from latos.experiments.validation import UnsupportedDesignSpace
 
 __all__ = [
     "AGGREGATION_IDENTITY",
     "AGGREGATION_MAGNITUDE",
     "AGGREGATION_TARGET",
+    "PREDICTION_NOISE_DECLARED",
     "PREDICTION_NOISE_ENGINE_MEDIAN",
     "PREDICTION_NOISE_GLOSSARY",
     "PREDICTION_NOISE_LOWER_BOUND",
     "PREDICTION_NOISE_NOT_PASSED",
+    "PREDICTION_NOISE_PARTLY_ASSUMED",
     "PREDICTION_NOISE_POOLED",
     "PREDICTION_NOISE_UNDETERMINED",
     "PreparedOptimization",
+    "noise_source_from_sigma",
     "prepare_optimization",
     "project",
     "require_continuous_design",
@@ -64,34 +68,63 @@ AGGREGATION_TARGET = "target_distance"
 
 PREDICTION_NOISE_POOLED = "pooled_condition"
 PREDICTION_NOISE_LOWER_BOUND = "lower_bound"
+PREDICTION_NOISE_PARTLY_ASSUMED = "lower_bound_partly_assumed"
+PREDICTION_NOISE_DECLARED = "declared_condition"
 PREDICTION_NOISE_UNDETERMINED = "undetermined"
 PREDICTION_NOISE_NOT_PASSED = "not_passed_degenerate"
 PREDICTION_NOISE_ENGINE_MEDIAN = "engine_median"
 
 PREDICTION_NOISE_GLOSSARY: Mapping[str, str] = {
     PREDICTION_NOISE_POOLED: (
-        "The pooled specimen-to-specimen standard deviation, divided by the square root of "
-        "the declared number of specimens per condition."
+        "Estimated from measured observations: between-specimen variability, as the pooled "
+        "specimen-to-specimen standard deviation, divided by the square root of the declared "
+        "number of specimens per condition. Sources that do not vary between the specimens "
+        "pooled, such as a shared systematic error, are not in it, and the coverage of an "
+        "interval built on it has not been established."
     ),
     PREDICTION_NOISE_LOWER_BOUND: (
-        "The median of the per-condition uncertainties handed to the optimizer (a condition "
-        "without one is given the largest known), divided by the square root of the declared "
-        "number of specimens per condition. No pooled specimen-to-specimen spread is "
-        "available, and a within-specimen uncertainty leaves that variation out, so the "
-        "predictive interval is too narrow by an amount that cannot be known until a "
-        "condition is replicated."
+        "Estimated from measured observations, but from within-specimen variation only: the "
+        "median of the per-condition uncertainties handed to the optimizer, every one of "
+        "them estimated from measurements, divided by the square root of the declared number "
+        "of specimens per condition. No pooled specimen-to-specimen spread is available. "
+        "Variation between specimens, and other sources of experimental uncertainty, are not "
+        "quantified in it, so it is not a complete uncertainty budget, and the predictive "
+        "interval may understate how far a new specimen falls from the prediction. By how "
+        "much cannot be known until a condition is replicated, and the coverage of that "
+        "interval has not been established. The label keeps the name lower_bound for "
+        "compatibility; this noise is not a rigorously established lower bound on the total "
+        "experimental uncertainty."
+    ),
+    PREDICTION_NOISE_PARTLY_ASSUMED: (
+        "Partly assumed: the median of the per-condition uncertainties handed to the "
+        "optimizer, divided by the square root of the declared number of specimens per "
+        "condition, where at least one condition had no uncertainty and was given the "
+        "largest one known. That substitute is an assumption, not a measurement; the others "
+        "are the conditions' own uncertainties, each as its label in the sigma glossary "
+        "says. No pooled specimen-to-specimen spread is available, so it is not a complete "
+        "uncertainty budget."
+    ),
+    PREDICTION_NOISE_DECLARED: (
+        "Declared, not estimated here: the median of the per-condition uncertainties handed "
+        "to the optimizer, divided by the square root of the declared number of specimens "
+        "per condition, where every condition had an uncertainty of its own and at least one "
+        "is a condition-scope uncertainty declared by the producer. A condition-scope "
+        "uncertainty is meant to include specimen-to-specimen variation; Latos did not "
+        "estimate it from these observations, so whether it was measured, and what it "
+        "covers, is the producer's statement. No pooled specimen-to-specimen spread is "
+        "available from replicates here."
     ),
     PREDICTION_NOISE_UNDETERMINED: (
-        "No uncertainty was known for any condition. Each was given the spread of the "
-        "conditions' own values (or 1 response unit if they are all equal), and the median "
-        "of those, divided by the square root of the declared number of specimens per "
-        "condition, was used. That spread includes real differences between conditions, so "
-        "this is an assumption about the noise, not a measurement of it."
+        "Assumed, not estimated from measurements: no uncertainty was known for any "
+        "condition. Each was given the spread of the conditions' own values (or 1 response "
+        "unit if they are all equal), and the median of those, divided by the square root of "
+        "the declared number of specimens per condition, was used. That spread includes real "
+        "differences between conditions."
     ),
     PREDICTION_NOISE_NOT_PASSED: (
-        "The median uncertainty was vanishingly small (below 1e-6 of the mean magnitude of "
-        "the values), or none was positive, so none was passed and the optimizer's own "
-        "relative assumption applies."
+        "None passed: the median uncertainty was vanishingly small (below 1e-6 of the mean "
+        "magnitude of the values), or none was positive, so the optimizer's own assumed "
+        "relative noise applies."
     ),
     PREDICTION_NOISE_ENGINE_MEDIAN: (
         "Not passed; the optimizer took the median of the per-point uncertainties itself."
@@ -317,9 +350,26 @@ def _prediction_noise(
     if observation_set.pooled_sd is not None:
         return observation_set.pooled_sd / root_m, PREDICTION_NOISE_POOLED
     median = float(np.median(sigma)) / root_m
-    if any(c.sigma is not None for c in observation_set.reduced):
-        return median, PREDICTION_NOISE_LOWER_BOUND
-    return median, PREDICTION_NOISE_UNDETERMINED
+    return median, noise_source_from_sigma([c.sigma_source for c in observation_set.reduced])
+
+
+def noise_source_from_sigma(labels: Sequence[str]) -> str:
+    """What an unpooled prediction noise rests on, from the label of each condition's sigma.
+
+    Args:
+        labels: The reducer's label for each condition's sigma. A condition
+            labelled undetermined had none and is given a substitute, which is
+            assumed. Within-specimen uncertainties are estimated from
+            measurements; a condition-scope one is declared by the producer.
+    """
+    missing = [label == SIGMA_UNDETERMINED for label in labels]
+    if not labels or all(missing):
+        return PREDICTION_NOISE_UNDETERMINED
+    if any(missing):
+        return PREDICTION_NOISE_PARTLY_ASSUMED
+    if all(label == SIGMA_LOWER_BOUND for label in labels):
+        return PREDICTION_NOISE_LOWER_BOUND
+    return PREDICTION_NOISE_DECLARED
 
 
 def _where(conditions: Sequence[ReducedObservation], names: Sequence[str]) -> str:

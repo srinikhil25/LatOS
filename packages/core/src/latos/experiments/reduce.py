@@ -18,7 +18,7 @@ first row below that applies:
 3. no pooled spread; made once; the producer declared a CONDITION-scope
    uncertainty: that value;
 4. no pooled spread; made once; the producer declared a SPECIMEN-scope
-   uncertainty: that value, labelled a lower bound;
+   uncertainty: that value, labelled as within-specimen only;
 5. anything else: no estimate.
 
 A within-specimen uncertainty is never added to the between-specimen spread.
@@ -71,25 +71,47 @@ SIGMA_DECLARED = "declared_condition"
 SIGMA_LOWER_BOUND = "lower_bound_specimen"
 SIGMA_UNDETERMINED = "undetermined"
 
+# Each label says which of four kinds of uncertainty a condition's sigma is:
+# between-specimen variability estimated from replicates here, within-specimen
+# variability only, an uncertainty the producer declared, or an assumption. None
+# of them claims a complete uncertainty budget or an established interval
+# coverage; what each leaves out is said in its own words.
 SIGMA_GLOSSARY: Mapping[str, str] = {
     SIGMA_EMPIRICAL: (
-        "The pooled specimen-to-specimen standard deviation divided by the square root of "
-        "the number of specimens at this condition. A condition-scope uncertainty."
+        "Between-specimen variability, estimated independently from replicated specimens: "
+        "the pooled specimen-to-specimen standard deviation divided by the square root of "
+        "the number of specimens at this condition. A condition-scope uncertainty. Errors "
+        "shared by every specimen, such as a common calibration error, are not in it."
     ),
     SIGMA_POOLED: (
-        "The pooled specimen-to-specimen standard deviation, measured at other conditions "
-        "and applied to this one, which was made once. A condition-scope uncertainty."
+        "Between-specimen variability, estimated independently from specimens replicated at "
+        "other conditions and applied to this one, which was made once: the pooled "
+        "specimen-to-specimen standard deviation. A condition-scope uncertainty. That the "
+        "same spread applies here is an assumption, and errors shared by every specimen are "
+        "not in it."
     ),
     SIGMA_DECLARED: (
-        "A condition-scope uncertainty declared by the producer for a condition made once."
+        "Declared, not estimated here: a condition-scope uncertainty the producer states for "
+        "a condition made once. What it covers, and whether it was measured, rest on the "
+        "producer's statement."
     ),
     SIGMA_LOWER_BOUND: (
-        "A within-specimen uncertainty of the one specimen at this condition. It leaves out "
-        "specimen-to-specimen variation, so it is a lower bound on the condition's uncertainty."
+        "Within-specimen variability only: an uncertainty of the one specimen at this "
+        "condition, estimated from repeated or fitted measurements made on that specimen. "
+        "Specimen-to-specimen variation is not in it and is not quantified here, so it is one "
+        "component of the condition's uncertainty, not a complete uncertainty budget. The "
+        "label keeps the serialized name lower_bound_specimen for compatibility with records "
+        "already written. That name reflects that components of the uncertainty are left "
+        "out; it is not a rigorously established lower bound on the total experimental "
+        "uncertainty. It is itself an estimate: from few measurements, such as only three "
+        "cycles (two degrees of freedom), it may underestimate the underlying standard error "
+        "it estimates."
     ),
     SIGMA_UNDETERMINED: (
-        "No estimate exists for this condition. A substitute was used so the surrogate could "
-        "be fitted; it is an assumption, not a measurement."
+        "Assumed: no estimate exists for this condition. A substitute was used so the "
+        "surrogate could be fitted (the largest uncertainty known at another condition, or "
+        "when none is known the spread of the conditions' values); it is an assumption, not "
+        "a measurement."
     ),
 }
 
